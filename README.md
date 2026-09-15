@@ -12,8 +12,8 @@ own PlayOnline install on a PlayStation 2 hard disk; see below.
 
 ## What it does today
 
-Worked out and played on a private deployment with an emulated console. On
-this stack, a console can:
+Tested on a private deployment with an emulated console. On this stack a
+console can:
 
 - log in through the core, resolve `kel-1001.pol.com` and enter the online
   lobby;
@@ -31,9 +31,9 @@ What it does not do: the online story zones (the Kerberos event stages) are
 not on the retail disc sets we have seen; the "online events" data the game
 asks for is missing from the US build entirely and from the JP build past
 what the lobby needs. Player trade is relayed but the client-side flow has
-only been seen from one side. Several answers are the private deployment's
-working values rather than a decoded truth (see `docker-compose.yml` and the
-comments in `tools/docudp.py`).
+only been seen from one side. Several replies carry values that were found
+to work on the private deployment before their meaning was decoded;
+`docker-compose.yml` and the comments in `tools/docudp.py` say which.
 
 ## How it fits the core
 
@@ -68,8 +68,8 @@ handed to the game inside the protocol. The core's DNS answers
 the console beyond the DNS/hosts redirection already done for the core.
 
 Every flag the service runs with is listed in `docker-compose.yml`, with a
-comment where one is a working value rather than a decoded one;
-`python tools/docudp.py --help` documents them all.
+comment where its value is a working guess; `python tools/docudp.py --help`
+documents them all.
 
 ## The lobby NPCs
 
@@ -94,8 +94,8 @@ shop, rankings, units, gear and trade. Nothing opens a socket.
 
 ## What is not included, and why
 
-- No game data. The NPC placement table (above) is the one input the server
-  would like and does not carry.
+- No game data. The NPC placement table (above) is the only game-data
+  input the server reads, and it is not included.
 - No carved client code. The game enciphers each datagram's inner header
   with Twofish under two compile-time keys; `tools/doc_kelcrypt.py` is a
   clean-room implementation of standard Twofish from the published
