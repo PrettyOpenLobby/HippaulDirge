@@ -1,0 +1,85 @@
+# Dirge of Cerberus (the 2006 PlayStation 2 online mode) for the OpenLobby
+# core. Requires the core lobby stack (openlobby) running on the same Docker
+# host: this compose joins its data volume (read-only, for the account and
+# session tables that name the player at each console) and its logs volume
+# (where the character, career, shop, unit and ranking stores live, and where
+# the core's lobby reads the character name and rank for the member profile).
+#
+#   cp .env.example .env      # set POL_ADVERTISE to your server's LAN/VPN IP
+#   docker compose up -d --build
+#
+# The console reaches this service by name: the core's DNS answers
+# kel-1001.pol.com with the advertised address, and the game dials UDP 55040.
+
+volumes:
+  pol-data:
+    external: true
+    name: openlobby_pol-data
+  pol-logs:
+    external: true
+    name: openlobby_pol-logs
+
+services:
+  doc:
+    image: crystaldirge:latest
+    build: .
+    pull_policy: build
+    restart: unless-stopped
+    ports:
+      - "55040:55040/udp"
+    volumes:
+      - pol-data:/data:ro
+      - pol-logs:/logs
+    # The argument set below is the one the private deployment runs; each
+    # flag is documented in docudp.py --help. The addresses are the advertised
+    # host; the stores are files under /logs.
+    command:
+      - "--mode=subtype"
+      - "--subtype=4"
+      - "--frag3"
+      - "--frag3-servers=${POL_ADVERTISE:-127.0.0.1}:55040"
+      - "--lobby-ip=${POL_ADVERTISE:-127.0.0.1}"
+      - "--lobby-probe=advance"
+      # optional allowlist of console addresses (comma-separated); empty
+      # answers whoever asks, each address as its own session
+      - "--peer=${POL_DOC_PEER:-}"
+      - "--lobby-keepalive-ms=12000"
+      - "--lobby-chara-count=4"
+      - "--lobby-chara-used"
+      - "--lobby-chara-name=${POL_DOC_CHARA_NAME:-Quarry}"
+      - "--lobby-chara-allow=16"
+      # persistent per-player characters, keyed by the core member signed in
+      # at the console's address (the login service's session table)
+      - "--chara-store=/logs/doc-characters.json"
+      - "--accounts-db=/data/accounts.db"
+      - "--self-costume-auto"
+      - "--self-costume-file=/logs/doc-self-costume.txt"
+      - "--lobby-spawn=east"
+      - "--user-list"
+      - "--battletable-probe"
+      - "--pending-ack-after=13,17,27"
+      - "--short-ladder=22"
+      - "--gs-fake-teammates=2"
+      - "--bt-no-onfly-reserve"
+      - "--reliable-ack-ingame"
+      - "--gs-connect"
+      - "--gs-connect-selectors=104"
+      - "--gs-connect-id=65535"
+      - "--user-zone=65535"
+      - "--user-list-sweep=32"
+      - "--user-list-selector=19"
+      - "--peer-push"
+      - "--user-costume=0x1012"
+      - "--world-self-charaid"
+      - "--bt-start-ready"
+      - "--peer-answer"
+      # relay the other consoles' avatars into each session (raw, wu, off)
+      - "--peer-relay=${POL_DOC_PEER_RELAY:-raw}"
+      # the lobby NPC placement push; needs tools/doc_npc_table.json (README)
+      - "--npc-spawn=${POL_DOC_NPC_SPAWN:-off}"
+      - "--npc-spawn-only=${POL_DOC_NPC_SPAWN_ONLY:-}"
+      - "--npc-arena=${POL_DOC_NPC_ARENA:-off}"
+      - "--rankings=/logs/doc-rankings.json"
+      - "--shop=/logs/doc-shop.json"
+      - "--units=/logs/doc-units.json"
+      - "--stats=/logs/doc-stats.json"
