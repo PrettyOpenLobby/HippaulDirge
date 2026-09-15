@@ -26,8 +26,8 @@ client's own routine matches this module byte for byte on random packets in
 every mode and length the wire uses (checked on the private deployment,
 2026-09-15).
 
-Pure Python and unhurried (a few thousand blocks a second), which is more than
-the world channel ever carries.
+Pure Python, a few thousand blocks a second; the world channel carries far
+less than that.
 
     python doc_kelcrypt.py --selftest
     python doc_kelcrypt.py <datagram.bin> ...     # decode captured packets
@@ -211,7 +211,7 @@ def _blocks(pkt):
 
 # --- the datagram-level API (what docudp.py calls) ---------------------------
 def available(path=None):
-    """Always true: the cipher is code, not a carved blob."""
+    """Always true; kept for the callers that checked for the old blob."""
     return True
 
 
