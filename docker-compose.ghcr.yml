@@ -1,0 +1,15 @@
+# Run the published images instead of building. Apply ON TOP of
+# docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# (or COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml in .env, then
+# plain `docker compose up -d`). Needs Docker Compose 2.24 or newer (the
+# `!reset` that drops the build step).
+
+services:
+  doc:
+    image: ghcr.io/prettyopenlobby/crystaldirge:${CRYSTALDIRGE_TAG:-latest}
+    pull_policy: missing
+    build: !reset null

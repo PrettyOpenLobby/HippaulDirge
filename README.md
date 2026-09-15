@@ -62,6 +62,13 @@ cp .env.example .env        # set POL_ADVERTISE to your server's LAN/VPN IP
 docker compose up -d --build
 ```
 
+Without building, from the image published to
+`ghcr.io/prettyopenlobby/crystaldirge` on every push:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+```
+
 `POL_ADVERTISE` must be the address the console reaches this host on; it is
 handed to the game inside the protocol. The core's DNS answers
 `kel-1001.pol.com` with the same address. Nothing needs to be configured on
