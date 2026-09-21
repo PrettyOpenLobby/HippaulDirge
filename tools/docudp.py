@@ -72,6 +72,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ipaddress as _ipaddress
+
 import doc_charastore
 import doc_playtime
 import doc_npc
@@ -2261,6 +2263,79 @@ BT_VERB_REQS = (BT_REQ_CREATE, BT_REQ_CONFIG, BT_REQ_UPDATE, BT_REQ_RESERVE,
 BT_JOIN_REQS = (BT_REQ_JOIN, BT_REQ_JOIN_PW)
 BT_OFF_GS_IP = 12          # u32, bytes in address order -> 0x00bc0320 a1
 BT_OFF_GS_PORT = 20        # u16 big-endian              -> 0x00bc0320 a2
+
+
+# ---- the address a client is handed, chosen per client ---------------------
+# --lobby-ip / --frag3-servers / the game-server endpoint were ONE address for
+# every player. With the edge VPS (deploy/edge/README.md) there are three kinds
+# of player and each can reach only one of our addresses: LAN, tailnet, or the
+# VPS. Same rule as services/srvcore.advertise_for and services/fmo.host_for,
+# kept local because the doc container mounts /tools only:
+#
+#   0. POL_ADVERTISE_PUBLIC, when set, for a peer with a GLOBAL address. The VPS
+#      forwards with the source intact, so a global peer came through it.
+#   1. POL_ADVERTISE_LAN, when set, for an RFC1918 peer.
+#   2. otherwise, configured address off the LAN and peer RFC1918: the local
+#      address the kernel would use to reach that peer.
+#   3. otherwise the configured address, exactly as before.
+_RFC1918_NETS = tuple(_ipaddress.ip_network(n) for n in
+                      ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))  # generic RFC1918 example; polcheck: allow
+
+
+def _ip_or_none(text):
+    try:
+        a = _ipaddress.ip_address(text)
+    except (ValueError, TypeError):
+        return None
+    return getattr(a, "ipv4_mapped", None) or a
+
+
+def _is_rfc1918(a):
+    return a is not None and any(a in n for n in _RFC1918_NETS)
+
+
+def host_for(default, peer_ip):
+    """The host to write into a packet for the client at `peer_ip`. Never
+    raises; an empty/None `default` stays empty (the caller's "no address")."""
+    peer = _ip_or_none(peer_ip)
+    if not default or peer is None or peer.is_loopback:
+        return default
+    public_ip = (os.environ.get("POL_ADVERTISE_PUBLIC") or "").strip()
+    if public_ip and peer.is_global:
+        return public_ip
+    if _is_rfc1918(peer):
+        lan_ip = (os.environ.get("POL_ADVERTISE_LAN") or "").strip()
+        if lan_ip:
+            return lan_ip
+        if not _is_rfc1918(_ip_or_none(default)):
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    probe.connect((str(peer), 9))
+                    src = probe.getsockname()[0]
+                finally:
+                    probe.close()
+            except OSError:
+                return default
+            if _is_rfc1918(_ip_or_none(src)):
+                return src
+    return default
+
+
+def rec_for(rec, default_gs_ip, peer_ip):
+    """A battle-table record as THIS recipient must see it. The store stamps one
+    game-server address into every record (BattletableStore._stamp); a table can
+    seat a LAN console and an internet player together, so the address is
+    rewritten per recipient on the way out. Returns `rec` untouched when there
+    is nothing to change."""
+    if rec is None or not default_gs_ip:
+        return rec
+    ip = host_for(default_gs_ip, peer_ip)
+    if ip == default_gs_ip or len(rec) < BT_OFF_GS_IP + 4:
+        return rec
+    out = bytearray(rec)
+    out[BT_OFF_GS_IP:BT_OFF_GS_IP + 4] = bytes(int(x) for x in ip.split("."))
+    return type(rec)(out) if isinstance(rec, bytes) else out
 BT_REQ_REC_OFF = 12        # where 0x00bd1688 / 0x00bd1808 put the record
 BT_MEMBERS_OFF = 132       # u32 member ids in a selector-27 answer (a3+156)
 BT_MAX_MEMBERS = 32        # 0x00bcb740 clamps the count here
@@ -5128,7 +5203,8 @@ def main():
         if a.gs_ready_roster:
             _rd = gs_ready_roster(_rd, _cid, a.gs_connect_id,
                                   bt_store.members(key),
-                                  rec=bt_store.record(key))
+                                  rec=rec_for(bt_store.record(key),
+                                              _gs_endpoint, msess.ka_src[0]))
         s.sendto(_rd, msess.ka_src)
         msess.gs_join_deadline[0] = 0.0
         msess.gs_bots_sent[0] = False
@@ -5703,8 +5779,9 @@ def main():
             ka = build_lobby_advance(
                 sess.ka_template,
                 selector=a.lobby_sustain_selector or a.lobby_selector,
-                seq=a.lobby_seq, inner_ip=a.lobby_ip, empty_records=True,
-                **sess.chara_kw)
+                seq=a.lobby_seq,
+                inner_ip=host_for(a.lobby_ip, sess.ka_src[0]),
+                empty_records=True, **sess.chara_kw)
             s.sendto(bytes(ka), sess.ka_src)
             sess.ka_sent += 1
             # The ladder extras ride the KEEPALIVE, not just the inbound path.
@@ -5718,7 +5795,8 @@ def main():
             for sel in extra_selectors:
                 ex = build_lobby_advance(
                     sess.ka_template, selector=sel, seq=a.lobby_seq,
-                    inner_ip=a.lobby_ip, empty_records=True)
+                    inner_ip=host_for(a.lobby_ip, sess.ka_src[0]),
+                    empty_records=True)
                 if ex is not None:
                     s.sendto(ex, sess.ka_src)
             kts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -5973,6 +6051,10 @@ def main():
                     fire_keepalives(_sess, _t)
                 continue
         data, src = s.recvfrom(65535)
+        # The addresses THIS sender can reach (host_for): every reply below that
+        # carries one uses these, not a.lobby_ip / _gs_endpoint directly.
+        _lip = host_for(a.lobby_ip, src[0])
+        _gsip = host_for(_gs_endpoint, src[0])
         _bt_echo_key = None  # sec 4fl: JOIN-ok reservation echo target
         n += 1
         # sec 4fq: --peer is an ALLOWLIST now. A source not on it gets no session
@@ -6415,7 +6497,7 @@ def main():
             # reaches the SAME writer 0x00bca938 with no gate.
             if a.gs_connect and not gs_done[0]:
                 gs_done[0] = True
-                _ep = a.gs_connect_ip or a.lobby_ip
+                _ep = host_for(a.gs_connect_ip or a.lobby_ip, src[0])
                 # KEY: sec 4df: THESE TWO ARE DIFFERENT THINGS AND WERE WELDED
                 # TOGETHER. 104 writes the game-server ENDPOINT -- that is what
                 # the item/stat manager needs, and without it the HP bar and item
@@ -6705,7 +6787,8 @@ def main():
                 # tables -- the handler's own completion test 0 == 0 passes, so
                 # the screen is simply empty and nothing looks wrong.
                 bl = build_battletable_list(
-                    data, bt_tables, seq=a.lobby_seq,
+                    data, [rec_for(_r, _gs_endpoint, src[0])
+                           for _r in bt_tables], seq=a.lobby_seq,
                     subchannel=(a.world_subchannel
                                 if a.world_subchannel >= 0 else 7),
                     ptype=a.world_type, ident=_ident)
@@ -7349,7 +7432,7 @@ def main():
                           or (a.peer_answer and _miss is not None)) else build_world_answer(
                 data, selector=_sel, seq=a.lobby_seq,
                 subchannel=(a.world_subchannel if a.world_subchannel >= 0 else 7),
-                inner_ip=a.lobby_ip, ptype=a.world_type, pad_to=a.world_pad,
+                inner_ip=_lip, ptype=a.world_type, pad_to=a.world_pad,
                 ident=_ident, result=_result, cmd_arg=_cmd_arg,
                 # WARNING:KEY: sec 4dw: ONLY on the endpoint rungs, and NEVER empty.
                 # WARNING: Two reasons this is keyed on the selector rather than just
@@ -7362,7 +7445,7 @@ def main():
                 #     rung nobody had ever reached, so nobody noticed.
                 # The default is the --gs-connect endpoint, so the two paths
                 # that write the same sockaddr cannot disagree.
-                gs_ip=(_gs_endpoint if _sel in GS_ENDPOINT_SELECTORS else None),
+                gs_ip=(_gsip if _sel in GS_ENDPOINT_SELECTORS else None),
                 gs_port=(a.world_gs_port or a.gs_connect_port),
                 gs_id=a.gs_connect_id,
                 spawn=_spawn, self_probe=a.self_costume_probe,
@@ -7520,7 +7603,7 @@ def main():
                         _rd = gs_ready_roster(
                             _rd, _me38, a.gs_connect_id,
                             bt_store.members(_tk) if _tk else (),
-                            rec=_rec38)
+                            rec=rec_for(_rec38, _gs_endpoint, src[0]))
                     if _rd is not None:
                         s.sendto(_rd, src)
                         # sec 4fn: a fresh briefing room -> the once-per-38 state
@@ -7598,7 +7681,7 @@ def main():
                         data, selector=a.pending_ack_selector, seq=a.lobby_seq,
                         subchannel=(a.world_subchannel
                                     if a.world_subchannel >= 0 else 7),
-                        inner_ip=a.lobby_ip, ptype=a.world_type,
+                        inner_ip=_lip, ptype=a.world_type,
                         pad_to=a.world_pad, ident=_ident)
                     if pa is not None:
                         s.sendto(pa, src)
@@ -7627,7 +7710,7 @@ def main():
         if (a.delete_answer and sess.ka_template is not None
                 and len(data) >= BODY_OFF + 2 and data[BODY_OFF + 1] == 17):
             dl = build_lobby_advance(sess.ka_template, selector=18, seq=a.lobby_seq,
-                                     inner_ip=a.lobby_ip, empty_records=True)
+                                     inner_ip=_lip, empty_records=True)
             if dl is not None:
                 for _i in range(max(1, a.charamake_burst)):
                     s.sendto(dl, src)
@@ -7676,10 +7759,10 @@ def main():
                             chr_code=a.chara_chrcode)
             if _new_rec is not None:
                 cm = build_charamake_answer(sess.ka_template, data, _new_rec,
-                                            seq=a.lobby_seq, inner_ip=a.lobby_ip)
+                                            seq=a.lobby_seq, inner_ip=_lip)
             else:
                 cm = build_lobby_advance(sess.ka_template, selector=16,
-                                         seq=a.lobby_seq, inner_ip=a.lobby_ip,
+                                         seq=a.lobby_seq, inner_ip=_lip,
                                          empty_records=True)
             if cm is not None:
                 for _i in range(max(1, a.charamake_burst)):
@@ -7715,7 +7798,7 @@ def main():
                 # or silence) leaves the nest at 4 forever and phase 110 never
                 # advances -- that is CER-48103, sec 4ay.
                 reply = build_lobby_advance(
-                    data, selector=4, seq=a.lobby_seq, inner_ip=a.lobby_ip,
+                    data, selector=4, seq=a.lobby_seq, inner_ip=_lip,
                     empty_records=True)
                 note = "CLOSE ack sel=4 (answers the client selector-3 close request)"
             elif a.lobby_probe == "advance":
@@ -7740,15 +7823,15 @@ def main():
                     if a.lobby_sustain_selector:
                         reply = build_lobby_advance(
                             data, selector=a.lobby_sustain_selector,
-                            seq=a.lobby_seq, inner_ip=a.lobby_ip, empty_records=True,
+                            seq=a.lobby_seq, inner_ip=_lip, empty_records=True,
                             **sess.chara_kw)
                         if a.lobby_sel2_count != 0:
                             extra_reply = build_lobby_advance(
                                 data, selector=a.lobby_selector,
-                                seq=a.lobby_seq, inner_ip=a.lobby_ip)
+                                seq=a.lobby_seq, inner_ip=_lip)
                     else:
                         reply = build_lobby_advance(data, selector=a.lobby_selector,
-                                                    seq=a.lobby_seq, inner_ip=a.lobby_ip)
+                                                    seq=a.lobby_seq, inner_ip=_lip)
                     note = ("advance sel=%d" % (a.lobby_sustain_selector or a.lobby_selector)
                             + (" +sel2" if extra_reply else ""))
                 elif sess.chara_kw and len(data) == 36 and data[BODY_OFF + 1] == 7:
@@ -7764,7 +7847,7 @@ def main():
                     # an offline run of the client's own code (doc_code8_wire_proof)), so repeating it costs nothing.
                     reply = build_lobby_advance(
                         data, selector=(a.lobby_sustain_selector or 8),
-                        seq=a.lobby_seq, inner_ip=a.lobby_ip, **sess.chara_kw)
+                        seq=a.lobby_seq, inner_ip=_lip, **sess.chara_kw)
                     if a.chara_on_request:
                         # MEASURED (savestate 15:41:32, inside the held window):
                         # [nest+8]=2 with the armed HIGH bit CLEAR is the code-8
@@ -7817,7 +7900,7 @@ def main():
                     # no-op on the client decrypt path, so no cipher is needed here.
                     reply = build_lobby_advance(
                         data, selector=(a.lobby_sustain_selector or 8),
-                        seq=a.lobby_seq, inner_ip=a.lobby_ip, **sess.chara_kw)
+                        seq=a.lobby_seq, inner_ip=_lip, **sess.chara_kw)
                     note = ("CHARA code-8 to 36-B mode-2 (count=%d)"
                             % sess.chara_kw.get("chara_count", 0))
                 else:
@@ -7836,7 +7919,7 @@ def main():
         else:
             reply = build_reply(data, a.mode, a.subtype, a.crypto, a.body_len,
                                 a.mode_byte, not a.no_cksum, a.ptype, a.flags,
-                                a.lobby_ip, a.lobby_port)
+                                _lip, a.lobby_port)
         # Reliable-ACK sweep: cancel the framework's retransmit of its pending
         # message (sec 4ae).  The client's seq is encrypted, so sweep [lo,hi].
         if a.reliable_ack_lo >= 0 and a.lobby_probe != "off" and is_lobby(data):
@@ -7924,7 +8007,7 @@ def main():
                     continue
                 f = x.split(":")
                 entries += build_srv_entry(
-                    f[0], int(f[1]),
+                    host_for(f[0], src[0]), int(f[1]),
                     id0=int(f[2], 0) if len(f) > 2 and f[2] else a.frag3_server_id,
                     tail=(int(f[3], 0) if len(f) > 3 and f[3]
                           else _online))                      # sec 4fz
@@ -7953,7 +8036,7 @@ def main():
             for st in extra_subtypes:
                 ex = build_reply(data, a.mode, st, a.crypto, a.body_len,
                                  a.mode_byte, not a.no_cksum, a.ptype, a.flags,
-                                 a.lobby_ip, a.lobby_port)
+                                 _lip, a.lobby_port)
                 if ex is not None:
                     s.sendto(ex, src)
                     print("  SENT %d bytes (extra subtype %d) to %s:%d"
@@ -7966,7 +8049,7 @@ def main():
         if extra_selectors and a.lobby_probe == "advance" and is_lobby(data):
             for sel in extra_selectors:
                 ex = build_lobby_advance(
-                    data, selector=sel, seq=a.lobby_seq, inner_ip=a.lobby_ip,
+                    data, selector=sel, seq=a.lobby_seq, inner_ip=_lip,
                     empty_records=True)
                 if ex is not None:
                     s.sendto(ex, src)
