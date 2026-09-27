@@ -2750,11 +2750,9 @@ BT_REFUSE_RP = -7
 
 def rp_allowed(rec, rp):
     """(ok, why): may a character holding `rp` rank points sit at the table
-    whose record is `rec`? SOURCED, January: dcff7.info other/multi.shtml
-    (report dated 1/31, Wayback 20060206085220): graduates join tables with
-    the RP capped ("RPの上限を制限することによって、ほぼ初級者だけでの対戦"),
-    and "RP制限などの設定はゲームルールで行います" -- the limit is the table's
-    own rule. The record's Maximum RP (wire+60, flags 0x00080000) and Minimum
+    whose record is `rec`? source: January 2006 player guide, multiplayer
+    page: a table can cap rank points so that mostly beginners meet, and the
+    limit is set in the table's own game rules. The record's Maximum RP (wire+60, flags 0x00080000) and Minimum
     RP (wire+64, flags 0x00100000), both inclusive (OURS: the client's
     labels "Above %d RP" / "Below %d RP" do not say)."""
     if rec is None or rp is None or len(rec) < BT_OFF_MIN_RP + 4:
@@ -4995,10 +4993,10 @@ def capsule_hold_done(room, now):
     return True
 
 
-# 2026-09-26: TEAM BASE OCCUPATION. January Additional Manual: "相手チームの
-# 拠点を破壊し、一定時間占拠したチーム側の勝利" (destroy the enemy base and
-# occupy it for a set time); DGD-1st exam page (ameblo 2006-04-03): after the
-# base falls, "invade" = step on where the base stood. The radius and the time
+# 2026-09-26: TEAM BASE OCCUPATION. SE's January Additional Manual: the team
+# that destroys the enemy base and then holds it for a set time wins. After
+# the base falls, holding it means standing where the base stood (source:
+# April 2006 player blog, the DG Drone 1st exam). The radius and the time
 # are OURS (no source prints them; the bzd base gimmick carries no trigger
 # radius we have decoded). No client HUD for the hold was found: group 55 has
 # only "%s's base has been destroyed!" and the result line "%s's Base
@@ -5783,7 +5781,7 @@ def main():
                          "empty bag = a gun that never fires. Tops the "
                          "world-door bag up to these every login, NOT "
                          "persisted, with or without --shop. 'standard' = 36 "
-                         "handgun / 18 rifle / 60 MG (Lifestream's standard "
+                         "handgun / 18 rifle / 60 MG (the standard "
                          "mission supplies), 'off', or 'ID:QTY,...'.")
     ap.add_argument("--issue-gear", default="standard",
                     choices=["standard", "off"],
@@ -5896,8 +5894,8 @@ def main():
                          "2026-09-26) = the old zero kind 28, 117 ignored: the "
                          "January Additional Manual P.031 moved MP recovery "
                          "from Mako Points to the Ether item, MP full at the "
-                         "battle start (ameblo 2006-01-26: Mako Points "
-                         "abolished). Missions still send their NPC-controller "
+                         "battle start (a January 2006 player "
+                         "blog also reports Mako Points gone). Missions still send their NPC-controller "
                          "28 either way.")
     ap.add_argument("--mp-point-amount", type=int,
                     default=doc_items.MP_POINT_AMOUNT,
@@ -5967,16 +5965,15 @@ def main():
     ap.add_argument("--npc-este-accept", type=float,
                     default=doc_npcquests.ESTE_ACCEPT,
                     help="2026-09-24: the chance Este-D keeps a Dandelion and "
-                         "gives the Gasmask (the archive: 'randomness would "
-                         "decide'; no odds published; 2026-09-26 the players' "
-                         "'rarely' / 'low probability' -> default %(default)s, "
-                         "OURS). 1 = always, 0 = never.")
+                         "gives the Gasmask (chance decides, per the "
+                         "fan archive; no odds published and the player "
+                         "guides call it rare -> default %(default)s, OURS). 1 = always, 0 = never.")
     ap.add_argument("--npc-hiren-wither", type=float,
                     default=doc_npcquests.HIREN_WITHER_DAY,
                     help="2026-09-26: Hiren's seed WITHERS when more than this "
                          "many --npc-quest-day days pass between two visits "
-                         "while it grows (January blog: 'about once per real "
-                         "day', ameblo 2006-01-26; the exact window is OURS). "
+                         "while it grows (a January 2006 player blog: about "
+                         "once per real day; the exact window is OURS). "
                          "0 = never withers.")
     ap.add_argument("--fuzzy-seed", choices=doc_npcquests.SEED_MODES,
                     default="field",
@@ -5984,8 +5981,8 @@ def main():
                          "field = ONE on Collector's Mind's field at SE's own "
                          "church generator node (z208 item set 7, the seed at "
                          "100 %%), the picker's server bag credited on the "
-                         "pick-up (the archive: 'after FINDING some Fuzzy "
-                         "Seeds in the Collector's Mind mission'); clear = the "
+                         "pick-up (the fan archive: the seeds are found in "
+                         "the Collector's Mind mission); clear = the "
                          "old OURS rule, one per clear; off = none.")
     ap.add_argument("--npc-quest-day", type=float, default=86400.0,
                     help="2026-09-24: seconds per DAY of Hiren's seed "
@@ -6008,7 +6005,7 @@ def main():
                          "running -- the client's own warning 0x5c0d 'Leaving "
                          "a battle partway through will reduce your rank "
                          "points'. 2026-09-26: default 10, SE's PlayOnline "
-                         "Additional Manual ('10 points'); 0 = off. Needs "
+                         "Additional Manual; 0 = off. Needs "
                          "--stats.")
     ap.add_argument("--weekly-medals", choices=("on", "off"), default="on",
                     help="2026-09-26: award the four WEEKLY medals (60:[35..38] "
@@ -6106,9 +6103,9 @@ def main():
                     help="2026-09-26: a table's Minimum / Maximum RP (record "
                          "+64 / +60, flags 0x00100000 / 0x00080000): "
                          "'enforce' refuses a JOIN / RESERVE by a character "
-                         "whose career rank points are outside them (January: "
-                         "dcff7.info 1/31 'RP limits are set in the game "
-                         "rules'; refusal result %d, OURS); 'open' ignores "
+                         "whose career rank points are outside them (the limits "
+                         "are the table's game rules; refusal result %d, "
+                         "OURS); 'open' ignores "
                          "them. Needs --stats." % BT_REFUSE_RP)
     ap.add_argument("--unit-tables", default="enforce", choices=("enforce", "open"),
                     help="2026-09-24: UNIT battletables (flags 0x01000000, needs "
@@ -8923,10 +8920,8 @@ def main():
     LINE_DROP_WHYS = ("session reaped", "line dropped")
 
     def charge_line_drop(room, cid, why):
-        """SE's January Additional Manual (addmanual.html, capture 2006-02-06):
-        "バトル中にロビーやタイトルへ戻ったり、回線の影響等でバトルが継続できな
-        かったりした場合、そのキャラクターのランキングポイントが10ポイント減点"
-        -- returning to the lobby/title mid-battle, OR not being able to go
+        """SE's January Additional Manual: returning to the lobby/title
+        mid-battle, OR not being able to go
         on because of the line, costs 10 ranking points. Lobby command 4 has
         charged the first since 09-24; this is the second. Only a member that
         ARRIVED in a room still running (not over), not already gone (a
@@ -9776,7 +9771,7 @@ def main():
                       "OWED (in the bag from the next world door)" % key,
                       flush=True)
             # 2026-09-24: Collector's Mind is where the Fuzzy Seeds come from
-            # (Lifestream NPC archive) -- Hiren grows them (doc_npcquests)
+            # (Lifestream fan archive) -- Hiren grows them (doc_npcquests)
             if (a.fuzzy_seed == "clear"
                     and summ.get("quest") == doc_npcquests.COLLECTORS_MIND
                     and summ.get("outcome") == "w"):

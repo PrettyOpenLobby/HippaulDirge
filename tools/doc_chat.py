@@ -65,16 +65,16 @@ The comparisons that read each kind inside 0x00aefeb8:
   send, so /team in battle is this selector too (static; no live capture of a
   kind 2/6/7 yet).
 
-THE SCOPES (retail: dcff7.info kouza1 2006-05, pukiwiki Tips)
+THE SCOPES (source: 2006 player guide and player wiki, chat tips)
     say   = your own lobby AREA          shout = your area + adjacent areas
     entry = your battletable             team  = your team in that battle
     tell  = one player                   group = your unit (not this channel)
 
 AREAS: the Visual Lobby's own classifier (vl_main, see the SPAWN_PRESETS
 comment in docudp) splits z217 into region 0 EAST, 1 SOUTH, 2 WEST and 3 =
-anywhere else (the north wing, the briefing room). kouza1: the opening event
-puts you in Area 1 (quest.ev stands the player in the EAST wing) and "Area 1
--> 2 -> 3 -> 4 -> 1" walks the ring. The map anchors ID_PLACE_0..3 sit east,
+anywhere else (the north wing, the briefing room). The player guide says the
+opening event puts you in Area 1 (quest.ev stands the player in the EAST
+wing) and that walking on goes Area 1, 2, 3, 4 and back to 1 around a ring. The map anchors ID_PLACE_0..3 sit east,
 south, west, north, consecutive around the centre, so ADJACENT = the ring
 neighbours (r +- 1) % 4, and east/west, south/north are the non-adjacent
 pairs. INFERRED (ring order from the anchors + the guide), not a client

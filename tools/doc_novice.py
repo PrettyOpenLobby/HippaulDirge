@@ -40,12 +40,10 @@ THE NOVICE MARK
     the server's "mark removed" broadcast.
   * SE's rule, from its site and the NPC text: the mark comes off at 20 kills
     or at the machine, and it cannot be put back.
-    2026-09-26, checked against the January Additional Manual (addmanual.html,
-    capture 2006-02-06): "初心者マークは、撃破数が20を越えるか ... 表示されなく
-    なります" = when kills EXCEED 20 (i.e. 21). The client's own briefer text
-    says AT 20: ID_BT_SETU_SH_A_01 "初心者マークは、バトルで敵を20体撃破すれば、
-    はずれるようになっています" (sentaku11_01; the C / D briefers say "about
-    20", 20体ほど / 20体くらい). The two conflict; the client wins, so the
+    Checked against SE's January Additional Manual: it says the mark goes
+    once kills EXCEED 20 (i.e. 21). The client's own briefer text
+    (ID_BT_SETU_SH_A_01, sentaku11_01) says AT 20, and the C / D briefers say
+    about 20. The two conflict; the client wins, so the
     bar stays at 20 (KILLS_TO_GRADUATE; --novice-kills 21 = the manual).
   * The graduation ceremony (quest_scr003.ev(9998)) plays on lobby re-entry
     when the player left for a battle as a novice and is no longer one.
