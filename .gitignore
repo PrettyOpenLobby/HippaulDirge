@@ -5,5 +5,10 @@ __pycache__/
 # the lobby NPC placement table, read out of YOUR game data (README.md,
 # "The lobby NPCs"): Square Enix level data, never tracked here
 tools/doc_npc_table.json
+# the arenas' own level data, same class: mission enemy spawn nodes, item
+# generator nodes, team base and start positions (README.md, "Arena data")
+tools/doc_mission_spawns.json
+tools/doc_item_generators.json
+tools/doc_arena_table.json
 # captured datagrams (docudp.py --save)
 doc-rx/

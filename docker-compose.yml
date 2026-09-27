@@ -30,6 +30,12 @@ services:
     volumes:
       - pol-data:/data:ro
       - pol-logs:/logs
+    environment:
+      # The address handed to a client is chosen per client (docudp.py
+      # host_for): POL_ADVERTISE_PUBLIC for a peer with a global address,
+      # POL_ADVERTISE_LAN for a private-range peer. Empty = POL_ADVERTISE.
+      POL_ADVERTISE_PUBLIC: "${POL_ADVERTISE_PUBLIC:-}"
+      POL_ADVERTISE_LAN: "${POL_ADVERTISE_LAN:-}"
     # The argument set below is the one the private deployment runs; each
     # flag is documented in docudp.py --help. The addresses are the advertised
     # host; the stores are files under /logs.
@@ -59,7 +65,6 @@ services:
       - "--battletable-probe"
       - "--pending-ack-after=13,17,27"
       - "--short-ladder=22"
-      - "--gs-fake-teammates=2"
       - "--bt-no-onfly-reserve"
       - "--reliable-ack-ingame"
       - "--gs-connect"
@@ -83,3 +88,12 @@ services:
       - "--shop=/logs/doc-shop.json"
       - "--units=/logs/doc-units.json"
       - "--stats=/logs/doc-stats.json"
+      # Mission Mode: the per-player mission ledger (the instructors grant the
+      # rank exams into it; on/off), which situation a quest's arena loads
+      # (QUEST:SITUATION pairs) and the enemy types a mission situation's NPC
+      # slots are given (see docudp.py --help). The mission enemies' spawn
+      # points are the arena's own data and are read from
+      # tools/doc_mission_spawns.json when you supply it (README.md).
+      - "--mission-ledger=${POL_DOC_MISSION_LEDGER:-on}"
+      - "--quest-situations=${POL_DOC_QUEST_SITUATIONS:-39:3001,40:3001}"
+      - "--mission-npc-types=${POL_DOC_MISSION_NPC_TYPES:-q39:3,3;3001:3,3,0;4,0,5,6,7,8,9,10,11,12}"
