@@ -25,7 +25,25 @@ console can:
 - register and manage a unit (a PlayOnline friend-list group);
 - reserve a battle table, sortie into the arena, fight, see the result screen
   and return to the lobby, with a career (rank, rank points, medals, play
-  time) that the rankings and the PlayOnline profile read back.
+  time) that the rankings and the PlayOnline profile read back;
+- play the team modes on the server's rules (Team Battle, Team Base with
+  base occupation, Team Capsule, Team Leader, Unit Battle), with one shared
+  start per battle room, per-team start points, respawn, the kill ledger and
+  the medals it names, and the rank point cost of leaving a running battle;
+- take Mission Mode: a per-player mission ledger the promotion-exam
+  instructors grant exams into, missions listed by rank class, each mission's
+  arena, enemies, time limit and initial supplies, and the reward notice the
+  lobby prints;
+- cast magic against a server-owned MP ledger, use Potions and Ethers, pick up
+  ammunition and items on the field, and drop them for teammates;
+- see the new-player intro and the Beginner mark, and do the lobby item
+  quests (Soar, Este-D, Hiren) and Argento's story chain;
+- chat in the lobby: say, shout, tell, entry and team, each to the players in
+  its scope.
+
+The later items in that list were built from reading the client and are
+covered by the end-to-end scripts below; not every one of them has been
+played through on a console yet.
 
 What it does not do: the online story zones (the Kerberos event stages) are
 not on the retail disc sets we have seen; the "online events" data the game
@@ -88,6 +106,24 @@ data, so they do not ship: `--npc-spawn` stays off until you put a
 one row per standing NPC of the lobby zone's character table. No tool to
 read that table out of your own copy is provided yet.
 
+## Arena data
+
+Three more inputs are the arenas' own level data and do not ship either. Each
+is optional; the server runs without it.
+
+- `tools/doc_mission_spawns.json`: the mission controllers' enemy spawn
+  nodes, `{zone: {controller: {"count": n, "spawn": [[x, y, z], ...], ...}}}`.
+  Without it mission enemies have no spawn points.
+- `tools/doc_item_generators.json`: the arenas' item generator nodes and item
+  sets, `{zone: {"sets": {i: [[item, qty, weight], ...]}, "situations": {sit:
+  [[x, y, z, set], ...]}}}`. Without it nothing appears on the field by itself
+  (the players' own drops and the capsules still do), and the Fuzzy Seed of
+  the church missions is not placed.
+- `tools/doc_arena_table.json`: the team base and team start positions,
+  `{"base_positions": {zone: [[x, y, z], [x, y, z]]}, "team_starts": {zone:
+  [[x, y, z], [x, y, z]]}}`. Without it both teams use the arena spawn and
+  Team Base occupation has no spots to stand on.
+
 ## Selftests
 
 ```
@@ -97,12 +133,19 @@ python tools/doc_run_all.py
 runs every suite: the cipher (the published Twofish known-answer test, then
 packets of every mode and length round-tripped), every measured wire offset
 the responder ships, the character store, careers, play time, NPCs, the
-shop, rankings, units, gear and trade. Nothing opens a socket.
+shop, rankings, units, gear, trade, missions, the novice mark, the lobby item
+quests, rewards, magic, items, the field and chat. Nothing opens a socket.
+
+The `tools/doc_*_e2e.py` scripts and `tests/test_doc_session_nat.py` go one
+step further: each starts a real `docudp.py` on a loopback port and drives it
+with synthetic client datagrams (a battle from table to result screen, the
+chat scopes, the mission supplies, two consoles behind one address, and so
+on). Run any of them with `python <script>` from its own directory.
 
 ## What is not included, and why
 
-- No game data. The NPC placement table (above) is the only game-data
-  input the server reads, and it is not included.
+- No game data. The NPC placement table and the arena data (above) are the
+  only game-data inputs the server reads, and none of them is included.
 - No carved client code. The game enciphers each datagram's inner header
   with Twofish under two compile-time keys; `tools/doc_kelcrypt.py` is a
   clean-room implementation of standard Twofish from the published
