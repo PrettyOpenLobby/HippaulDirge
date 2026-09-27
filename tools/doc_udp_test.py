@@ -9,6 +9,7 @@ reads the fields back at the offsets the client reads them from.
 
     python doc_udp_test.py
 """
+import io
 import os
 import struct
 import sys
@@ -31,7 +32,7 @@ def body(pkt):
 
 
 def world_door_request():
-    """A 132-byte mode-1 world-door request shaped like the prod captures."""
+    """A 132-byte mode-1 world-door request shaped like live captures."""
     req = bytearray(132)
     req[0] = 0x04
     req[1] = 0x01
@@ -380,7 +381,7 @@ def main():
     check("reserve echo carries the table key at body[16..17] (0x00bcd6ac lhu)",
           struct.unpack_from("<H", be, 16)[0] == key)
     check("reserve echo is padded like every world answer", len(be) >= 176)
-    # sec 4fm: the leader's START request as captured on prod 2026-09-12
+    # sec 4fm: the leader's START request as captured live 2026-09-12
     # 21:48:10 (RECV #145, 52 bytes, mode 2): body[12] = 03 = LOBBY_CMD_START.
     r240 = bytes.fromhex(
         "04023400 7dcd0000 b01c3be9 fc4cc98f 3f55ebbf 0dd17847 07f00000 01000000"
@@ -466,7 +467,14 @@ def main():
                                    D.request_body(req(127, struct.pack("<I", 0x1234)), None),
                                    127, 0x2a664, 0)
     check("invite answers 128", body(pkt)[1] == 128)
+    # sec 4he: leader authority. 0x2a664 created the table and then APPOINTED
+    # 0x7777, so its own Dissolve is refused (126, result -1, table kept);
+    # the appointed leader's Dissolve drops it.
     pkt, note = D.battletable_verb(st, req(125), D.request_body(req(125), None), 125, 0x2a664, 0)
+    check("TWIN (sec 4he): dissolve by a NON-leader answers 126 with -1 and keeps the table",
+          body(pkt)[1] == 126 and struct.unpack_from("<i", body(pkt), 12)[0] == -1
+          and st.get(key) is not None and "REFUSED" in note)
+    pkt, note = D.battletable_verb(st, req(125), D.request_body(req(125), None), 125, 0x7777, 0)
     check("dissolve answers 126 and drops the table",
           body(pkt)[1] == 126 and st.get(key) is None and st.table_of(0x7777) is None)
     st2 = D.BattletableStore()
@@ -517,7 +525,7 @@ def main():
     # --- sec 4ea: the game-server ladder ---------------------------------------
     check("request -> answer pairs are type + 1",
           all(v == k + 1 for k, v in D.GS_REQ_ANSWERS.items())
-          and set(D.GS_REQ_ANSWERS) == {31, 33, 36, 47, 56, 58, 60})
+          and set(D.GS_REQ_ANSWERS) == {31, 33, 36, 47, 56, 58, 60, 38, 45, 54, 46})
     n4 = D.build_gs_notify(4, bytes(4) + bytes(D.GS_SETUP_LEN), seq=3, ident=0x2a664)
     nb = body(n4)
     check("notify rides message 35", struct.unpack_from("<H", nb, 0)[0] == 35)
@@ -534,11 +542,25 @@ def main():
     _fx, _fy, _fz = struct.unpack_from("<fff", sb, 32)
     check("spawn FACING (sin, 0, cos) of rot at record +12/+16/+20 (sec 4ga)",
           abs(_fx - 1.0) < 1e-6 and _fy == 0.0 and abs(_fz) < 1e-6)
-    check("start burst is the spawn alone; GO = 5,53 (sec 4ga)",
+    _go = [k for k, _ in D.gs_battle_sequence(D.GS_BATTLE_GO_DEFAULT)]
+    check("start burst is the spawn alone; GO = 5 + the damage-gate handshake "
+          "(sec 4ga/4he)",
           [k for k, _ in D.gs_battle_sequence(D.GS_BATTLE_START_DEFAULT,
                                               zone=201)] == [2]
-          and [k for k, _ in D.gs_battle_sequence(D.GS_BATTLE_GO_DEFAULT)]
-          == [5, 53])
+          and _go[0] == 5 and set(_go[1:]) == {28, 29, 3, 30})
+    check("2026-09-24: no GO kind >= 49 -- the retail notify dispatcher "
+          "0x00bcb6d8 drops them (the old burst's 53 never ran)",
+          all(k < D.GS_NOTIFY_KIND_LIMIT for k in _go))
+    check("TWIN: the previous burst carried a kind the client drops",
+          not all(k < D.GS_NOTIFY_KIND_LIMIT
+                  for k, _ in D.gs_battle_sequence("5,28,29,3,30,53")))
+    # sec 4he: 0x00bc2aa0 posts facade 0x20 only when it runs with 0x100 (28),
+    # 0x200 (29), 0x400 (30 or 28) and 0x20 (3) all set, and it runs from kinds
+    # 3 and 30 -- so the LAST of 3 / 30 must come after 28 and 29.
+    check("damage gate: the last of kinds 3/30 follows both 28 and 29",
+          max(_go.index(3), _go.index(30)) > max(_go.index(28), _go.index(29)))
+    check("TWIN: the 09-13 burst (5,53) never opened the damage gate",
+          not ({28, 29, 3, 30} <= set(k for k, _ in D.gs_battle_sequence("5,53"))))
     tl = D.build_gs_team_list([(1, 2, 0x2a664), (3, 4, 5)], seq=2, word12=7, word16=9)
     tb = body(tl)
     check("team list is message 57", struct.unpack_from("<H", tb, 0)[0] == 57)
@@ -586,8 +608,21 @@ def main():
     ac = body(D.build_gs_add_chara(0x9001, 3, slot=1, seq=5, self_ident=0x2a664))
     check("fake teammate rides message 35 kind 31", struct.unpack_from("<H", ac, 0)[0] == 35
           and struct.unpack_from("<I", ac, 12)[0] == 31)
-    check("fake teammate record: id at +20, team nibble in byte +42",
-          struct.unpack_from("<I", ac, 20)[0] == 0x9001 and (ac[42] & 0x0F) == 3)
+    check("kind 31 record: id at +20, TEAM in the HIGH nibble of byte +42 "
+          "(the briefing-room findings A)",
+          struct.unpack_from("<I", ac, 20)[0] == 0x9001 and ac[42] == 0x31,
+          "byte +42 = 0x%02x" % ac[42])
+    ac = body(D.build_gs_add_chara(0x9001, 1, slot=2))
+    check("kind 31 (team 1, slot 2) -> byte +42 == 0x12 (was 0x21: team 1 "
+          "wrote roster slot 1, the client's own entry)", ac[42] == 0x12,
+          "0x%02x" % ac[42])
+    ac = body(D.build_gs_add_chara(0x9001, None, slot=2))
+    check("kind 31 with no team -> 0xF2 (the member is filed at team 0xff)",
+          ac[42] == 0xF2, "0x%02x" % ac[42])
+    lv = body(D.build_gs_team_leave(0x41050, seq=3))
+    check("leave team = message 35 kind 1",
+          struct.unpack_from("<H", lv, 0)[0] == 35
+          and struct.unpack_from("<I", lv, 12)[0] == 1)
     # sec 4et: the peer-push must pass build_peer_record(...)[4:] so fields
     # ALIGN in build_peer_answer (which re-prepends the id at wire+0). zone must
     # land at the OUTER record wire+32 (= what getCharacterTableId reads).
@@ -666,9 +701,50 @@ def main():
           body(_zn[2])[46] == 202)
     # sec 4ft: the REAL roster's distribution and its readiness gate.
     _A, _B, _C = 0x2a664, 0x2aa68, 0x2b000
-    check("real distribution: seat order, slot = index within the team",
+    check("real distribution: seat order, slot = position in the list",
           D.gs_real_distribution({_A: 0, _B: 1, _C: 0}, [_A, _B, _C])
-          == [(_A, 0, 0), (_B, 1, 0), (_C, 0, 1)])
+          == [(_A, 0, 0), (_B, 1, 1), (_C, 0, 2)])
+
+    def _arm_20(members, me, dist):
+        """The client's kind-20 arm 0x00bc23d8 on `me`'s console: the 38
+        roster (others in order, self last -- 0x00bcb838), then per entry i
+        swap the id to roster[slot] and write it there; own index = i."""
+        r = [m for m in members if m != me] + [me]
+        r += [0] * (32 - len(r))
+        own = None
+        for i, (cid, _t, slot) in enumerate(dist):
+            if cid == me:
+                own = i
+            for k in range(32):
+                if r[k] == cid:
+                    r[k], r[slot] = r[slot], r[k]
+            r[slot] = cid
+        return r, own
+
+    def _roster_agrees(members, dist):
+        for me in members:
+            r, own = _arm_20(members, me, dist)
+            if own is None or r[own] != me:
+                return False
+        return (len(set(_arm_20(members, members[0], dist)[0][:len(dist)]))
+                == len(dist))
+
+    # live table 31 (2026-09-26 03:21Z): 0x41050/0x41068 team 1, 0x41078 team 0
+    _t31 = [0x41050, 0x41068, 0x41078]
+    _t31t = {0x41050: 1, 0x41068: 1, 0x41078: 0}
+    check("kind 20 (table 31 roster): every client's own index names ITSELF",
+          _roster_agrees(_t31, D.gs_real_distribution(_t31t, _t31)))
+    check("TWIN: the per-team slots a live server sent for table 31 fail that check",
+          not _roster_agrees(_t31, [(0x41050, 1, 0), (0x41068, 1, 1),
+                                    (0x41078, 0, 0)]))
+    _t32 = [0x41078, 0x41050, 0x41068]
+    check("kind 20 (table 32 roster): every client's own index names ITSELF",
+          _roster_agrees(_t32, D.gs_real_distribution(
+              {0x41078: 0, 0x41050: 0, 0x41068: 1}, _t32)))
+    check("kind 20: slots are unique for 6 players on two teams",
+          [e[2] for e in D.gs_real_distribution(
+              {m: m & 1 for m in range(1, 7)}, list(range(1, 7)))]
+          == [0, 1, 2, 3, 4, 5])
     check("real distribution skips a member with no team",
           D.gs_real_distribution({_A: 0}, [_A, _B]) == [(_A, 0, 0)])
     check("real ready: two players on opposite teams",
@@ -695,7 +771,7 @@ def main():
     _b1, _b2, _b3 = 0x9001, 0x9101, 0x9002
     check("solo distribution: self first, bots slotted within their team",
           D.gs_solo_distribution({_b1: 0, _A: 1, _b2: 1, _b3: 0}, _A)
-          == [(_A, 1, 0), (_b1, 0, 0), (_b2, 1, 1), (_b3, 0, 1)])
+          == [(_A, 1, 0), (_b1, 0, 1), (_b2, 1, 2), (_b3, 0, 3)])
     check("solo distribution: self defaults to team 0 with no request 31",
           D.gs_solo_distribution({}, _A) == [(_A, 0, 0)])
     _sd = body(D.build_gs_distribution(D.gs_solo_distribution({}, _A)))
@@ -709,6 +785,27 @@ def main():
           D.gs_dist_due({"ready_at": None, "dist": False}, 5.0) is None)
     check("dist due: already sent -> None",
           D.gs_dist_due({"ready_at": 100.0, "dist": True}, 5.0) is None)
+    # 2026-09-23: the briefing countdown ends -> unteamed members are seated
+    check("dist due: not ready but an auto-team deadline -> that deadline",
+          D.gs_dist_due({"ready_at": None, "dist": False, "auto_at": 50.0},
+                        5.0) == 50.0)
+    check("dist due: auto-team deadline ignored once the dist went out",
+          D.gs_dist_due({"ready_at": None, "dist": True, "auto_at": 50.0},
+                        5.0) is None)
+    _at, _as = D.gs_auto_teams({_A: 1}, [_A, _B])
+    check("auto-team: the live 09-23 case (leader on 1, joiner never sent 31) "
+          "-> joiner on team 0, and the table is READY",
+          _at == {_A: 1, _B: 0} and _as == [_B]
+          and D.gs_real_ready(_at, [_A, _B])[0], "%r %r" % (_at, _as))
+    _at, _as = D.gs_auto_teams({}, [_A, _B])
+    check("auto-team: nobody chose -> opposite sides",
+          _at == {_A: 0, _B: 1} and D.gs_real_ready(_at, [_A, _B])[0])
+    _at, _as = D.gs_auto_teams({_A: 0, _B: 0}, [_A, _B])
+    check("auto-team: never moves a player who CHOSE (both on 0 stays not ready)",
+          _as == [] and _at == {_A: 0, _B: 0}
+          and not D.gs_real_ready(_at, [_A, _B])[0])
+    check("auto-team TWIN: without it the live case is NOT ready (the bug)",
+          not D.gs_real_ready({_A: 1}, [_A, _B])[0])
     # sec 4fy: kind 4 is the RESULT (facade 0x40 ends ev2045's battle loop),
     # so the start burst must not carry it; selector 39 is the battle reset.
     _st_kinds = [k for k, _ in D.gs_battle_sequence(D.GS_BATTLE_START_DEFAULT,
@@ -722,7 +819,7 @@ def main():
     check("battle-over answer is selector 39 on subchannel 7",
           _bo[1] == 39 and _bo[0] == 7)
 
-    # sec 4fu: the PEER RELAY. Two live 0x83s off prod (09-12, the Deck and the
+    # sec 4fu: the PEER RELAY. Two live 0x83s (09-12, two consoles:
     # PC, mode 2). The relay re-sends one to the other client as a PEER
     # datagram: flags bit 3 set (parser 0x0058a0b0 + router arm 0x00581530),
     # mode 0, and byte-for-byte the sender's ms, id and 40-byte pose otherwise.
@@ -1082,6 +1179,1310 @@ def main():
           and struct.unpack_from("<H", _sp, D.CKSUM_OFF)[0] == D.cksum(bytes(_z))
           and _sp[D.BODY_OFF:] == _tx)
 
+    # --- sec 4gv (2026-09-23): THE SOURCE GATE, AND THE START RE-DECLARATION.
+    # The client's game-server receive handler opens with (JP 0x00bcca60)
+    #     lw v1, 188(s1) ; lw v0, 4(s2) ; bne v1, v0, <exit>
+    # so a datagram is dropped, before dispatch and before the sequence window,
+    # unless its source (IP, port) equals what selector 104 last wrote into
+    # [chan+184..191]. docudp fires 104 once per world session (`gs_done`), and
+    # at Start it sends 38 (LOBBY channel, always lands) + the message-27 re-arm
+    # (GAME-SERVER channel). With a stale endpoint the re-arm is swallowed,
+    # [chan+204] bit 6 is never set, [chan+224] is never refreshed and the
+    # client paints CER-48101 40 s later. Measured live 2026-09-23:
+    # the peer whose connect->Start gap was 2 m 10 s sent 0 game-server hellos
+    # and its [chan+212] was still the uninitialised 65528.
+    _EPSEL = getattr(D, "GS_ENDPOINT_SELECTOR", None)
+    check("104 is the ungated endpoint rung", _EPSEL == 104)
+    check("104 is NOT one of the gated rungs 21/31",
+          _EPSEL is not None and _EPSEL not in D.GS_ENDPOINT_SELECTORS)
+
+    # The endpoint must be computed PER PEER. A LAN console and an internet
+    # player can sit at the same table, so one global address is always wrong
+    # for one of them -- that is exactly what rec_for() already does for the
+    # battle-table record, and the selector-104 message must do the same.
+    _saved_env = {k: os.environ.get(k)
+                  for k in ("POL_ADVERTISE_PUBLIC", "POL_ADVERTISE_LAN")}
+    try:
+        os.environ["POL_ADVERTISE_PUBLIC"] = "203.0.113.9"
+        os.environ["POL_ADVERTISE_LAN"] = "172.18.0.1"
+        _eps = {}
+        for _who, _peer in (("lan", "172.18.0.5"),
+                            ("public", "8.8.8.8")):
+            _ip = D.host_for("192.0.2.60", _peer)
+            _pk = D.build_world_answer(
+                world_door_request(), selector=(_EPSEL or 104),
+                ident=0x1234, pad_to=176, gs_ip=_ip, gs_port=55040, gs_id=0)
+            _eps[_who] = body(_pk)[52:56]
+        check("104 to a LAN peer carries the LAN address",
+              _eps["lan"] == bytes([172, 18, 0, 1]),
+              ".".join(str(b) for b in _eps["lan"]))
+        check("104 to a public peer carries POL_ADVERTISE_PUBLIC",
+              _eps["public"] == bytes([203, 0, 113, 9]),
+              ".".join(str(b) for b in _eps["public"]))
+        check("the two peers do NOT get the same endpoint",
+              _eps["lan"] != _eps["public"])
+        # NEGATIVE CONTROL for the three checks above -- the known-bad input
+        # they are able to fail on. Feeding the builder ONE global address (the
+        # shape this fix was explicitly told not to introduce) gives both peers
+        # the same bytes, and neither is the address its own network can route.
+        _bad = body(D.build_world_answer(
+            world_door_request(), selector=(_EPSEL or 104), ident=0x1234,
+            pad_to=176, gs_ip="192.0.2.60", gs_port=55040, gs_id=0))[52:56]
+        check("negative control: a global address is wrong for BOTH peers",
+              _bad == bytes([192, 0, 2, 60])
+              and _bad != _eps["lan"] and _bad != _eps["public"])
+
+        # WARNING:KEY: sec 4gv addendum (2026-09-23): THE BATTLETABLE RECORD IS A SECOND
+        # WRITER OF THE SAME FIELD. rec+12/+20 feed the client's
+        # 0x00bc0320(chan, ip, port), which is the SOLE writer of
+        # [chan+184..191] -- the field selector 104's arm installs through
+        # (0x00bca938 tail) and the field the keepalive sender reads back
+        # (JP 0x00bc0c18 -> outgoing record +0x14c/+0x150).
+        # BattletableStore._stamp writes the RAW configured address into every
+        # record, and the LEADER's console verbs (create/config/adjust) were
+        # served unrewritten -- so the leader's own table screen UNDID the 104
+        # it had just been sent, while the joiner (list + selector 38, both
+        # rec_for'd) kept a good one. Measured on a test rig 2026-09-23:
+        # we declared the LAN address at 01:16:00Z and the client's
+        # [chan+184..191] still read 192.0.2.60 at 01:18:18Z.
+        _st104 = D.BattletableStore([], gs_ip="192.0.2.60", gs_port=55040)
+        _k104 = _st104.add_record(bytes(D.BT_REC_LEN), leader=0x41000)
+
+        def _verb_gs_ip(peer):
+            _rq = req(D.BT_REQ_CONFIG, struct.pack("<H", _k104) + bytes(2))
+            _pk, _ = D.battletable_verb(
+                _st104, _rq, D.request_body(_rq, None), D.BT_REQ_CONFIG,
+                0x41000, 0, peer_ip=peer, default_gs_ip="192.0.2.60")
+            if _pk is None:
+                return None
+            _b = body(_pk)
+            _o = D.BATTLETABLE_REC_OFF + D.BT_OFF_GS_IP
+            return ".".join(str(x) for x in _b[_o:_o + 4])
+
+        _lan104, _pub104 = _verb_gs_ip("172.18.0.5"), _verb_gs_ip("8.8.8.8")
+        check("a battletable VERB answer carries the endpoint THIS peer can reach",
+              _lan104 == "172.18.0.1" and _pub104 == "203.0.113.9",
+              "lan=%s public=%s" % (_lan104, _pub104))
+        # NEGATIVE CONTROL: the same call with the rewrite switched off is the
+        # known-bad input, and it must produce the raw store address.
+        _off104 = D.battletable_verb(
+            _st104, req(D.BT_REQ_CONFIG, struct.pack("<H", _k104) + bytes(2)),
+            D.request_body(req(D.BT_REQ_CONFIG,
+                               struct.pack("<H", _k104) + bytes(2)), None),
+            D.BT_REQ_CONFIG, 0x41000, 0)[0]
+        _o104 = D.BATTLETABLE_REC_OFF + D.BT_OFF_GS_IP
+        _rawip = ".".join(str(x) for x in body(_off104)[_o104:_o104 + 4])
+        check("negative control: unrewritten, the verb answer serves the RAW "
+              "store address to everyone",
+              _rawip == "192.0.2.60" and _rawip not in (_lan104, _pub104),
+              _rawip)
+    finally:
+        for _k, _v in _saved_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+    # THE WIRING. The bytes above were already right before this fix -- what was
+    # wrong is that nothing re-sent them at Start. That is an ORDER property of
+    # the responder, so it is checked against the source: at each of the two
+    # Start sites the selector-104 re-declaration must come BEFORE the 38 (it
+    # is what makes the next two deliverable) and the message-27 arm must come
+    # LAST, because 38's routine 0x00bc0260 zeroes [chan+204] (sec 4eb). All
+    # four of these FAIL on the pre-fix file -- verified by running this suite
+    # against `git show HEAD:tools/docudp.py`.
+    _src = io.open(D.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+
+    def _ordered(seg, *marks):
+        """True iff every mark appears in `seg`, in this order."""
+        if not seg:
+            return False, "(source block not found)"
+        at = -1
+        for m in marks:
+            nxt = seg.find(m, at + 1)
+            if nxt < 0:
+                return False, m
+            at = nxt
+        return True, ""
+
+    def _seg(head, tail):
+        """The source between two anchors, or "" if either is absent."""
+        i = _src.find(head)
+        if i < 0:
+            return ""
+        j = _src.find(tail, i + len(head))
+        return _src[i:j] if j >= 0 else ""
+
+    _lead = _seg("if _sel in _gs_ready_after or _start_now:",
+                 "if _sel in _pending_ack_after:")
+    _ok, _miss = _ordered(_lead, "send_gs_endpoint(",
+                          "selector=GS_READY_SELECTOR",
+                          "build_gs_stats(_st2")
+    check("leader Start sends 104 -> 38 -> the message-%d arm, in that order"
+          % D.GS_ARM_MSG, _ok, ("" if _ok else "missing/out of order: %s" % _miss))
+
+    _fan = _seg("def push_battle_ready(", "def push_lobby_npcs(")
+    _ok, _miss = _ordered(_fan, "send_gs_endpoint(",
+                          "s.sendto(_rd, msess.ka_src)",
+                          "build_gs_stats(")
+    check("[start-all] sends 104 -> 38 -> the message-%d arm, in that order"
+          % D.GS_ARM_MSG, _ok, ("" if _ok else "missing/out of order: %s" % _miss))
+
+    _helper = _seg("def send_gs_endpoint(", "def push_battle_ready(")
+    check("send_gs_endpoint resolves the address PER PEER via host_for(dst)",
+          "host_for(a.gs_connect_ip or a.lobby_ip, dst[0])" in _helper)
+    check("exactly ONE site in docudp builds a selector-104 endpoint message",
+          _src.count("selector=GS_ENDPOINT_SELECTOR") == 1
+          and _src.count("gs_ip=_ep") == 1
+          and "_gs_kw" not in _src,
+          "%d builder(s)" % _src.count("selector=GS_ENDPOINT_SELECTOR"))
+
+    # --- sec 4hb: THE TABLE'S CHOSEN MAP PICKS THE ARENA (2026-09-23).
+    # The picker works and the pick reaches BT_OFF_MAP (live: "CREATE -> table 1
+    # (map 9, ...)"), but kind 2's zone byte was the constant --gs-battle-zone,
+    # so every table played in z201. These drive the decision function itself.
+    _MZ = D.parse_map_zones("")
+    check("the decoded map->zone table is the default",
+          _MZ == D.parse_map_zones(D.BT_MAP_ZONES_DEFAULT) and len(_MZ) == 23,
+          "%d entries" % len(_MZ))
+    check("map 0 -> z201 and map 7 -> z208, the two arenas confirmed on a console",
+          _MZ[0] == 201 and _MZ[7] == 208)
+    check("the mapping is NOT zone = 201 + index (z209 is the Warehouse, "
+          "roster 14, not the Train Graveyard, roster 8)",
+          _MZ[8] == 212 and _MZ[14] == 209)
+    check("every decoded zone fits kind 2's ONE zone byte and is never 0 "
+          "(0 = get_onlinezone's exit(-1) = the title)",
+          all(0 < z < 256 for z in _MZ.values()))
+    check("the 5 roster maps with no shipped arena are ABSENT, not guessed "
+          "(11 the hole, 13 Test Area, 17/18/19 Base 1-3)",
+          not (set(_MZ) & {11, 13, 17, 18, 19}))
+    _shown = [i for i in range(len(D.LOBBY_MAP_NAMES)) if D.LOBBY_MAP_MASK_ALL >> i & 1]
+    check("the picker shows EXACTLY the maps with an arena -- 11 / 13 / 17-19 "
+          "hidden (09-23), none shown that would play in the Jungle",
+          set(_shown) == set(_MZ) and not set(_shown) & {11, 13, 17, 18, 19},
+          "shown-but-unmapped %s" % sorted(set(_shown) - set(_MZ)))
+    check("TWIN: the old mask (only 11 cleared) shows unmapped maps",
+          {i for i in range(28) if (((1 << 28) - 1) & ~(1 << 11)) >> i & 1}
+          - set(_MZ) == {13, 17, 18, 19})
+    check("1/5/6 follow zonelist's 201..208 roster run: DG -> 202, "
+          "Laboratory -> 206, Training Grounds -> 207 (2026-09-23)",
+          (_MZ[1], _MZ[5], _MZ[6]) == (202, 206, 207)
+          and all(_MZ[i] == 201 + i for i in range(8)))
+    check("no two maps claim one arena zone",
+          len(set(_MZ.values())) == len(_MZ))
+
+    def _zone_of(idx, spawns=(203, 204, 205, 208), needs=True, tbl=None):
+        return D.battle_map_arena(idx, _MZ if tbl is None else tbl, 201,
+                                  zone_spawns=spawns, needs_spawn=needs)
+
+    check("a table on the church map is served z208, not the flag's z201",
+          _zone_of(7) == (208, D.ARENA_OK))
+    check("a table on a map with no decoded zone falls back to the flag",
+          _zone_of(13) == (201, D.ARENA_NO_ZONE))
+    check("a decoded zone with NO --zone-spawns point falls back rather than "
+          "spawning in the void", _zone_of(24) == (201, D.ARENA_NO_SPAWN))
+    check("--no-battle-map-needs-spawn serves that zone anyway",
+          _zone_of(24, needs=False) == (234, D.ARENA_OK))
+    check("the flag's own zone never needs a --zone-spawns entry (it has "
+          "--gs-battle-pos)", _zone_of(0, spawns=()) == (201, D.ARENA_OK))
+    # the FALSIFYING TWIN: the same call, on the table this code replaced (the
+    # empty one every table used until tonight), must NOT reach the church.
+    check("TWIN: with an empty map->zone table every map lands in z201 -- the "
+          "bug this fixes, and proof the check above can fail",
+          _zone_of(7, tbl={}) == (201, D.ARENA_NO_ZONE)
+          and all(_zone_of(i, tbl={})[0] == 201 for i in range(28)))
+    check("'off' parses to the empty table", D.parse_map_zones("off") == {})
+    for _bad, _wh in (("0:0", "zone 0 = the title"),
+                      ("0:256", "a zone past one byte"),
+                      ("64:201", "a map index past the picker's bit test"),
+                      ("0", "a pair with no zone")):
+        try:
+            D.parse_map_zones(_bad)
+            _rej = False
+        except SystemExit:
+            _rej = True
+        check("--battle-map-zones rejects %s (%r)" % (_wh, _bad), _rej)
+
+    # and the PLUMBING: neither kind-2 push may carry a constant zone again.
+    def _no_constant_zone(src):
+        seg = src[src.find("def _battle_zone_note("):]
+        return ("zone=a.gs_battle_zone" not in seg
+                and seg.count("zone=_bzone") == 2
+                and seg.count("_battle_zone_note(") >= 2)
+    check("both kind-2 pushes take their zone from _battle_zone_note, never a "
+          "constant", _no_constant_zone(_src))
+    check("TWIN: the same gate FAILS on the pre-fix shape it replaced",
+          not _no_constant_zone(_src.replace("zone=_bzone",
+                                             "zone=a.gs_battle_zone")))
+    check("_battle_zone and _battle_pos both take the character id, so the "
+          "SPAWN follows the map's zone (sec 4gr.6: a z201 point is the VOID "
+          "in z208)",
+          "def _battle_zone(key, cid=None)" in _src
+          and "def _battle_pos(key, cid=None, per_team=True)" in _src
+          and "_battle_pos(sess.key, seen_charid[0])" in _src)
+    check("M0/M1 are never the table's map index -- z201 and z208 were both "
+          "entered live with 0,0, so the map bytes do not choose the arena",
+          "bmap=(_map" not in _src and "bmap=(m" not in _src)
+
+    # --- 2026-09-23: M0/M1 name the arena's TERRAIN piece (z204 = sky only) --
+    _ZP = D.parse_zone_pieces(D.ZONE_PIECES_DEFAULT)
+    check("z204 (Wastelands) asks for m001, its terrain; the slot-4 savestate "
+          "held m000 (sky) + m002 and NO m001 with 0,0",
+          D.battle_bmap(204, _ZP, (0, 0)) == (1, 0))
+    check("z208 (church) asks for m002, the piece that only streamed on a walk",
+          D.battle_bmap(208, _ZP, (0, 0)) == (2, 0))
+    check("z201 (Jungle) asks for SE's own pair 1,3 -- ev2045's "
+          "Zone.load(201, 1, 3); blank until control with 0,0 (live 09-23)",
+          D.battle_bmap(201, _ZP, (0, 0)) == (1, 3))
+    check("z203 (Kalm) asks for m004 + m001, the pieces around its spawn",
+          D.battle_bmap(203, _ZP, (0, 0)) == (4, 1))
+    check("z205 (Sewers) asks for m003 + m001, the pieces around its spawn",
+          D.battle_bmap(205, _ZP, (0, 0)) == (3, 1))
+    check("unlisted zones keep the --gs-battle-map default",
+          D.battle_bmap(215, _ZP, (7, 9)) == (7, 9))
+    _ZS = {}
+    for _e in D.ZONE_SPAWNS_DEFAULT.split(";"):
+        _z, _, _xyz = _e.partition(":")
+        _ZS[int(_z)] = tuple(float(q) for q in _xyz.split(","))
+    check("every decoded arena zone has a spawn AND a preload pair -- no map "
+          "lands in the VOID or on its sky piece (z201 spawns at --gs-battle-pos, "
+          "ev2045's own Jungle point)",
+          set(_MZ.values()) - {201} <= set(_ZS) and set(_MZ.values()) <= set(_ZP)
+          and all(len(p) == 3 for p in _ZS.values()),
+          "missing spawn %s pieces %s" % (sorted(set(_MZ.values()) - {201} - set(_ZS)),
+                                          sorted(set(_MZ.values()) - set(_ZP))))
+    check("the four LIVE spawns are unchanged (Church, Kalm, Wastelands, Sewers)",
+          _ZS[208] == (738.9, -102.0, 1427.0) and _ZS[203] == (-1016.1, -2.0, 911.1)
+          and _ZS[204] == (-629.7, -8.0, 152.7) and _ZS[205] == (-620.9, 398.0, -300.3))
+    check("TWIN: the spawn-coverage gate fails without the 09-23 additions",
+          not set(_MZ.values()) <= {208, 203, 204, 205})
+    check("TWIN: with --zone-pieces off z204 falls back to 0,0 -- the bug",
+          D.battle_bmap(204, D.parse_zone_pieces("off"), (0, 0)) == (0, 0))
+    for _bad in ("204", "204:1,2,3", "204:256,0", "204:-1"):
+        try:
+            D.parse_zone_pieces(_bad)
+            _rej = False
+        except (SystemExit, ValueError):
+            _rej = True
+        check("--zone-pieces rejects %r" % _bad, _rej)
+
+    def _pieces_follow_zone(src):
+        return (src.count("bmap=battle_bmap(_bzone") == 2
+                and "bmap=_gs_bmap)" not in src)
+    check("both kind-2 pushes take M0/M1 from the arena zone's --zone-pieces",
+          _pieces_follow_zone(_src))
+    check("TWIN: the same gate FAILS on the pre-fix bmap=_gs_bmap shape",
+          not _pieces_follow_zone(_src.replace(
+              "bmap=battle_bmap(_bzone, _zone_pieces, _gs_bmap)",
+              "bmap=_gs_bmap").replace(
+              "bmap=battle_bmap(_bzone,\n", "bmap=_gs_bmap)#")))
+
+    # --- 2026-09-24: the Lifestream archive audit fixes ---------------------
+    import doc_missions as DM
+    import doc_stats as DS
+    import doc_shop as DSH
+    check("mission time limits from the archive: Drone 2nd 5 min, Scout 1st 5 min, "
+          "A Devastated Church 9 min, Trooper 3rd 4:30, Beginner's Course 60 min",
+          DM.time_limit(1) == 300 and DM.time_limit(6) == 300
+          and DM.time_limit(5) == 540 and DM.time_limit(28) == 270
+          and DM.time_limit(39) == 3600 and DM.time_limit(17) is None)
+    _st = D.BattletableStore()
+    _st.mission_time = dict(DM.MISSION_TIME)
+    _mk = _st.add_record(D.build_battletable_record(
+        table_id=0, flags=D.BT_FLAG_MISSION, mission=1, comment="m"))
+    _nk = _st.add_record(D.build_battletable_record(
+        table_id=0, flags=0, mission=1, comment="n"))
+    _tm = struct.unpack_from("<I", _st.record(_mk), D.BT_OFF_TIME)[0]
+    _tn = struct.unpack_from("<I", _st.record(_nk), D.BT_OFF_TIME)[0]
+    check("a MISSION record is served with its archive time (the HUD reads it)",
+          _tm == 300, "%d" % _tm)
+    check("TWIN: a non-mission record with the same mission field keeps its own",
+          _tn != 300, "%d" % _tn)
+    _rr = D.battle_rules_from_record(bytes(_st.record(_mk)))
+    check("...and the room clock built from that record is the same 300 s",
+          _rr.time_limit == 300.0, "%r" % _rr.time_limit)
+    # 2026-09-26 MEASURED: group 51 (reward text, quest N = index N-1) of
+    # SE's 20060124_3 lobby.bin and of every served lobby.bin since the 09-22
+    # retail rebase (20260923_8, 20260924 dg2fit / victoryfit) -- what the
+    # player READS. The server must pay exactly that.
+    _shown = {5: ("rp", 30), 16: ("rp", 10), 18: ("rp", 40), 22: ("rp", 50),
+              24: ("rp", 15), 25: ("rp", 20), 26: ("rp", 60), 30: ("rp", 50),
+              36: ("rp", 35), 41: ("rp", 100), 42: ("rp", 120), 43: ("rp", 100),
+              23: ("gil", 2000), 31: ("gil", 1000), 32: ("gil", 1000),
+              33: ("gil", 1000), 34: ("gil", 1000), 35: ("gil", 1000),
+              37: ("gil", 1000), 38: ("gil", 1000), 39: ("gil", 300),
+              40: ("gil", 500)}
+
+    def _pays(rp, gil):
+        out = {q: ("rp", v) for q, v in rp.items()}
+        out.update({q: ("gil", v) for q, v in gil.items()})
+        return out
+    check("quest rewards pay exactly the served client's text (51:N-1): "
+          "Assault Mission +30, Stolen Capsules! 2000 gil, Map Exercises 1000",
+          _pays(DS.QUEST_RP, DS.QUEST_GIL) == _shown,
+          "%s" % sorted(set(_pays(DS.QUEST_RP, DS.QUEST_GIL).items())
+                        ^ set(_shown.items())))
+    check("TWIN: the pre-rebase table (250 RP, 3000 / 1500 gil) fails that "
+          "comparison",
+          _pays({5: 250, 16: 50, 18: 100, 24: 50, 25: 150, 26: 200, 22: 95,
+                 30: 65, 36: 35},
+                {23: 3000, 31: 1500, 32: 1500, 33: 1500, 34: 1500, 35: 1500,
+                 37: 1000, 39: 300, 40: 500, 38: 1000}) != _shown)
+    check("the 'by performance' rewards: 19 gil, 20 / 21 / 27 / 29 rank points",
+          DS.QUEST_PERFORMANCE_GIL == (19,)
+          and set(DS.QUEST_PERFORMANCE_RP) == {20, 21, 27, 29})
+    # 2026-09-26: the LAUNCH medal set (SE's 20060124_3 lobby.bin group 60)
+    _aw = DS.award_medals("TBT", [
+        {"key": "W", "team": 0, "kills": 3, "kos": 1},
+        {"key": "L", "team": 1, "kills": 0, "kos": 0}], 0)
+    check("TBT pays the launch medals: Team Merit (kills - KOs) and Slayer, "
+          "to W; L's 'no KO' pays nothing (Iron Seal was the 2005 beta's)",
+          _aw == {"W": [DS.M_TEAM_MERIT, DS.M_SLAYER], "L": []}, repr(_aw))
+    _launch = ["BT Conquest Medal", "BT Medal of Honor", "BT Medal of Dishonor",
+               "Team Merit Medal", "Survivor Medal", "Slayer", "Assault Medal",
+               "Capsule Seeker Medal", "Last Capsule Medal",
+               "Flag Carrier Medal", "First Flag Medal", "Leader Slayer Medal",
+               "Base Attack Medal"]
+    check("the medal names are the launch client's (group 60 [16..28])",
+          [DS.MEDALS[i] for i in range(16, 29)] == _launch)
+    check("TWIN: the 2005 beta table this module carried fails that",
+          ["Medal of Dishonor", "First Attack", "Iron Seal", "Healer", "Assault",
+           "Slayer", "The Finisher", "Seeker", "Star of Victory", "BT", "FA",
+           "Survival", "Super Trooper"] != _launch)
+    check("MODE_MEDALS = the client's per-mode Results table (retail "
+          "0x00b18d20: [3 5] [4 5] [6 12] [7 8] [11] [9 10] ... [0 1 2])",
+          [tuple(m - DS.MEDAL_BASE for m in DS.MODE_MEDALS[k]) for k in
+           ("TBT", "TDM", "TBS", "TCP", "TLD", "TFL", "BT")]
+          == [(3, 5), (4, 5), (6, 12), (7, 8), (11,), (9, 10), (0, 1, 2)])
+    _ids = [i for i, _, _ in DSH.DEFAULT_STOCK]
+    check("Flash Materia is not in the launch shop (a later update added it); "
+          "the four launch materia are",
+          0x6F34001B not in _ids
+          and {0x6F340017, 0x6F340018, 0x6F340019, 0x6F34001A} <= set(_ids))
+    check("2026-09-26: the shop sells no ammunition, consumables or kits (the "
+          "2006 guides), frames at 200, suits at 300",
+          not [i for i in _ids if i >> 16 in (0x6230, 0x6932, 0x6430)]
+          and dict((i, p) for i, p, _ in DSH.DEFAULT_STOCK)[0x6F300000] == 200
+          and dict((i, p) for i, p, _ in DSH.DEFAULT_STOCK)[0x63310050] == 300)
+    _zs = {int(e.split(":")[0]) for e in D.ZONE_SPAWNS_DEFAULT.split(";")}
+    check("the map exercises 37 Train Graveyard / 38 Battlefield Ruins are "
+          "served, in their arenas, which have spawns",
+          DM.ARCHIVE_ZONES.get(37) == 212 and DM.ARCHIVE_ZONES.get(38) == 231
+          and {212, 231} <= _zs and "1-8,16-40" in _src)
+
+    # --- 2026-09-24: TEAM BASE battles -- kind 29 bases, kind 33 HP --------
+    _k29 = D.base_objects_payload((0, 1))
+    check("kind 29 payload: record at body[20] (4 pad bytes), count 2, entries "
+          "{type 1, team, gimmick} at +4 / +20",
+          _k29[:4] == bytes(4) and _k29[5] == 2 and _k29[6] & 1 == 0
+          and struct.unpack_from("<HHH", _k29, 8) == (1, 0, 0)
+          and struct.unpack_from("<HHH", _k29, 24) == (1, 1, 1))
+    check("kind 33 payload: body[16] index, rec+0 controller, rec+4 HP",
+          D.base_hp_payload(1, 0x4103C, 8000)
+          == struct.pack("<III", 1, 0x4103C, 8000))
+    check("arena bases: Jungle 26/23 (live), no-base arenas (Wastelands, "
+          "Kalm, church...) none, the rest the 1100 list SECOND-first (1, 0)",
+          D.base_gimmicks(201) == (26, 23) and D.base_gimmicks(204) is None
+          and D.base_gimmicks(203) is None and D.base_gimmicks(208) is None
+          and D.base_gimmicks(230) == (1, 0))
+    # 2026-09-24: team start points (the client never picks one by team)
+    if not D.BASE_POSITIONS:
+        # no doc_arena_table.json beside the code (README): the arena data is
+        # not shipped, so these checks run on made-up positions of its shape
+        D.BASE_POSITIONS.update({
+            201: ((2000.0, -20.0, -1100.0), (300.0, -20.0, -900.0)),
+            202: ((-400.0, -12.0, -1200.0), (400.0, -12.0, 1200.0))})
+        D.TEAM_STARTS.update({201: ((500.0, -20.0, -950.0),
+                                    (1800.0, -20.0, -1050.0))})
+    _j0, _j1 = D.team_start(201, 0), D.team_start(201, 1)
+
+    def _dist(a, b):
+        return ((a[0] - b[0]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+    _b69, _b70 = D.BASE_POSITIONS[201]
+    check("Jungle: each team starts nearer its OWN base (Ifrit = g070)",
+          _dist(_j0, _b70) < _dist(_j0, _b69) and _dist(_j1, _b69) < _dist(_j1, _b70))
+    _m0, _m1 = D.team_start(202, 0), D.team_start(202, 1)
+    _c69, _c70 = D.BASE_POSITIONS[202]
+    check("a base-derived start: 150 units from the own base, toward the enemy",
+          abs(_dist(_m0, _c70) - 150.0) < 0.01 and abs(_dist(_m1, _c69) - 150.0) < 0.01
+          and _dist(_m0, _c69) < _dist(_c70, _c69))
+    check("TWIN: no base data (Kalm) or no team -> no team start",
+          D.team_start(203, 0) is None and D.team_start(201, None) is None
+          and D.team_start(201, 5) is None)
+
+    # --- 2026-09-24: TEAM CAPSULE battles (kinds 10/11/21/46/47/48, P2P 118/119)
+    check("the Mako Capsule is 0x6B300000; 118/119 are battle types, answered "
+          "not relayed", D.MAKO_CAPSULE == 0x6B300000
+          and {D.P2P_DROP, D.P2P_PICKUP} <= D.P2P_BATTLE_TYPES)
+    _fi = D.field_item_payload(D.MAKO_CAPSULE, 3, (10.4, -2.0, -300.6))
+    check("field item payload: body[16] 0, record {id, count 1, slot, 0, s16 x/y/z}",
+          _fi[:4] == bytes(4) and struct.unpack_from("<IHHHhhh", _fi, 4)
+          == (D.MAKO_CAPSULE, 1, 3, 0, 10, -2, -301))
+    _sb = D.capsule_scoreboard_payload({0x41: 2, 0x42: 0, 0x43: 1})
+    check("kind 46: 7 holder ids then 7 counts, empties are 0",
+          len(_sb) == 4 + 28 + 7 and struct.unpack_from("<7I", _sb, 4)[:3]
+          == (0x41, 0x43, 0) and tuple(_sb[32:39]) == (2, 1, 0, 0, 0, 0, 0))
+    _cr = D.BattleRoom(8, [0xA, 0xB], {0xA: 0, 0xB: 1},
+                       D.BattleRules(mode="TCP", capsules=2), now=0.0)
+    _cr.field = {0: (D.MAKO_CAPSULE, (0, 0, 0)), 1: (D.MAKO_CAPSULE, (5, 0, 5))}
+    _m, _n = D.capsule_pickup(_cr, 0xA, 0)
+    check("pick-up: kind 11 to all with ident = the picker; slot 0 leaves the "
+          "field", [(k, i, to) for k, _, i, to in _m] == [(11, 0xA, "all")]
+          and 0 not in _cr.field and _cr.holders == {0xA: 1})
+    _m, _n = D.capsule_pickup(_cr, 0xB, 0)
+    check("TWIN: the same slot again (B was a frame late) is ignored", _m == [])
+    _h, _ = D.capsule_hold(_cr, 100.0)
+    check("one of two held: scoreboard only, no hold",
+          [k for k, *_ in _h] == [46] and _cr.cap_hold is None)
+    D.capsule_pickup(_cr, 0xA, 1)
+    _h, _ = D.capsule_hold(_cr, 100.0)
+    check("team 0 holds both: kind 47 starts the 10 s hold",
+          [k for k, *_ in _h] == [46, 47] and _cr.cap_hold == (0, 110.0))
+    check("the hold is not done at 109 s", not D.capsule_hold_done(_cr, 109.0))
+    _m, _n = D.capsule_drop(_cr, 0xA, D.MAKO_CAPSULE, 1, (1.0, 2.0, 3.0))
+    check("drop: kind 10 to the dropper, kind 21 to the others, back on the field",
+          [(k, to) for k, _, _, to in _m] == [(10, "self"), (21, "others")]
+          and len(_cr.field) == 1 and _cr.holders[0xA] == 1)
+    _h, _ = D.capsule_hold(_cr, 105.0)
+    check("losing one cancels the hold (kind 48)",
+          [k for k, *_ in _h] == [46, 48] and _cr.cap_hold is None)
+    _slot = next(iter(_cr.field))
+    D.capsule_pickup(_cr, 0xB, _slot)
+    D.capsule_hold(_cr, 106.0)
+    check("one each: no hold", _cr.cap_hold is None)
+    _cr2 = D.BattleRoom(9, [0xA, 0xB], {0xA: 0, 0xB: 1},
+                        D.BattleRules(mode="TCP", capsules=1), now=0.0)
+    _cr2.field = {0: (D.MAKO_CAPSULE, (0, 0, 0))}
+    D.capsule_pickup(_cr2, 0xB, 0)
+    D.capsule_hold(_cr2, 200.0)
+    check("the hold lasts 10 s -> done, team 1 wins",
+          D.capsule_hold_done(_cr2, 210.0) and _cr2.winner_team() == 1)
+    # 2026-09-26: the launch medals 60:[48] Last Capsule / [47] Capsule Seeker
+    check("Last Capsule: the pick-up that completed the WINNING hold (B)",
+          _cr2.last_capsule == 0xB)
+    check("TWIN: a cancelled hold names nobody (room 8's hold was lost)",
+          _cr.last_capsule is None and _cr.cap_last is None)
+    _sk = D.BattleRoom(91, [0xA, 0xB, 0xC], {0xA: 0, 0xB: 1, 0xC: 1},
+                       D.BattleRules(mode="TCP", capsules=3), now=0.0)
+    _sk.field = {0: (D.MAKO_CAPSULE, (0, 0, 0))}
+    D.capsule_pickup(_sk, 0xB, 0)
+    _sk.kill(0xA, 0xB, 10.0)
+    check("Capsule Seeker: A KOs B while B holds a capsule -> 1 carrier KO",
+          _sk.carrier_kos == {0xA: 1})
+    _dm, _dn = D.capsule_drop(_sk, 0xB, D.MAKO_CAPSULE, 1, (0, 0, 0), now=10.5)
+    check("... and B's own drop right after is the SAME KO (still 1)",
+          _sk.carrier_kos == {0xA: 1}, _dn)
+    D.capsule_pickup(_sk, 0xC, next(iter(_sk.field)))
+    _dm, _dn = D.capsule_drop(_sk, 0xC, D.MAKO_CAPSULE, 1, (0, 0, 0), now=20.0)
+    check("drop-first: C's DROP before any KO credits nobody yet",
+          _sk.carrier_kos == {0xA: 1} and "Capsule Seeker" not in _dn, _dn)
+    _sk.kill(0xA, 0xC, 20.3)
+    check("... then its request 30 (0.3 s later, holding 0) is the carrier KO",
+          _sk.carrier_kos == {0xA: 2})
+    D.capsule_pickup(_sk, 0xC, next(iter(_sk.field)))
+    D.capsule_drop(_sk, 0xC, D.MAKO_CAPSULE, 1, (0, 0, 0), now=40.0)
+    _sk.kill(0xA, 0xC, 50.0)
+    check("TWIN: a KO 10 s after a voluntary drop is no carrier KO",
+          _sk.carrier_kos == {0xA: 2})
+    _sk.kill(0xC, 0xA, 60.0)                 # A holds nothing
+    check("TWIN: a KO of a player holding nothing is no carrier KO",
+          _sk.carrier_kos == {0xA: 2})
+    _hb = dict(_cr2.holders)
+    _dm, _dn = D.capsule_drop(_cr2, 0xB, 0x62300000, 18, (5.0, 6.0, 7.0))
+    check("2026-09-26: a dropped non-capsule item lands on the field (kind 10 to "
+          "ALL, ident = the dropper) and is not a capsule",
+          len(_dm) == 1 and _dm[0][0] == 10 and _dm[0][2:] == (0xB, "all")
+          and _cr2.holders == _hb, _dn)
+    _ds = struct.unpack_from("<H", _dm[0][1], 10)[0]
+    _pm, _pn = D.capsule_pickup(_cr2, 0xA, _ds)
+    check("... and picking it up is kind 11 {id, 18} to ALL, ident = the picker",
+          len(_pm) == 1 and _pm[0][0] == 11 and _pm[0][2] == 0xA
+          and struct.unpack_from("<IH", _pm[0][1], 4) == (0x62300000, 18)
+          and _ds not in _cr2.field and _cr2.holders == _hb, _pn)
+    check("TWIN: a second pick-up of that slot is ignored (already taken)",
+          D.capsule_pickup(_cr2, 0xB, _ds)[0] == [])
+    _pf = D.BattleRoom(90, [1, 2], {1: 0, 2: 1}, D.BattleRules(mode="BT"), now=0.0)
+    _pf.field = {}
+    check("a plain (non-capsule) battle's field takes a drop too",
+          D.capsule_drop(_pf, 1, 0x62300002, 30, (0, 0, 0))[0][0][0] == 10
+          and len(_pf.field) == 1)
+    # 2026-09-24 (live + RE): touching a kind-10 capsule sends a RELIABLE
+    # inner-119 (flags 0x01) to the server; body = {u32 slot, u32 1, u32 n,
+    # f32 pos}. The live capture's body (slot 6), mode 4:
+    _b119 = bytes.fromhex("06000000010000000000000000d7777f4477fb5ac12ac2acc4"[:48]
+                          + "c4")
+    _w119 = bytearray(D.BODY_OFF) + _b119
+    _w119[1] = 4
+    _i119 = {"type": 119, "flags": 0x01, "is_data": True, "plain": bytes(_w119)}
+    check("a reliable mode-4 inner-119 is a capsule PICK-UP to the server",
+          D.p2p_server_type(bytes(_w119), _i119) == D.P2P_PICKUP
+          and D.p2p_battle_type(bytes(_w119), _i119) is None)
+    check("its body[0] is the SLOT (live: 6, logged then as 'request 6')",
+          D.p2p_pickup_slot(_b119) == 6)
+    check("TWIN: a reliable GS request (inner type 130) is not a pick-up",
+          D.p2p_server_type(bytes(_w119), dict(_i119, type=D.GS_INNER_TYPE)) is None
+          and D.p2p_server_type(bytes(_w119), dict(_i119, is_data=False)) is None)
+    # 2026-09-24 (LIVE, Jungle TBS): the controller's request 24 carries the
+    # bases -- count at body+61, {u32 HP, u16 index, u16 0, u32 mask} from +64
+    _r24 = bytes.fromhex(
+        "1800020000000000010000000e010000110000003c10040047107d43521cd7c0"
+        "a30c62c41e68cf3e00000000030e6abf020c853c000103200000002000020000"
+        "401f000000000000000000008a1d00000100000000000000")
+    check("request 24 (live): base 0 at 8000, base 1 shot down to 7562",
+          D.base_report(_r24) == [(0, 8000, 0), (1, 7562, 0)])
+    check("TWIN: a short / non-base report parses to nothing",
+          D.base_report(_r24[:70]) == [] and D.base_report(bytes(64)) == [])
+    check("Jungle bases: Ifrit (team 0) = gimmick 26, the RED one (live 09-24)",
+          D.base_gimmicks(201) == (26, 23))
+    _br = D.BattleRoom(14, [0xA, 0xB], {0xA: 0, 0xB: 1},
+                       D.BattleRules(mode="TBS"), now=0.0)
+    check("first report: both bases change, nothing ends",
+          _br.base_update(D.base_report(_r24)) == [(0, 8000), (1, 7562)]
+          and not _br.over)
+    check("the same report again changes nothing",
+          _br.base_update(D.base_report(_r24)) == [])
+    _br.base_update([(0, 8000, 0), (1, 0, 1)])
+    check("Shiva's base (1) at 0 HP: over, team 0 (Ifrit) wins",
+          _br.over and _br.why == "team 1's base destroyed"
+          and _br.winner_slot() == 0)
+    _br2 = D.BattleRoom(15, [0xA], {0xA: 0}, D.BattleRules(mode="TBS"), now=0.0)
+    _br2.base_update([(0, 0, 0), (1, 0, 0)])
+    check("TWIN: a base that was NEVER above 0 does not end the room",
+          not _br2.over)
+    # 2026-09-26: TEAM BASE = destroy + OCCUPY (January Additional Manual).
+    # Base 1 (team 1's) falls -> team 0 must stand on its spot for the hold.
+    _oc = D.BattleRoom(16, [0xA, 0xB, 0xC], {0xA: 0, 0xB: 1, 0xC: 0},
+                       D.BattleRules(mode="TBS"), now=0.0)
+    _oc.base_spots = D.base_spots(201)
+    check("base spots: team 0 owns g070 (BASE_POSITIONS[z][1]), like team_start",
+          _oc.base_spots == (D.BASE_POSITIONS[201][1], D.BASE_POSITIONS[201][0]))
+    _oc.base_update([(0, 8000, 0), (1, 8000, 0)], occupy=True)
+    _oc.base_update([(0, 8000, 0), (1, 0, 1)], occupy=True)
+    check("occupy: base 1 at 0 HP does NOT end the room; team 0 must occupy it",
+          not _oc.over and _oc.base_down == {1: 0})
+    _sp = _oc.base_spots[1]
+    _on = (_sp[0] + 30.0, _sp[1], _sp[2] - 40.0)      # 50 away: on the spot
+    _off = (_sp[0] + 300.0, _sp[1], _sp[2])
+    _poses = {0xA: _off + (0.0,), 0xB: _on + (0.0,), 0xC: _off + (0.0,)}
+    D.base_occupy_tick(_oc, _poses, 0.0, 100.0, 10.0)
+    check("TWIN: only the DEFENDER (team 1) on the spot -> no hold",
+          not _oc.occupy and not _oc.over)
+    _poses[0xA] = _on + (1.0,)
+    D.base_occupy_tick(_oc, _poses, 1.0, 100.0, 10.0)
+    check("an attacker (0xA, team 0) steps on the spot -> hold starts",
+          _oc.occupy.get(1) == (0xA, 1.0) and not _oc.over)
+    _poses[0xA] = _off + (6.0,)
+    D.base_occupy_tick(_oc, _poses, 6.0, 100.0, 10.0)
+    check("it leaves at +5 s -> the hold RESETS", not _oc.occupy and not _oc.over)
+    _poses[0xA] = _on + (7.0,)
+    D.base_occupy_tick(_oc, _poses, 7.0, 100.0, 10.0)
+    _oc.dead_until[0xA] = 99.0                     # KO'd on the spot
+    _poses[0xA] = _on + (9.0,)
+    D.base_occupy_tick(_oc, _poses, 9.0, 100.0, 10.0)
+    check("a KO'd occupier holds nothing -> reset", not _oc.occupy)
+    _oc.dead_until.clear()
+    _poses[0xC] = _on + (10.0,)
+    D.base_occupy_tick(_oc, _poses, 10.0, 100.0, 10.0)
+    _poses[0xC] = _on + (15.0,)
+    D.base_occupy_tick(_oc, _poses, 15.0, 100.0, 10.0)
+    check("TWIN: 5 s of a 10 s hold does not win", not _oc.over)
+    _poses[0xC] = _on + (18.0,)
+    D.base_occupy_tick(_oc, _poses, 18.0, 100.0, 10.0)
+    check("TWIN: a pose older than 2 s is not 'there' (stale 0x83 at +20)",
+          D.base_occupy_tick(_oc, _poses, 20.5, 100.0, 10.0) and not _oc.occupy)
+    _poses[0xC] = _on + (21.0,)
+    D.base_occupy_tick(_oc, _poses, 21.0, 100.0, 10.0)
+    _poses[0xC] = _on + (31.0,)
+    D.base_occupy_tick(_oc, _poses, 31.0, 100.0, 10.0)
+    check("10 s unbroken on the spot: over, team 0 wins, 0xC is the occupier",
+          _oc.over and _oc.winner_slot() == 0 and _oc.occupier == 0xC
+          and "occupied" in _oc.why)
+    import doc_stats as ST_
+    _aw = ST_.award_medals("TBS", [
+        {"key": "a", "team": 0, "kills": 0, "kos": 1},
+        {"key": "c", "team": 0, "kills": 0, "kos": 1, "base_capture": True},
+        {"key": "b", "team": 1, "kills": 0, "kos": 1}], 0)
+    check("Assault medal goes to the OCCUPIER's row only",
+          ST_.M_ASSAULT in _aw["c"] and ST_.M_ASSAULT not in _aw["a"]
+          and ST_.M_ASSAULT not in _aw["b"])
+    _oc2 = D.BattleRoom(17, [0xA, 0xB], {0xA: 0, 0xB: 1},
+                        D.BattleRules(mode="TBS"), now=0.0)
+    _oc2.base_update([(1, 8000, 0)], occupy=False)
+    _oc2.base_update([(1, 0, 1)], occupy=False)
+    check("TWIN: occupy=False (--base-occupy off) keeps the old instant end",
+          _oc2.over and not _oc2.base_down and _oc2.occupier is None)
+    # 2026-09-24: capsule MISSIONS reuse the field; the count wins them
+    _mr = D.BattleRoom(10, [0xA, 0xB], {0xA: 0, 0xB: 0},
+                       D.BattleRules(mode="TBT"), mission=16, now=0.0)
+    check("a capsule mission's field = its target (Collector's Mind: 7)",
+          D.capsule_count(_mr) == 7)
+    check("TWIN: a kill mission and a plain team battle get no field",
+          D.capsule_count(D.BattleRoom(11, [0xA], {0xA: 0},
+                                       D.BattleRules(mode="TBT"), mission=1,
+                                       now=0.0)) == 0
+          and D.capsule_count(D.BattleRoom(12, [0xA], {0xA: 0},
+                                           D.BattleRules(mode="TBT"),
+                                           now=0.0)) == 0)
+    _mr.field = {i: (D.MAKO_CAPSULE, (0, 0, i)) for i in range(7)}
+    for _i in range(6):
+        D.capsule_pickup(_mr, 0xA if _i % 2 else 0xB, _i)
+    D.capsule_mission_check(_mr)
+    check("6 of 7 held between two players: not over", not _mr.over)
+    D.capsule_pickup(_mr, 0xA, 6)
+    D.capsule_mission_check(_mr)
+    check("the 7th (co-op total) wins it: over with the objective, verdict w",
+          _mr.over and _mr.why.startswith(D.doc_missions.WHY_OBJECTIVE)
+          and D.doc_missions.verdict(16, _mr.over, _mr.why, 0) == "w")
+    _mr27 = D.BattleRoom(13, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"),
+                         mission=27, now=0.0)
+    _mr27.field = {i: (D.MAKO_CAPSULE, (0, 0, i)) for i in range(15)}
+    for _i in range(15):
+        D.capsule_pickup(_mr27, 0xA, _i)
+    D.capsule_mission_check(_mr27)
+    check("TWIN: 'as many as possible' (27) never ends on a count",
+          D.capsule_count(_mr27) == 15 and not _mr27.over)
+
+    # --- sec 4he (2026-09-23): the P2P battle layer, the room, the rules --
+    def p2p(ptype, mode, sender, target, payload, flags=0x08):
+        rec = bytearray(D.P2P_PAYLOAD_OFF + len(payload))
+        rec[0], rec[1] = ptype, 8
+        struct.pack_into("<I", rec, D.P2P_SENDER_OFF, sender)
+        struct.pack_into("<i", rec, D.P2P_TARGET_OFF, target)
+        struct.pack_into("<H", rec, D.P2P_PAYLOAD_LEN_OFF, len(payload))
+        rec[D.P2P_PAYLOAD_OFF:] = payload
+        pkt = bytearray(D.BODY_OFF) + rec
+        pkt[1] = mode
+        pkt[8] = ptype
+        pkt[9] = flags
+        struct.pack_into("<I", pkt, 16, sender)
+        inner = {"type": ptype, "flags": flags, "plain": bytes(pkt),
+                 "u32_16": sender, "u32_20": 0, "is_data": bool(flags & 1)}
+        return bytes(pkt), inner
+    dmg = struct.pack("<I", 1) + struct.pack("<IiII", 0x41018, 35, 0x2a664, 77) + bytes(4)
+    d113, i113 = p2p(113, 4, 0x2a664, 0x41018, dmg)
+    check("a mode-4 inner-113 flags-8 datagram is the P2P DAMAGE layer",
+          D.p2p_battle_type(d113, i113) == 113)
+    s112, i112 = p2p(112, 3, 0x2a664, -1, bytes(56))
+    check("a mode-3 inner-112 flags-8 datagram is a SHOT",
+          D.p2p_battle_type(s112, i112) == 112)
+    _t, _f, _sid, _tgt, _pl = D.p2p_record(d113)
+    check("p2p_record reads type / sender / target / payload",
+          (_t, _sid, _tgt, len(_pl)) == (113, 0x2a664, 0x41018, len(dmg)))
+    check("113 entries decode {target, damage, attacker, shot id}",
+          D.p2p_damage_entries(_pl) == [(0x41018, 35, 0x2a664, 77)])
+    g30 = D.build_gs_message(30, seq=1, body_extra=struct.pack("<IHHII", 0, 0, 0, 0, 0)[:0])
+    _gs_inner = {"type": 130, "flags": 1, "plain": g30, "u32_16": 0x41018,
+                 "u32_20": 0x41018, "is_data": True}
+    check("TWIN: a mode-4 GAME-SERVER request is NOT the P2P layer (flags 1, type 130)",
+          D.p2p_battle_type(bytearray(g30[:1]) + b"\x04" + g30[2:], _gs_inner) is None)
+    _no8 = dict(i113, flags=0x00)
+    check("TWIN: inner flags without bit 3 are not relayed",
+          D.p2p_battle_type(d113, _no8) is None)
+    _m2 = bytearray(d113)
+    _m2[1] = 2
+    check("TWIN: a mode-2 datagram is not the P2P layer",
+          D.p2p_battle_type(bytes(_m2), i113) is None)
+    rl = D.build_peer_relay(d113)
+    check("the relay copy is mode 0, flags | 8, body VERBATIM, checksum recomputed (sec 4fu shape)",
+          rl[1] == 0 and rl[9] & 8 and rl[D.BODY_OFF:] == d113[D.BODY_OFF:]
+          and struct.unpack_from("<H", rl, D.CKSUM_OFF)[0] == D.cksum(
+              bytearray(rl[:D.CKSUM_OFF]) + bytes(2) + bytearray(rl[D.CKSUM_OFF + 2:])))
+
+    # request 30: killer at body+8 (wire+32), victim = inner u32_20 (wire+20)
+    r30 = bytearray(D.BODY_OFF + 12)
+    struct.pack_into("<H", r30, D.BODY_OFF, 30)
+    struct.pack_into("<I", r30, D.BODY_OFF + 8, 0x2a664)
+    check("gs_kill_report: killer from body+8, victim from the inner header's wire+20",
+          D.gs_kill_report({"u32_16": 0x41018, "u32_20": 0x41018},
+                           bytes(r30[D.BODY_OFF:])) == (0x2a664, 0x41018))
+    check("TWIN: no inner header, no report",
+          D.gs_kill_report(None, bytes(r30[D.BODY_OFF:])) is None)
+
+    # kind 9: four u16 team points, killer, victim, last-one flag, seq
+    k9 = D.build_gs_kill_event([3, 1, 0, 0], 0x2a664, 0x41018, last_one=True,
+                               seq9=7, seq=2, ident=0x41018)
+    kb = body(k9)
+    check("kill event is notify 35 kind 9",
+          struct.unpack_from("<H", kb, 0)[0] == 35
+          and struct.unpack_from("<I", kb, 12)[0] == 9)
+    check("kind-9 record: team points u16 x4 at +0, killer +8, victim +12, last-one +18, seq +19",
+          struct.unpack_from("<HHHH", kb, 20) == (3, 1, 0, 0)
+          and struct.unpack_from("<II", kb, 28) == (0x2a664, 0x41018)
+          and kb[38] == 1 and kb[39] == 7)
+
+    # the room: a TBT to 3 kills
+    rules = D.BattleRules(mode="TBT", time_limit=600, kill_target=3, respawn=5)
+    room = D.BattleRoom(4, [0x2a664, 0x41018], {0x2a664: 0, 0x41018: 1}, rules,
+                        leader=0x2a664, now=100.0)
+    check("room: first 47 starts the clock, end = start + time limit",
+          room.arrive(0x2a664, 100.0) and room.started == 100.0 and room.end_at == 700.0)
+    check("room: a second 47 does not restart the clock",
+          not room.arrive(0x41018, 130.0) and room.started == 100.0)
+    # 2026-09-26: MISSION SUPPLIES. Request 44 = this battle's rounds fired;
+    # the body below is a live one (09-24 11:23:58): 0x3000 x4, 0x3001 x6.
+    import doc_shop as S_
+    import doc_missions as M_
+    _b44 = bytes.fromhex("2c000100000000000000000000300000040000000130000006000000") + bytes(48)
+    check("supplies: request 44 -> handgun 4, rifle 6 fired (live body)",
+          S_.fired_counts(_b44) == {0x62300000: 4, 0x62300001: 6})
+    check("supplies: an all-zero 44 fired nothing", S_.fired_counts(bytes(76)) == {})
+    check("supplies: top-up = the shortfall only, never lowers",
+          S_.supply_grant({0x62300000: 32, 0x62300001: 18, 0x62300002: 90},
+                          M_.STANDARD_SUPPLIES) == [(0x62300000, 4)])
+    check("TWIN: a full bag gets NO grant (message 27 would double it)",
+          S_.supply_grant({0x62300000: 36, 0x62300001: 18, 0x62300002: 60},
+                          M_.STANDARD_SUPPLIES) == [])
+    check("supplies: Beginner's Course I = 300 handgun + 3 Potions; PvP = standard",
+          M_.supplies(39) == ((0x62300000, 300), (0x69320000, 3))
+          and M_.supplies(None) == M_.STANDARD_SUPPLIES
+          and M_.supplies(16) == M_.STANDARD_SUPPLIES)
+    # 2026-09-26: the RESPAWN REFILL rides kind 25 at payload[20..43]
+    # (body[36..]): 3 x {u32 id, u16 0, u16 qty}, SET into the victim's bag.
+    _k25 = D.build_gs_down(1, 2, 3, ident=0x41050,
+                           ammo=((0x62300000, 36), (0x62300001, 18), (0x62300002, 60)))
+    _k25b = _k25[D.BODY_OFF:]
+    check("kind 25 refill: 3 entries {id, 0, qty} at body[36..59]",
+          [struct.unpack_from("<IHH", _k25b, 36 + 8 * i) for i in range(3)]
+          == [(0x62300000, 0, 36), (0x62300001, 0, 18), (0x62300002, 0, 60)])
+    check("kind 25 refill: the respawn point is unchanged at payload[8..13]",
+          struct.unpack_from("<hhh", _k25b, 24) == (1, 2, 3))
+    check("TWIN: kind 25 without ammo is the old 20-byte payload (list empty)",
+          len(D.build_gs_down(1, 2, 3, ident=0x41050)) == len(_k25) - 24)
+    # 2026-09-26 (retail 03-24 rule): the refill is BULLETS only, each row
+    # max(supplies ledger, battle-start count); a SET never lowers the ledger
+    check("respawn refill: PvP, empty ledger -> the three standard bullet rows",
+          M_.respawn_refill(M_.STANDARD_SUPPLIES, {}) == M_.STANDARD_SUPPLIES)
+    check("respawn refill: Beginner's Course -> handgun only, NO Potion row",
+          M_.respawn_refill(M_.supplies(39), {0x69320000: 0})
+          == ((0x62300000, 300),))
+    check("respawn refill: a pickup above the issue is KEPT (ledger 50 > 36)",
+          M_.respawn_refill(M_.STANDARD_SUPPLIES, {0x62300000: 50})[0]
+          == (0x62300000, 50))
+    check("respawn refill: below the issue -> topped up to the issue (5 -> 18)",
+          M_.respawn_refill(M_.STANDARD_SUPPLIES, {0x62300001: 5})[1]
+          == (0x62300001, 18))
+    check("TWIN: the old rule (the start list, Potions included) differs",
+          tuple(sorted(M_.supplies(39), key=lambda e: e[0] >> 16 != 0x6230))[:3]
+          != M_.respawn_refill(M_.supplies(39), None)
+          and M_.respawn_refill(M_.STANDARD_SUPPLIES, {0x62300000: 50})
+          != M_.STANDARD_SUPPLIES)
+    _rf = M_.respawn_refill(M_.STANDARD_SUPPLIES, {0x62300002: 99, 0x62300000: 1})
+    check("respawn refill: every row >= ledger and >= issue",
+          all(q >= max(dict(M_.STANDARD_SUPPLIES)[i],
+                       {0x62300002: 99, 0x62300000: 1}.get(i, 0)) for i, q in _rf)
+          and all(i >> 16 == 0x6230 for i, _q in _rf))
+    # 2026-09-26: ONE shared GO, clock from the GO. Live table 31 (09-26,
+    # 300 s): 47s at +0 / +1.6 / +10.3, GOs at +20.0 / +21.6 / +30.4, END
+    # 300 s after the FIRST 47 -- the last client's HUD still read ~30 s.
+    g = D.BattleRoom(31, [1, 2, 3], {1: 0, 2: 1, 3: 1},
+                     D.BattleRules(mode="BT", time_limit=300), now=0.0)
+    g.arrive(1, 0.0, go_after=20.0, go_wait=20.0)
+    g.arrive(2, 1.6, go_after=20.0, go_wait=20.0)
+    g.arrive(3, 10.3, go_after=20.0, go_wait=20.0)
+    check("shared GO: due 20 s after the LATEST 47, and no clock before it",
+          abs(g.go_at - 30.3) < 1e-9 and g.end_at is None
+          and not g.go_due(30.2) and g.go_due(30.3))
+    g.go()
+    check("shared GO: the room clock starts AT the GO (end = GO + 300 s)",
+          abs(g.end_at - 330.3) < 1e-9 and abs(g.elapsed(130.3) - 100.0) < 1e-9)
+    check("shared GO: an arrival after the GO rides its own (joins_go False)",
+          not g.joins_go(40.0, 20.0))
+    tw = D.BattleRoom(31, [1, 2, 3], {1: 0, 2: 1, 3: 1},
+                      D.BattleRules(mode="BT", time_limit=300), now=0.0)
+    tw.arrive(1, 0.0)
+    tw.arrive(2, 1.6)
+    tw.arrive(3, 10.3)
+    check("TWIN (no shared GO): the end is 300 s after the first 47, 30.3 s "
+          "before the last client's HUD clock (GO +30.3) runs out",
+          tw.end_at == 300.0 and abs((30.3 + 300) - tw.end_at - 30.3) < 1e-9)
+    cap = D.BattleRoom(32, [1, 2], {1: 0, 2: 1},
+                       D.BattleRules(mode="BT", time_limit=300), now=0.0)
+    cap.arrive(1, 0.0, go_after=20.0, go_wait=20.0)
+    check("shared GO: a 47 past the wait cap does not push the GO back",
+          not cap.joins_go(25.0, 20.0)
+          and not cap.arrive(2, 25.0, go_after=20.0, go_wait=20.0)
+          and cap.go_at == 20.0)
+    f1 = room.kill(0x2a664, 0x41018, 200.0)
+    check("room: a kill credits the killer's team slot and counts the victim's death",
+          f1 == ([1, 0, 0, 0], 0x2a664, 0x41018, False)
+          and room.kills[0x2a664] == 1 and room.deaths[0x41018] == 1)
+    check("room: a duplicate report within the dedupe window is ignored",
+          room.kill(0x2a664, 0x41018, 200.5) is None and room.deaths[0x41018] == 1)
+    check("room: the victim respawns after the record's delay",
+          room.dead_until[0x41018] == 205.0 and room.respawns_due(204.0) == []
+          and room.respawns_due(205.0) == [0x41018])
+
+    # 2026-09-23 retail death flow (savestate: the invincible player's state
+    # word entry+0x56 was 1; only kind 13 pushes code 13 = state 0, and only
+    # after kind 25 set the dead bits 0x2400).
+    _dn = D.build_gs_down(1090.4, -20.0, -515.6, rot=90.0, bmap=(1, 3),
+                          ident=0x4103C)
+    _db = _dn[24:]
+    check("kind 25: kind at body[12], map0/map1 at payload[6..7], s16 x,y,z at "
+          "payload[8..13], facing at payload[14..19]",
+          struct.unpack_from("<I", _db, 12)[0] == 25
+          and _db[16 + 6] == 1 and _db[16 + 7] == 3
+          and struct.unpack_from("<3h", _db, 16 + 8) == (1090, -20, -516)
+          and struct.unpack_from("<3h", _db, 16 + 14) == (1000, 0, 0))
+    _dsrc = open(D.__file__, encoding="utf-8").read()
+    _d43 = _dsrc[_dsrc.index("elif _gmt == GS_REVIVE_REQ"):
+                 _dsrc.index("elif _gmt == GS_ITEM_USE_REQ")]
+    check("request 43 (the kind-9 ack) never sends a revive", "sendto" not in _d43)
+    check("TWIN: the retracted request-43 arm DID send one",
+          "sendto" in "s.sendto(build_gs_notify(a.respawn_kind, struct.pack(\"<I\", a.phoenix_hp)")
+    check("respawn default is kind 13 (18/19 left the state word at 1)",
+          '"--respawn-kind", type=int, default=13' in _dsrc)
+    check("TWIN: the shipped default 19 fails the same test",
+          '"--respawn-kind", type=int, default=13' not in
+          '"--respawn-kind", type=int, default=19')
+    f2 = room.kill(0x2a664, 0x41018, 210.0)
+    check("room: one kill from the target raises the last-one flag",
+          f2[0] == [2, 0, 0, 0] and f2[3] is True and not room.over)
+    check("room: a friendly / self kill counts the death but credits nobody",
+          room.kill(0x41018, 0x41018, 220.0)[1] == 0 and room.points == [2, 0, 0, 0])
+    f3 = room.kill(0x2a664, 0x41018, 230.0)
+    check("room: the kill target ENDS the battle",
+          room.over and "target" in room.why and f3[0] == [3, 0, 0, 0])
+    check("room: verdict = the leading slot; loser loses, nobody draws",
+          room.outcome(0x2a664) == "w" and room.outcome(0x41018) == "l"
+          and room.winner_team() == 0)
+    check("room: a kill after the end is ignored",
+          room.kill(0x41018, 0x2a664, 240.0) is None)
+    # 2026-09-24: First Attack / The Finisher come off the kill ledger
+    check("room: first_killer = the first CREDITED kill, finisher = the kill "
+          "that reached the target",
+          room.first_killer == 0x2a664 and room.finisher == 0x2a664)
+    tie = D.BattleRoom(5, [1, 2], {1: 0, 2: 1}, D.BattleRules(mode="TBT"), now=0.0)
+    tie.arrive(1, 0.0)
+    tie.kill(1, 2, 1.0)
+    tie.kill(2, 1, 3.0)
+    check("room: equal points is a DRAW for both",
+          tie.outcome(1) == "d" and tie.outcome(2) == "d" and tie.winner_slot() is None)
+    check("TWIN: no kill target means the clock alone ends it",
+          not tie.over and tie.end_at == 180.0)
+    check("room: a battle the clock ends has a first kill but NO finisher",
+          tie.first_killer == 1 and tie.finisher is None)
+    sk = D.BattleRoom(11, [1, 2], {1: 0, 2: 1},
+                      D.BattleRules(mode="TBT", kill_target=1), now=0.0)
+    sk.kill(2, 2, 1.0)
+    check("TWIN: a self kill credits nobody -- no first kill, no finisher, not over",
+          sk.first_killer is None and sk.finisher is None and not sk.over)
+    tie.leave(2)
+    check("room: a member that left is no longer present; the other is",
+          tie.present() == [1] and 2 in tie.left)
+    bt = D.BattleRoom(6, [1, 2, 3], {1: 0, 2: 1, 3: 2}, D.BattleRules(mode="BT"), now=0.0)
+    bt.kill(3, 1, 1.0)
+    bt.kill(3, 2, 2.0)
+    check("room (BT): per-player kills, the top scorer wins alone",
+          bt.kills == {1: 0, 2: 0, 3: 2} and bt.points == [0, 0, 0, 0]
+          and bt.outcome(3) == "w" and bt.outcome(1) == "l" and bt.outcome(2) == "l")
+    ms = D.BattleRoom(7, [1], {1: 0}, D.BattleRules(mode="MISSION"), mission=17, now=0.0)
+    check("room (mission): the clock running out is a FAILURE",
+          ms.outcome(1) == "l")
+    ms.kill(1, 0x7777, 1.0)
+    check("room (mission): an ENEMY kill is the mission's first kill",
+          ms.first_killer == 1 and ms.kills[1] == 1)
+
+    # the rules come from the RECORD
+    rec = bytearray(D.build_battletable_record(table_id=9, leader=1, cur=2, maximum=6,
+                                               map_idx=7, mode=1))
+    struct.pack_into("<I", rec, D.BT_OFF_TIME, 600)   # "10 minute(s)" -> 600 s
+    rec[D.BT_OFF_PENALTY] = 6          # respawn: config[+57]*1000 + 4000 ms
+    rec[D.BT_OFF_BRIEFING] = 2         # "Briefing: 2 min"
+    rec[D.BT_OFF_RESTRICT] = 0x0a      # Magic + Shooting restricted
+    struct.pack_into("<H", rec, D.BT_OFF_SITUATION, 1100)
+    r = D.battle_rules_from_record(bytes(rec), default_length=180, default_kill=20,
+                                   default_respawn=4)
+    check("rules: Time Limit = wire+4 u32 SECONDS, respawn = wire+117 + 4 s, briefing wire+111 min",
+          r.time_limit == 600 and r.respawn == 10.0 and r.briefing == 120.0)
+    check("rules: wire+116 is the RESTRICTIONS mask, not a time (the retracted reading)",
+          r.restrictions == 0x0a and r.ko_limit == 0 and not r.random_teams and not r.npc)
+    rk = bytearray(rec)
+    struct.pack_into("<I", rk, D.BT_OFF_FLAGS, D.BT_FLAG_KO_LIMIT | D.BT_FLAG_RANDOM_TEAMS
+                     | D.BT_FLAG_NPC | D.BT_FLAG_FRIENDLY_FIRE)
+    rk[D.BT_OFF_KO_LIMIT] = 3
+    rkr = D.battle_rules_from_record(bytes(rk))
+    check("rules: KO Limit = wire+118 behind flag 0x00800000; Random / NPC / FF flags",
+          rkr.ko_limit == 3 and rkr.random_teams and rkr.npc and rkr.friendly_fire)
+    rk[D.BT_OFF_KO_LIMIT] = 5
+    struct.pack_into("<I", rk, D.BT_OFF_FLAGS, 0)
+    check("TWIN: a KO Limit byte without its flag is ignored",
+          D.battle_rules_from_record(bytes(rk)).ko_limit == 0)
+    rn = bytearray(rec)
+    struct.pack_into("<I", rn, D.BT_OFF_TIME, 0)
+    check("rules: Time Limit None + a kill target = NO clock (the target ends it)",
+          D.battle_rules_from_record(bytes(rn), default_kill=20).time_limit == 0
+          and D.BattleRoom(3, [1, 2], {1: 0, 2: 1},
+                           D.battle_rules_from_record(bytes(rn), default_kill=20),
+                           now=0.0).arrive(1, 5.0)
+          and D.BattleRoom(3, [1, 2], {1: 0, 2: 1},
+                           D.battle_rules_from_record(bytes(rn), default_kill=20),
+                           now=0.0).end_at is None)
+    pw = bytearray(rec)
+    struct.pack_into("<I", pw, D.BT_OFF_FLAGS, D.BT_FLAG_PASSWORD)
+    pw[D.BT_OFF_PW_REC:D.BT_OFF_PW_REC + 8] = b"abcd\x00\x00\x00\x00"
+    check("record_password: flags bit 0 + wire+68 (4 chars); none without the flag",
+          D.record_password(bytes(pw)) == b"abcd" and D.record_password(bytes(rec)) == b"")
+    pst = D.BattletableStore()
+    pk = pst.create(bytes(pw), 0x1, 0x10)
+    check("store: CREATE takes the password FROM THE RECORD; a wrong JOIN password is -2",
+          pst.reserve(pk, 0x2, b"zzzz\x00\x00\x00\x00")[0] == -2
+          and pst.reserve(pk, 0x2, b"abcd\x00\x00\x00\x00")[0] == 0)
+    # KO limit in the room: the third death puts a player out; a wiped side loses
+    ko = D.BattleRoom(10, [1, 2, 3], {1: 0, 2: 1, 3: 1},
+                      D.BattleRules(mode="TBT", ko_limit=2, respawn=1), now=0.0)
+    ko.kill(1, 2, 1.0)
+    check("room (KO limit): below the limit the victim respawns", 2 in ko.dead_until)
+    ko.kill(1, 2, 3.0)
+    check("room (KO limit): at the limit the victim is OUT, no respawn, not over yet",
+          ko.eliminated(2) and 2 not in ko.dead_until and not ko.over)
+    ko.kill(1, 3, 4.0)
+    ko.kill(1, 3, 6.0)
+    check("room (KO limit): the wiped side loses",
+          ko.over and "KO limit" in ko.why and ko.outcome(1) == "w" and ko.outcome(3) == "l")
+    check("rules: mode / max / situation / map / mission from the record",
+          r.mode == "TBT" and r.maximum == 6 and r.situation == 1100
+          and r.map_idx == 7 and r.mission == 0)
+    check("rules: a zero wire+22 target FALLS BACK to the knob",
+          r.kill_target == 20)
+    struct.pack_into("<H", rec, D.BT_OFF_TARGET, 7)
+    check("rules: the kill target is wire+22 (the config screen's Kill Count row, sec 4he)",
+          D.battle_rules_from_record(bytes(rec), default_kill=20).kill_target == 7)
+    rb = bytearray(rec)
+    struct.pack_into("<I", rb, D.BT_OFF_FLAGS, D.BT_FLAG_INDIVIDUAL)
+    check("rules: flag 0x200 = BT individual; 0x04000000 alone is Beginner TEAM play",
+          D.battle_rules_from_record(bytes(rb)).mode == "BT"
+          and D.battle_rules_from_record(bytes(rb[:0]) + bytes(rec[:0]) + bytes(
+              (lambda x: (struct.pack_into("<I", x, D.BT_OFF_FLAGS, D.BT_FLAG_BEGINNER), x)[1])(bytearray(rec)))).mode == "TBT")
+    rd = bytearray(rec)
+    rd[D.BT_OFF_MODE] = 2
+    rdm = D.battle_rules_from_record(bytes(rd))
+    check("rules: mode byte 2 = TDM Team Survival, no respawns",
+          rdm.mode == "TDM" and rdm.respawn < 0)
+    check("rules: mode bytes 3..6 = TBS / TCP / TLD / TFL",
+          [D.battle_rules_from_record(bytes(rd[:D.BT_OFF_MODE]) + bytes([mb]) + bytes(rd[D.BT_OFF_MODE + 1:])).mode
+           for mb in (3, 4, 5, 6)] == ["TBS", "TCP", "TLD", "TFL"])
+    # unit vs unit sides
+    check("unit_teams: the first two units seated take sides 0 / 1, others keep theirs",
+          D.unit_teams({1: 1, 2: 0, 3: 0, 4: 1, 5: 0}, [1, 2, 3, 4, 5],
+                       {1: 0xA, 2: 0xA, 3: 0xB, 4: 0xC, 5: 0}.get)
+          == {1: 0, 2: 0, 3: 1, 4: 1, 5: 0})
+    # BT: per-player points in kind 9, the winner by kills
+    ib = D.BattleRoom(8, [0x11, 0x22, 0x33], {}, D.BattleRules(mode="BT", kill_target=2), now=0.0)
+    f = ib.kill(0x22, 0x11, 1.0)
+    check("room (BT): kind 9 carries killer points / victim points, not team totals",
+          f[0] == [1, 0, 0, 0] and ib.points == [0, 0, 0, 0])
+    ib.kill(0x11, 0x22, 2.0)
+    f = ib.kill(0x22, 0x33, 3.0)
+    check("room (BT): the kill target ends it; winner = the top scorer's member index",
+          ib.over and f[0][0] == 2 and ib.winner_cid() == 0x22 and ib.winner_slot() == 1
+          and ib.outcome(0x22) == "w" and ib.outcome(0x11) == "l")
+    check("room (BT): first kill and finisher are both 0x22",
+          ib.first_killer == 0x22 and ib.finisher == 0x22)
+    # TDM: last side standing
+    sv = D.BattleRoom(9, [1, 2, 3], {1: 0, 2: 1, 3: 1}, D.battle_rules_from_record(bytes(rd)), now=0.0)
+    sv.arrive(1, 0.0)
+    sv.kill(1, 2, 1.0)
+    check("room (TDM): one death is not a wipe; nobody respawns",
+          not sv.over and 2 not in sv.dead_until and sv.alive() == [1, 3])
+    sv.kill(1, 3, 2.0)
+    check("room (TDM): the wiped side loses, the side standing wins",
+          sv.over and "wiped" in sv.why and sv.outcome(1) == "w" and sv.outcome(2) == "l")
+    check("room (TDM): the kill that wiped the side is the finisher",
+          sv.finisher == 1)
+    rz = D.battle_rules_from_record(bytes(D.build_battletable_record(table_id=9)),
+                                    default_length=180)
+    check("TWIN: a zero Time Limit with no target keeps the --gs-battle-length fallback",
+          rz.time_limit == 180 and rz.respawn == 4.0)
+    rm = bytearray(rec)
+    struct.pack_into("<I", rm, D.BT_OFF_FLAGS, D.BT_FLAG_MISSION)
+    struct.pack_into("<H", rm, D.BT_OFF_MISSION, 17)
+    check("rules: the Mission flag makes it a MISSION with the quest id",
+          D.battle_rules_from_record(bytes(rm)).mode == "MISSION"
+          and D.battle_rules_from_record(bytes(rm)).mission == 17)
+    check("rules: no record at all = the fallbacks",
+          D.battle_rules_from_record(None, default_length=99).time_limit == 99)
+
+    # the store: In Progress, refusals, leader authority, vacate
+    ss = D.BattletableStore()
+    sk = ss.create(D.build_battletable_record(table_id=0, leader=0x10, maximum=4),
+                   0x1001, 0x10)
+    ss.reserve(sk, 0x1002)
+    check("store: a fresh table is not In Progress (wire+30 bit 0 clear)",
+          not ss.in_progress(sk) and ss.record(sk)[D.BT_OFF_STATE] & 1 == 0)
+    ss.set_in_progress(sk, True)
+    check("store: In Progress sets wire+30 bit 0 on the served record",
+          ss.record(sk)[D.BT_OFF_STATE] & 1 == 1
+          and ss.records()[0][D.BT_OFF_STATE] & 1 == 1)
+    check("store: a NEW seat is refused (-4) while In Progress; a member re-reserving is fine",
+          ss.reserve(sk, 0x1003)[0] == -4 and ss.reserve(sk, 0x1002)[0] == 0
+          and ss.members(sk) == [0x1001, 0x1002])
+    ss.set_in_progress(sk, False)
+    check("store: clearing In Progress reopens the seats",
+          ss.reserve(sk, 0x1003)[0] == 0 and ss.record(sk)[D.BT_OFF_STATE] & 1 == 0)
+    check("store: the creator is the leader by charid AND by uid",
+          ss.is_leader(sk, 0x1001) and ss.is_leader(sk, 0, uid=0x10)
+          and not ss.is_leader(sk, 0x1002) and not ss.is_leader(sk, 0x1002, uid=0x11))
+    check("store: a member cannot kick / appoint / dissolve",
+          not ss.kick(sk, 0x1003, 0x1002) and not ss.appoint(sk, 0x1002, 0x1002)
+          and not ss.dissolve(sk, 0x1002) and ss.get(sk) is not None)
+    check("store: the leader can",
+          ss.kick(sk, 0x1003, 0x1001) and 0x1003 not in ss.members(sk))
+    check("store: vacate = the seat goes without an answer",
+          ss.vacate(0x1002) == sk and 0x1002 not in ss.members(sk)
+          and ss.table_of(0x1002) is None)
+    check("store: force-dissolve (the room's close) needs no leader",
+          ss.dissolve(sk, force=True) and ss.get(sk) is None)
+    # -- 2026-09-23 (sec 4hc): the new-player intro + the novice mark --------
+    import doc_novice as NV
+    door = body(D.build_world_answer(world_door_request(), selector=2, pad_to=176,
+                                     self_novice=True))
+    plain = body(D.build_world_answer(world_door_request(), selector=2, pad_to=176))
+    check("novice: selector-2 world door carries body[129] bit 0x40",
+          len(door) > NV.DOOR_NOVICE_OFF and door[NV.DOOR_NOVICE_OFF] & 0x40)
+    check("novice: twin -- without self_novice body[129] has no 0x40 (the pre-fix door)",
+          not plain[NV.DOOR_NOVICE_OFF] & 0x40)
+    check("novice: only body[129] changes, and body[140] (the sec 4bo count) stays 0",
+          [i for i in range(len(door)) if door[i] != plain[i]] == [NV.DOOR_NOVICE_OFF]
+          and door[140:144] == bytes(4))
+    sp = body(D.build_world_answer(world_door_request(), selector=13, pad_to=176,
+                                   self_novice=True))
+    sp0 = body(D.build_world_answer(world_door_request(), selector=13, pad_to=176))
+    check("novice: the mark is selector-2 only (selector 13's body is untouched)", sp == sp0)
+    ip = D.seal_world_body(None, NV.intro_push(), ptype=127, ident=0x4103C)
+    check("intro: the push is selector 134, sub 10 at body[12], event 1 at body[16], "
+          "ident at record+4",
+          body(ip)[1] == 134 and struct.unpack_from("<I", body(ip), 12)[0] == 10
+          and struct.unpack_from("<H", body(ip), 16)[0] == 1
+          and struct.unpack_from("<I", ip, 16)[0] == 0x4103C)
+    pr = D.build_peer_record(0x55, flags=0x40)
+    check("novice: a peer record's FLAGS carry the mark at wire+30",
+          pr[D.PEER_FLAGS_OFF] & 0x40 and D.PEER_FLAGS_OFF == 30)
+    check("novice tables: BT_FLAG_NOVICE is bit 26 (lobby_rel 0x00aa1a84)",
+          D.BT_FLAG_NOVICE == 0x04000000)
+    # -- 2026-09-26: Collector's Mind's FUZZY SEED is a field item ----------
+    import doc_npcquests as NQ
+    import doc_field as DF
+    # the generator nodes are the arena's own data (doc_item_generators.json,
+    # not shipped): without it the check runs on a made-up node of its shape
+    _seedtab = DF.load() or {208: ({7: [(NQ.FUZZY_SEED, 1, 100)]},
+                                   {3000: [((100.0, -2.0, 200.0), 7)]})}
+    _seedpos = (1159, -242, 1374) if DF.load() else (100, -2, 200)
+    _seed = NQ.mission_items(NQ.COLLECTORS_MIND, 208, table=_seedtab)
+    check("seed: quest 16 in the Church -> one Fuzzy Seed at SE's set-7 node",
+          [(i, q, tuple(round(v) for v in p)) for i, q, p in _seed]
+          == [(NQ.FUZZY_SEED, 1, _seedpos)], "%r" % _seed)
+    check("seed: TWIN -- quest 16 opened in another arena, or quest 1 in the "
+          "Church, finds none",
+          NQ.mission_items(NQ.COLLECTORS_MIND, 201, table=_seedtab) == []
+          and NQ.mission_items(1, 208, table=_seedtab) == [])
+    check("seed: the item generators never roll it (a 100 %% node would "
+          "respawn it every %.0f s); ammo still rolls" % DF.RESPAWN_S,
+          not DF.usable(NQ.FUZZY_SEED) and DF.usable(0x62300000))
+    check("seed: situation 3000's generators hand back no seed any more",
+          all(NQ.FUZZY_SEED not in [i for i, _q, _w in rows]
+              for _p, rows in DF.generators(208, 3000)))
+    _sr = D.BattleRoom(9, [0xA], {0xA: 0}, D.BattleRules(mode="BT"),
+                       mission=NQ.COLLECTORS_MIND, now=0.0)
+    _sr.field = {7: (NQ.FUZZY_SEED, (1159.0, -242.0, 1374.0), 1)}
+    _m, _n = D.capsule_pickup(_sr, 0xA, 7)
+    check("seed: a pick-up is kind 11 (ident = the picker) and no capsule",
+          [(k, i, t) for k, _p, i, t in _m] == [(11, 0xA, "all")]
+          and struct.unpack_from("<I", _m[0][1], 4)[0] == NQ.FUZZY_SEED
+          and not _sr.holders and 7 not in _sr.field, _n)
+    _m, _n = D.capsule_pickup(_sr, 0xA, 7)
+    check("seed: TWIN -- a resent touch finds the slot empty, grants nothing",
+          _m == [] and "empty" in _n)
+    # -- 2026-09-26: MP points (117), item use (21 -> 22), Ether MP ----------
+    import doc_items as DI
+    _plain = bytes(D.BODY_OFF) + DI.build_mp_point_body(4, n=7)
+    _dat = bytes([0x04, 0x00]) + _plain[2:]
+    _inn = {"is_data": True, "plain": _plain, "type": DI.P2P_MP_POINT}
+    check("117: a reliable MP-point datagram is the SERVER's (p2p_server_type)",
+          D.p2p_server_type(_dat, _inn) == 117)
+    check("117: twin -- the pre-fix type set (118, 119) did not take it",
+          117 not in (D.P2P_DROP, D.P2P_PICKUP))
+    check("117: the payload decodes to point 4, count 7",
+          DI.parse_mp_point(bytes(_plain[D.BODY_OFF:])) == (0, 4, 7))
+    check("117: never relayed as a battle packet (it is in the server's set)",
+          117 in D.P2P_BATTLE_TYPES and 117 in D.P2P_SERVER_TYPES)
+    # 2026-09-26: MP is FULL at every battle start (Additional Manual P.031):
+    # the ledger keys on (room key, opened), so a drained player's next room
+    # starts at 100 -- the same the client's own kind-2 refill does.
+    import doc_magic as MG_
+    _lg = MG_.Ledger()
+    _ra = D.BattleRoom(20, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"), now=100.0)
+    _rb = D.BattleRoom(20, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"), now=400.0)
+    _lg.cast(0xA, (_ra.key, _ra.opened), 0x20002, 100.0)
+    _lg.cast(0xA, (_ra.key, _ra.opened), 0x20002, 102.0)
+    check("MP: two Thunders drain battle A to 0",
+          _lg.mp(0xA) == 0)
+    check("MP: the SAME table's next battle starts at 100 (a new room key)",
+          _lg.cast(0xA, (_rb.key, _rb.opened), 0x10003, 401.0)[0] == 100 - 20)
+    check("TWIN: the same room keeps the drained MP",
+          _lg.credit(0xA, (_rb.key, _rb.opened), 0) == 80)
+    _r28 = DI.mp_points_record()
+    _p28 = body(D.build_gs_notify(28, _r28))
+    check("kind 28 MP points: record at body[20] -- count 64 at +2, mask at +4",
+          _p28[20 + 2] == 64
+          and struct.unpack_from("<Q", _p28, 24)[0] == 0xFFFFFFFFFFFFFFFF)
+    _z28 = body(D.build_gs_notify(28))
+    check("kind 28: twin -- the old bare 28 carried count 0 (no MP point made)",
+          len(_z28) <= 22 or _z28[22] == 0)
+    check("kind 28 MP points: rec[0], rec[1], rec[3] stay 0 ([chan+204] bits as before)",
+          _p28[20] == 0 and _p28[21] == 0 and _p28[23] == 0)
+    _a22 = body(D.build_item_use_answer(0x69320006, ident=0x4103C))
+    check("message 22: type 22, body+8 = the item (the effect receiveUseItem runs)",
+          struct.unpack_from("<H", _a22, 0)[0] == 22
+          and struct.unpack_from("<I", _a22, 8)[0] == 0x69320006)
+    _L = D.doc_magic.Ledger()
+    _L.cast(9, "b", 0x10001, 0.0)
+    _mp = _L.credit(9, "b", DI.ITEM_MP[0x69320006])
+    _k44 = body(D.build_gs_mp_push(_mp))
+    check("Ether after one Fire: ledger 70 + 50 -> 100, kind 44 HIGH half = 100",
+          _mp == 100 and struct.unpack_from("<I", _k44, 12)[0] == 44
+          and struct.unpack_from("<I", _k44, 16)[0] >> 16 == 100)
+    _L2 = D.doc_magic.Ledger()
+    _L2.cast(9, "b", 0x10002, 0.0)
+    check("Ether after one Thunder: 50 + 50 = 100; twin -- no credit leaves 50",
+          _L2.mp(9) == 50 and _L2.credit(9, "b", 50) == 100)
+    check("doc_items selftest", DI._selftest())
+    import doc_chat as DC
+    check("doc_chat selftest: say / shout / entry / team scopes", DC._selftest())
+    check("doc_chat kinds: say 5, shout 6, tell 3, entry 2, team 7 (0x00b1b1e8)",
+          (DC.KIND_SAY, DC.KIND_SHOUT, DC.KIND_TELL, DC.KIND_ENTRY,
+           DC.KIND_TEAM) == (5, 6, 3, 2, 7))
+
+    # 2026-09-26 (launch-lobby): table Min/Max RP (dcff7.info 1/31, "RP
+    # limits are set in the game rules")
+    _rr = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,
+                                               maximum=6, map_idx=3, mode=1,
+                                               flags=D.BT_FLAG_MAX_RP))
+    struct.pack_into("<I", _rr, D.BT_OFF_MAX_RP, 500)
+    check("RP limit: 500 RP at a 'Below 500' table is allowed (inclusive)",
+          D.rp_allowed(bytes(_rr), 500)[0])
+    check("RP limit: 501 RP is refused by the Maximum RP",
+          not D.rp_allowed(bytes(_rr), 501)[0])
+    _rn = bytearray(_rr)
+    struct.pack_into("<I", _rn, D.BT_OFF_FLAGS, 0)
+    check("RP limit: TWIN -- the same 500 at +60 WITHOUT flag 0x00080000 limits "
+          "nothing", D.rp_allowed(bytes(_rn), 9999)[0])
+    _rm = bytearray(_rn)
+    struct.pack_into("<I", _rm, D.BT_OFF_FLAGS, D.BT_FLAG_MIN_RP)
+    struct.pack_into("<I", _rm, D.BT_OFF_MIN_RP, 100)
+    check("RP limit: Minimum RP 100 refuses 99, seats 100",
+          not D.rp_allowed(bytes(_rm), 99)[0] and D.rp_allowed(bytes(_rm), 100)[0])
+    _rs = D.BattletableStore()
+    _rk = _rs.create(bytes(_rr), 0x101, 0x101)
+    check("RP limit: reserve() refuses 900 RP with BT_REFUSE_RP (-7)",
+          _rs.reserve(_rk, 0x102, rp=900)[0] == D.BT_REFUSE_RP == -7
+          and 0x102 not in _rs.members(_rk))
+    check("RP limit: reserve() seats 20 RP; rp=None (--rp-tables open / no "
+          "stats) is never checked",
+          _rs.reserve(_rk, 0x103, rp=20)[0] == 0
+          and _rs.reserve(_rk, 0x104)[0] == 0)
+    check("RP limit: a member already seated is not re-checked",
+          _rs.reserve(_rk, 0x103, rp=9000)[0] == 0)
+    _src26 = io.open(D.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+    check("RP limit: the JOIN arm and the RESERVE verb both pass the joiner's rp",
+          _src26.count("rp=rp_of_cid(_ident or seen_charid[0] or 0)") == 3)
+
+    # 2026-09-26: the Soldier Mask is EARNED (Drone 2nd exam) -- a NEW wallet
+    # carries the rule mark, so its character logs in with NO mask
+    import doc_gear as G26
+    import doc_shop as S26
+    check("mask: doc_shop's new-wallet mark IS doc_gear's rule mark",
+          S26.SOLDIER_MASK_RULE_MARK == G26.MASK_RULE_MARK)
+    _p26 = os.path.join(os.environ.get("TEMP", "."), "doc_udp_test_mask26.json")
+    try:
+        os.remove(_p26)
+    except OSError:
+        pass
+    _sh26 = S26.Shop(_p26)
+    _w26 = _sh26.wallet("anon/0x00000026")
+    check("mask: a new character holds no mask (settle -> None, bag untouched)",
+          G26.settle_soldier_mask(_w26, False)[0] is None
+          and not [k for k in _w26["bag"] if k.startswith("0x6330")])
+    _w26.pop(G26.MASK_RULE_MARK)
+    check("mask: TWIN -- a wallet from before the rule keeps its mask",
+          G26.settle_soldier_mask(_w26, False)[0] == G26.MASK_DG_M)
+    os.remove(_p26)
+    _wg26 = body(D.build_world_answer(world_door_request(), selector=2, pad_to=176,
+                                      ident=0, self_gear=(G26.NO_ITEM, 0x63310000)))
+    check("mask: no mask = 0xFFFFFFFF at world-door body[76], the suit at [80]",
+          struct.unpack_from("<II", _wg26, 76) == (0xFFFFFFFF, 0x63310000))
+    check("mask: the exam tally owes it (quest SOLDIER_MASK_EXAM == 1 = the "
+          "Drone 2nd exam, promotes to rank 2)",
+          G26.SOLDIER_MASK_EXAM == 1 and D.doc_stats.EXAM_PROMOTIONS[1] == 2
+          and "doc_gear.owe_soldier_mask(w)" in _src26)
+
+    # 2026-09-26: the line-drop penalty is charged BEFORE the member leaves
+    # the room (charge_line_drop needs it in room.arrived), and only for the
+    # line-drop reasons
+    _vs = _src26[_src26.index("    def vacate_seat(cid, why):"):]
+    _vs = _vs[:_vs.index("\n    def ", 10)]
+    check("line drop: vacate_seat charges before room.leave()",
+          0 < _vs.find("charge_line_drop(room, cid, why)")
+          < _vs.find("_nl = room.leave(cid)"))
+    _lw = _src26[_src26.index("LINE_DROP_WHYS = ("):]
+    _lw = _lw[:_lw.index(")") + 1]
+    check("line drop: reaped / line dropped only -- never kicked or a new sign-in",
+          '"session reaped"' in _lw and '"line dropped"' in _lw
+          and "kicked" not in _lw and "new entrance" not in _lw)
+    check("line drop: the reaper and the silence check use those exact reasons",
+          'vacate_seat(_sess.seen_charid[0], "session reaped")' in _src26
+          and 'vacate_seat(m, "line dropped")' in _src26)
+
+    # 2026-09-26: the WEEKLY medals (doc_stats.WEEKLY_MEDALS, ids 19..22)
+    import doc_stats as WK
+    import tempfile as _tf
+    check("weekly: the four are SE's 60:[35..38], medal ids 19..22, inside the "
+          "24-bit door mask and the +168 count block",
+          [i for _f, i in WK.WEEKLY_MEDALS] == [35, 36, 37, 38]
+          and [WK.MEDALS[i] for _f, i in WK.WEEKLY_MEDALS] == [
+              "Weekly Rank Points 1st", "Weekly Defeats 1st",
+              "Weekly Team Wins 1st", "Weekly Solo Wins 1st"]
+          and all(0 <= i - WK.MEDAL_BASE < WK.MEDAL_IDS
+                  for _f, i in WK.WEEKLY_MEDALS)
+          and 168 + 4 * (38 - WK.MEDAL_BASE) + 4 <= 264)
+    _W = 1790521200                  # Mon 2026-09-28 00:00 JST
+    _ph = WK.parse_week_start("mon 00:00 +09:00")
+    check("weekly: Monday 00:00 JST = Sunday 15:00 UTC; 14:59:59 UTC is the "
+          "week before", WK.week_of(_W, _ph) == _W
+          and WK.week_of(_W - 1, _ph) == _W - WK.WEEK_SECS)
+    check("weekly: TWIN -- a UTC week start puts Sunday 23:00 UTC in the "
+          "OLD week, JST in the new one",
+          WK.week_of(_W + 8 * 3600, WK.parse_week_start("mon 00:00 +00:00"))
+          != _W and WK.week_of(_W + 8 * 3600, _ph) == _W)
+    _wp = os.path.join(_tf.gettempdir(), "doc_udp_test_weekly.json")
+    try:
+        os.remove(_wp)
+    except OSError:
+        pass
+    _ws = WK.Stats(_wp)
+    _ws.clock = lambda: _W + 60
+    _ws.record_battle("BT", [{"key": "p", "team": 1, "kills": 2},
+                             {"key": "q", "team": 2, "kills": 0}], 1, 120)
+    _ws.record_battle("TBT", [{"key": "q", "team": 0, "kills": 2},
+                              {"key": "r", "team": 1, "kills": 0}], 0, 120)
+    _v = _ws.close_week(_W, now=_W + WK.WEEK_SECS)
+    _aw = {int(i): x["key"] for i, x in _v["awards"].items()}
+    check("weekly: solo win p, team win q, kills TIED p/q -> nobody, rp p "
+          "(40) vs q (10 + 40 = 50) -> q",
+          _aw == {35: "q", 36: None, 37: "q", 38: "p"}, "%r" % _aw)
+    check("weekly: a closed week closes once (restart included)",
+          _ws.close_week(_W) is None and WK.Stats(_wp).close_due(
+              now=_W + 5 * WK.WEEK_SECS) == []
+          and WK.medal_count(WK.Stats(_wp).career("q"), 37) == 1)
+    os.remove(_wp)
+    check("weekly: docudp closes on startup AND on the rollover deadline, "
+          "gated by --weekly-medals",
+          'weekly_close("startup catch-up")' in _src26
+          and 'weekly_close("week rollover")' in _src26
+          and "_wd = weekly_deadline()" in _src26
+          and 'a.weekly_medals != "on"' in _src26
+          and "_stats.week_phase = doc_stats.parse_week_start(a.week_start)"
+          in _src26)
     print("%d check(s) failed" % len(FAILS) if FAILS else "ALL PASS")
     return 1 if FAILS else 0
 

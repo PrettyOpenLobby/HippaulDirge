@@ -90,7 +90,7 @@ def parse_register(body):
 
 
 #: WARNING:KEY: **THE ENTRANCE UID IS PER-SESSION, SO IT CANNOT BE THE STORE KEY.**
-#: Measured on prod 2026-09-12: inside ONE docudp process -- no restart between,
+#: Measured live 2026-09-12: inside ONE docudp process -- no restart between,
 #: and `--peer` admits one source address only -- the uid moved
 #: `0xa756a69a -> 0xa455a599` ("per-session state reset", docudp's own log), and
 #: the store held one "Fox" under EACH. Keyed on that value, a player's roster

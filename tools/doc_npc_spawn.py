@@ -40,8 +40,10 @@ TYPE_MODES = ("idx", "num", "chr")
 # it). That is Square Enix's level data, so it ships with nothing here: it is
 # read from doc_npc_table.json beside this module, {"npcs": [[...], ...]},
 # when that file exists, and --npc-spawn has nothing to push without it. The
-# private deployment's table held 33 standing NPCs (the 7 parked at y ~31000
-# and record 0, the player template, left out).
+# retail lobby (patch 20060124_3) stands 24 NPCs: a PARKED record has flag
+# byte 7 == 0x01 and y ~31000 and is left out, as is record 0 (the player
+# template). A table read from the earlier prototype zone data has 33 rows;
+# retail parks nine of those (lnpc 5/6/15/16/17/19/21/22/38).
 LOBBY_NPCS = []
 TABLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "doc_npc_table.json")
@@ -192,16 +194,13 @@ def _selftest():
     check(f[1] == 100 and f[2] == 4, "+4 HP, +8 type")
     check(f[3:6] == (1165, 0, -17), "+10/12/14 position in whole world units")
     check(f[6:9] == (-979, 0, 205), "+16/18/20 direction x 1000")
-    if not LOBBY_NPCS:
-        print("  SKIP  no doc_npc_table.json beside this module: the placement "
-              "checks need your own table (see the README)")
-        print("ALL PASS" if not fails else "%d FAIL" % len(fails))
-        return 1 if fails else 0
-    check(len(LOBBY_NPCS) == 33 and all(n[4] < 2000 for n in LOBBY_NPCS),
-          "33 standing NPCs, none of the y ~31000 parked ones")
+    check(LOBBY_NPCS and all(n[4] < 2000 for n in LOBBY_NPCS),
+          "standing NPCs only, none of the parked (y ~31000) ones")
     ps = payloads()
-    check([struct.unpack_from("<I", p)[0] for p in ps] == [8, 8, 8, 8, 1],
-          "33 NPCs go out as 8+8+8+8+1")
+    _n = len(LOBBY_NPCS)
+    check([struct.unpack_from("<I", p)[0] for p in ps]
+          == [PER_MSG] * (_n // PER_MSG) + ([_n % PER_MSG] if _n % PER_MSG else []),
+          "%d NPCs go out %d per message" % (_n, PER_MSG))
     check(all(len(p) == 4 + ENTRY_LEN * struct.unpack_from("<I", p)[0] for p in ps),
           "each payload is count + count x 24 B")
     one = payloads(parse_only("4, 31,32,33"), mode="num")
@@ -220,7 +219,7 @@ def _selftest():
           "arena ring: NPC 0 at centre + (150, 0), facing the centre, own id range")
     check(parse_types("1, 45,0x34") == [1, 45, 52], "parse_types keeps order, takes hex")
     wr = wu_records()
-    check(len(wr) == 33 and wr[0]["id"] == 0x40000004 and wr[0]["b4"] == 1
+    check(len(wr) == len(LOBBY_NPCS) and wr[0]["id"] == 0x40000004 and wr[0]["b4"] == 1
           and wr[0]["b5"] == 0, "type-125: lnpc_04 = id 0x40000004, wire+4 = bzd record 1")
     check(all(r["id"] >> 28 == 4 for r in wr), "type-125: every id has top nibble 4 "
           "(the 0x00bd2358 NPC arm)")

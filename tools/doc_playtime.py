@@ -101,13 +101,16 @@ class PlayTime:
     def seconds(self, key):
         return int(self.data.get(key, 0))
 
-    def touch(self, ip, key, now):
-        """One datagram from `ip`, playing `key`: credit the gap since its last
-        one, if that gap is short enough to be play and the key is unchanged."""
+    def touch(self, who, key, now):
+        """One datagram from client `who`, playing `key`: credit the gap since
+        its last one, if that gap is short enough to be play and the key is
+        unchanged. `who` is docudp's SESSION KEY -- (ip, port) since sec 4gz,
+        because two consoles behind one household NAT share an address.
+        Opaque here: it only ever indexes the in-memory mark."""
         if not key:
             return
-        prev = self._mark.get(ip)
-        self._mark[ip] = (key, now)
+        prev = self._mark.get(who)
+        self._mark[who] = (key, now)
         if prev is not None and prev[0] == key and 0 < now - prev[1] <= GAP_CAP:
             self.data[key] = self.data.get(key, 0.0) + (now - prev[1])
             if self._dirty_at is None:
