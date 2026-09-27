@@ -54,14 +54,11 @@ WHAT IS INFERRED:
     (checked in a live session, 09-13), so the mask is the standard DG Soldier Mask M or F by
     gender (chr_code bit 6, 1 = female).
     WARNING: 2026-09-26, SOURCED against that: the SUIT is issued at creation, the
-    MASK is not. The Soldier Mask is EARNED on the DG Drone 2nd exam:
-    "入手方法：DGドローン 2nd class 昇格時に入手" (dcff7-online blog, ameblo
-    entry-10008498561, 2006-01-29); "DGドローン2nd昇進試験クリア後、試験教官から
-    入手可能 ... 捨てることができない" (dc.jpn.org wiki ソルジャーマスク, Wayback
-    20060828080401); "※クリア後にソルジャーマスク入手可能" (ameblo
-    entry-10008424977, 2006-04-03 exam page). And the 03-24 update fixed
-    "アイテム所持数がいっぱいだった場合にソルジャーマスクが取得できない不具合"
-    (ameblo entry-10010936385): with a full bag the mask was not received.
+    MASK is not. The Soldier Mask is EARNED on the DG Drone 2nd exam: the
+    exam instructor hands it over once the exam is cleared, and it cannot
+    be thrown away (source: January and April 2006 player blog posts and a
+    2006 player wiki). A March 2006 update fixed a bug where a player with a
+    full bag did not receive the mask (source: 2006 player blog).
     So a new character starts with NO mask: body[76] = NO_ITEM, which the
     client handles like an unequipped mask (getEquipItems equips word 0 only
     when that id is in the bag; the re-dress then clears costume bit 7 and

@@ -4,28 +4,29 @@ plus DGC Sturm's per-rank lines (see sturm()).
 
 Our Jan-24 client ships all three scenes (quest_scr003 ev_n26 / ev_n29 /
 ev_n36, retail lobby savestate) but docudp served each one fixed line. The
-branches, their text (the client's NPC dialogue table) and the Lifestream NPC archive:
+branches, their text (the client's NPC dialogue table) and the Lifestream NPC
+fan archive (source for each NPC's quest, summarised below):
 
-DGD Soar (lnpc 26), by WIN count -- "you are forced to receive broken items
-from him" (archive):
+DGD Soar (lnpc 26), by WIN count; he hands the player broken items whether
+they want them or not (source: Lifestream fan archive):
     1534 VICT_01_30     under 30 wins: "go and train"
     1533 VICT_30_150    30+: forces a Broken Handgun on you   (reports done)
     1532 VICT_HAND      after the handgun, under 150: "come back with victories"
     1531 VICT_BALERU_150  150+: forces a Broken Barrel on you (reports done)
     1530 VICT_BALERU_GET  both given
 
-Este-D (lnpc 29): "If you handed over a Dandelion to Este-D, randomness would
-then decide if she threw the flower away or if she deemed it fitting for
-experimentation. If she liked the flower, you would receive a gasmask."
+Este-D (lnpc 29): hand her a Dandelion and chance decides whether she throws
+it away or keeps it, and keeping it gives a Gasmask (source: Lifestream fan
+archive).
     201 FST        first meeting (no report -> met on serve)
     202 HANA_NASHI no flower
     203 HANA_HAZURE the flower is snatched and THROWN AWAY (no report -> on serve)
     204 HANA_ATARI  the flower is taken, a Gasmask given       (reports done)
     205 MASK_AF     after the mask
 
-DGSC Hiren (lnpc 36): "After finding some Fuzzy Seeds in the Collector's Mind
-mission, you could hand them over to Hiren for her to grow them into a
-Dandelion. The growing process would take a few real-time days." Her own lines
+DGSC Hiren (lnpc 36): Fuzzy Seeds found in the Collector's Mind mission can be
+handed to her, and she grows one into a Dandelion over a few real-time days
+(source: Lifestream fan archive). Her own lines
 stage it: sprouted (_03), bud (_05), bloomed "this past week" (_07):
     1541 HAJIME        first meeting                          (reports done)
     1556 TN_NASHI      no seed (first time)
@@ -41,11 +42,9 @@ stage it: sprouted (_03), bud (_05), bloomed "this past week" (_07):
     reports done), growing 1553 TNK_AZUKE2, 1558 TNK_AZUKE_03, 1557
     TNK_AZUKE_05 (no reports -> stage on serve), bloom 1561 TN_HANA2 (no
     report -> the flower on serve).
-    WITHERING (2026-09-26, SOURCED January): "たまに様子を見にこないと枯れて
-    しまい入手不可に(リアル一日に1回程度)" -- unless you look in on it now and
-    then (about once per real day) it withers and the flower is lost (ameblo
-    dcff7-online entry-10008423082, 2006-01-26). Hiren's own lines ask for it
-    ("ちょくちょく様子を見に来てくださいね"). The retail ev_n36 (retail
+    WITHERING: unless the player looks in on it about once per real day,
+    the seed withers and the flower is lost (source: January 2006 player
+    blog). Hiren's own lines ask the player to visit often. The retail ev_n36 (retail
     savestate slot 08, doc_jdis) has the scenes, none reports done except
     1554:
     1535 HANA_KARE     "I let it wither..." (first time)       no report
@@ -61,7 +60,8 @@ stage it: sprouted (_03), bud (_05), bloomed "this past week" (_07):
     walk-up (no instant wither on deploy).
 NOT served: the standby lines (Y), 1549.
 
-OURS (flagged): Este-D's odds (none published, "rarely" -> ESTE_ACCEPT, 0.2);
+OURS (flagged): Este-D's odds (none published; the sources call it rare ->
+ESTE_ACCEPT, 0.2);
 Hiren's sprout / bud days (her bloom at 5 days = 120 h is the players'); the win
 count = BT + TBT + FA wins. Items move in the SERVER bag (doc_shop); the
 client's inventory shows them from the next world door. The retail scenes
@@ -70,18 +70,17 @@ reportQuestEventDone (in the 204 branch), no bag check, no item transaction
 (retail lobby savestate, doc_jdis 2026-09-26) -- so the server alone decides
 who holds the flower.
 
-WHERE THE FUZZY SEED COMES FROM (2026-09-26, docudp --fuzzy-seed): the mission
-archive says Collector's Mind "held a quest item called Fuzzy Seed", the NPC
-archive "After FINDING some Fuzzy Seeds in the Collector's Mind mission". SE's
+WHERE THE FUZZY SEED COMES FROM (docudp --fuzzy-seed): the Lifestream fan
+archive's mission and NPC pages both say the seeds are found in the Collector's
+Mind mission. SE's
 own church data agrees (an offline run of the client's own code (doc_item_generators) over the
 retail 20060124_3 z208 bzd -> doc_item_generators.json): item set 7 is the
 Fuzzy Seed ALONE at weight 100, set 8 the seed at 25, and one set-7 node sits
 in five of the Church's mission situations (3000 and 3002 at (1159, -242,
 1374), 3003, 3004, 3005); no other zone's data names a quest item. So the seed
-is a FIELD item -- and the players say so: "picked up on the church's 2nd
-floor in Collector's Mind" (FFCheats quest page; dc.jpn.org wiki Quest page
-2006-07), "take the seed on a church map such as Collector's Mind" (wiki
-Gasmask page). mission_items() places it once per run of any mission whose
+is a FIELD item, as the player guides say too: picked up on the church's
+2nd floor in Collector's Mind or another church map (source: 2006 player
+guide (FFCheats) and a 2006 player wiki, quest pages). mission_items() places it once per run of any mission whose
 situation has SE's 100 % node, and for Collector's Mind always (situation
 3000's node when the room's own situation has none -- which situation SE ran
 quest 16 in is not decoded: OURS); docudp credits the picker's server bag on
@@ -92,11 +91,10 @@ clear" (SEEDS_PER_CLEAR) stays as --fuzzy-seed clear.
 
 NOT BUILT -- no retail scene, text or item exists in this client (checked
 2026-09-26):
-  * Ljungbery (Plain Earrings, "The Giant Birds who Cry Death", Mar 9): lnpc 5
+  * Ljungbery (Plain Earrings, a March 2006 event quest): lnpc 5
     is PARKED in SE's retail bzd and quest_scr003.ev has no table for it.
-  * DGSC Jingi (lnpc 43, "How to make Mako 10 times more fun", "The Stolen
-    Secret", Apr 7) and DGG Iruka (lnpc 42, Phantasmask after "Light Bullet
-    Oratorio"): the retail ev_n43 / ev_n42 play only ID_AREA_D / ID_AREA_C
+  * DGSC Jingi (lnpc 43, two April 2006 event quests) and DGG Iruka (lnpc
+    42, a Phantasmask event quest): the retail ev_n43 / ev_n42 play only ID_AREA_D / ID_AREA_C
     flavor lines (the Mako bather, Area 3's lost souls), two ids each, no
     reportQuestEventDone. The Phantasmask item exists (0x6330000F), nothing
     hands it out.
@@ -108,13 +106,13 @@ NOT BUILT -- no retail scene, text or item exists in this client (checked
   * The Crimson / Verdant TICKETS (0x64300013 / 0x64300014, both in the item
     table): FFCheats' mission pages pay them for 22 Steel Wall / 29 Double
     Attack / 30 Forest of Grudge and charge 5 Crimson for 36 / 3 Verdant for
-    27. Those pages carry the BETA text (Double Attack "survive until the
-    time runs out" = the Dec 2005 base lobby.bin's 48:28; its own note
-    says "in the beta"); the Jan build rewrote 48:28 and its reward texts name rank points
+    27. Those pages carry the BETA text (Double Attack's objective as in
+    the Dec 2005 base lobby.bin's 48:28, and the pages say they describe
+    the beta); the Jan build rewrote 48:28 and its reward texts name rank points
     (51:21 / 51:29 "+50", 51:35 "+35", 51:26 / 51:28 "by performance"), and
     the Lifestream archive lists no ticket for them. A ticket gate would lock
     27 / 36 for good, so it stays out.
-  * Este-D's "loose gasmask" after many rejections (wiki Gasmask page) and
+  * Este-D giving a gasmask anyway after many rejections (player wiki) and
     West-D's tune-up kits for a seed + 50 battles (FFCheats): ev_n29 has no
     branch for either (200..206 only) and the item table has no loose mask.
   * Soar's FFCheats chain (Phantasmask at 50 TBT wins, SC Frame Kit at 200
@@ -136,7 +134,7 @@ BROKEN_HANDGUN = 0x6F300009
 BROKEN_BARREL = 0x6F310009
 
 COLLECTORS_MIND = 16          # the mission the seeds come from
-SEEDS_PER_CLEAR = 1           # OURS (--fuzzy-seed clear): the archive says "some"
+SEEDS_PER_CLEAR = 1           # OURS (--fuzzy-seed clear): the archive gives no count
 SEED_MODES = ("field", "clear", "off")
 
 # quest -> (zone, quest item, the situation whose node to use when the room's
@@ -147,20 +145,17 @@ MISSION_ITEMS = {COLLECTORS_MIND: (208, FUZZY_SEED, 3000)}
 #: the SERVER bag too (docudp), and no item generator rolls them (doc_field)
 FIELD_QUEST_ITEMS = frozenset(it for _z, it, _s in MISSION_ITEMS.values())
 #: 2026-09-26: LOW. No rate is published, but every player source says she
-#: mostly throws it away: "rarely (稀に) a Gasmask" (dc.jpn.org wiki Quest page,
-#: 2006-07), "at a low probability (低確率)" (FFCheats item list 2006-06 and
-#: 2007), "at a high probability she throws the flower away" (wiki Gasmask
-#: page). The figure itself is OURS (--npc-este-accept; it was 0.5).
+#: mostly throws it away and the Gasmask is rare (source: 2006 player wiki,
+#: quest and Gasmask pages; player guide (FFCheats), item list). The figure itself is OURS (--npc-este-accept; it was 0.5).
 ESTE_ACCEPT = 0.2
 DAY = 86400.0
-#: 2026-09-26: the BLOOM is sourced -- "if you ask about it every day it
-#: blooms after 120 hours" (FFCheats quest page), "5 days later, the
-#: Beautiful Yellow Flower" (wiki Quest page). Hiren's own "this past week"
-#: (TN_AZUKE_07_10) is flavor, and the _03 / _05 / _07 key suffixes are stage
+#: 2026-09-26: the BLOOM is sourced: 120 hours, i.e. 5 days, of daily visits
+#: (source: player guide (FFCheats) and a 2006 player wiki, quest pages).
+#: Hiren's own mention of a week (TN_AZUKE_07_10) is flavor, and the _03 / _05 / _07 key suffixes are stage
 #: names, not days (a 7-day reading contradicts both players' sources). The
 #: sprout and bud days are OURS, spread before the bloom. It was 3 / 5 / 7.
 HIREN_SPROUT_DAY, HIREN_BUD_DAY, HIREN_BLOOM_DAY = 2.0, 4.0, 5.0
-#: 2026-09-26: "about once per real day" (ameblo 2006-01-26); the exact
+#: 2026-09-26: about once per real day (source: January 2006 player blog); the exact
 #: window is OURS (docudp --npc-hiren-wither, 0 = never withers)
 HIREN_WITHER_DAY = 1.0
 KEY = "npcq"                  # career field
@@ -270,8 +265,8 @@ def _hiren_grow(st, days, stage, first, cycle):
 
 
 # DGC Sturm (lnpc 11, the battle-system briefer): one line set per RANK held
-# (ev_n11 tableswitch 1130..1230). Archive: "You learned more about this matter
-# with each promotion." Rank 1 keeps the tutorial 1131 we always served; 2..9
+# (ev_n11 tableswitch 1130..1230); the fan archive notes he says more with
+# each promotion. Rank 1 keeps the tutorial 1131 we always served; 2..9
 # = 1220 DR2 .. 1227 TR1. At Trooper 1st the instructor story plays once, in
 # order: 1228 TR1_KAF ("Congratulations on making Trooper 1st ... that
 # instructor has me concerned"), 1229 TR1_KOUHAI ("he went a little too far"),
@@ -298,8 +293,8 @@ def sturm(career):
 def mission_items(quest, zone, situation=0, table=None):
     """[(item, qty, (x, y, z))] -- the quest items a mission run finds on its
     field: SE's own generator nodes for a FIELD quest item (weight 100) in
-    the room's `situation` of `zone` (any mission -- "Collector's Mind AND
-    OTHER church maps", wiki), else, for a MISSION_ITEMS quest in its zone,
+    the room's `situation` of `zone` (any mission: the player wiki names
+    Collector's Mind and other church maps), else, for a MISSION_ITEMS quest in its zone,
     the fallback situation's. [] when neither applies or there is no data."""
     if table is None:
         import doc_field

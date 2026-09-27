@@ -96,8 +96,8 @@ QUEST_RP = {5: 30,      # Assault Mission         (archive +30, agrees)
             # 41-43: SE's unnamed test missions (Train Graveyard Mission,
             # Devastated Church 2, Desert Test Mission), their own text
             41: 100, 42: 120, 43: 100}
-#: SOURCED twice: the client's text and the Lifestream archive (mission_rewards
-#: from ls_m2/m3) agree on every one. Beginner Course 3 (1000), Treasure
+#: SOURCED twice: the client's text and the Lifestream fan archive's mission
+#: pages agree on every one. Beginner Course 3 (1000), Treasure
 #: Retrieval Order! (1500), Sahagin Dance? (1000), Cactus Dance? (3000), Way of
 #: Justice (3000), D-1 (4000), Last Banban-G (6000) and Green Mission (by
 #: performance) are later missions -- not in our build's group 47.
@@ -110,8 +110,8 @@ QUEST_GIL = {23: 2000,                  # Stolen Capsules! (51:22)
 #: text for those three rows (51:8 says "Promotion to DG Scout 3rd Class") does
 #: not match the exams; the exams promote (EXAM_PROMOTIONS). 51:16 "Gil" is
 #: quest 17, "Reserved" (doc_missions.PLACEHOLDER_QUESTS).
-# 27 Green Encounter / 29 Double Attack: "Ranking Points based on performance"
-# (archive), "Rank Points (by clear rating)" (client 51:26 / 51:28)
+# 27 Green Encounter / 29 Double Attack: rank points by performance (fan
+# archive and client 51:26 / 51:28 agree)
 QUEST_PERFORMANCE_RP = (20, 21, 27, 29)
 QUEST_PERFORMANCE_GIL = (19,)
 
@@ -205,21 +205,20 @@ RP_MIN_SECONDS = 30          # a battle shorter than this pays nothing
 HISTORY_MAX = 20
 RP_MAX = 0x7FFFFFFF
 
-#: PvP GIL (2026-09-26). SOURCED for ONE mode: FFCheats multi/urawaza.html
-#: (the "gil only" recipe, a 2-player Team Base Battle): "lose and you get
-#: 9300, win and it is +1000, 10300" -- with both players holding 9 Chocobo
-#: Coins (9000). So a TBR battle paid 300 for a loss and 1300 for a win.
+#: PvP GIL (2026-09-26). SOURCED for ONE mode: player guide (FFCheats), tips
+#: page, a 2-player Team Base Battle gil recipe: the loser ends with 9300 and
+#: the winner 1000 more, with both players holding 9 Chocobo Coins (9000). So a TBR battle paid 300 for a loss and 1300 for a win.
 #: OURS: the same two amounts for every PvP mode (no source gives another
 #: mode's) and the loss rate for a draw (no source).
 BATTLE_GIL = {"w": 1300, "l": 300, "d": 300}
-#: CHOCOBO COINS (item 0x67300001). SOURCED: FFCheats urawaza "each Chocobo
-#: Coin you pick up is worth 1000 gil; up to 9" and the recipe above (9 coins
+#: CHOCOBO COINS (item 0x67300001). SOURCED: player guide (FFCheats), tips
+#: page: each coin picked up is worth 1000 gil, up to 9; and the recipe above (9 coins
 #: = 9000 of the 9300). MEASURED on our build: the client's item property row
 #: for 0x67300001 (0x01fa8144 + 24*171) has +14 u16 = 9 (the carry cap, as
 #: Potion's 3) and +16 u16 = 1000 -- the only nonzero word there in the whole
 #: 474-row table, read as the coin's gil value (INFERRED). Paid at the end of
 #: every battle / mission, win or lose (OURS for a lost mission: the guides say
-#: "at the end", nothing about failing).
+#: the coins pay out at the end and say nothing about failing).
 COIN_ITEM = 0x67300001
 COIN_GIL = 1000
 COIN_CAP = 9
@@ -828,8 +827,8 @@ class Stats:
         through will reduce your rank points. Are you sure?" -- so rank points
         go down by `penalty` (never below 0). Nothing else is tallied: no W/L,
         no battle count (no source says a leave counted as a loss). The AMOUNT
-        is SOURCED (2026-09-26): SE's PlayOnline "Additional Manual" (Lifestream
-        sheet 1WrAf..., the P.031 correction): returning to the lobby or title
+        is SOURCED (2026-09-26): SE's PlayOnline Additional Manual (the P.031
+        correction): returning to the lobby or title
         mid-battle, or dropping on a line fault, takes 10 ranking points
         (LEAVE_RP_PENALTY; docudp --leave-rp-penalty defaults to it)."""
         c = self.career(key, name, rid)
@@ -1095,7 +1094,7 @@ if __name__ == "__main__":
                            quest=31)[B]
     assert _cm["gil"] == 1000 + 3000 and _cm["coin_gil"] == 3000, _cm
     PA, PB = "member:95/0x7", "member:96/0x8"     # own keys: A/B feed checks below
-    # PvP gil (FFCheats urawaza, 2-player TBR): loser 9 coins = 9300, winner 10300
+    # PvP gil (FFCheats tips page, 2-player TBR): loser 9 coins = 9300, winner 10300
     _pv = st.record_battle("TBT", [{"key": PA, "team": 0, "kills": 1, "coins": 9},
                                    {"key": PB, "team": 1, "coins": 12}], 0, 120)
     assert (_pv[PA]["gil"], _pv[PB]["gil"]) == (10300, 9300), _pv

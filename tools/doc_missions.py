@@ -185,10 +185,8 @@ WHY_QUIT = "player quit"          # docudp: the solo player returned to the lobb
 # ── PER-MISSION SETUP (2026-09-24) ───────────────────────────────────────
 # SE's quest -> (arena, situation, enemies, players) table was SERVER data and
 # is lost. Sources, in order of weight:
-#   1. The Lifestream's archive of the 2006 online missions (Wayback copy of
-#      thelifestream.net/dirge-of-cerberus/multiplayer-archives/online-missions/
-#      pages 1-7, 2022-11-28): per mission the MAP, "Maximum Participants",
-#      objective, defeat conditions, time limit, supplies, enemies seen.
+#   1. source: the Lifestream fan archive of the 2006 online missions: per
+#      mission the MAP, the maximum participants, objective, defeat conditions, time limit, supplies, enemies seen.
 #      Its Japanese-derived names map to our US rows: Sniper Threat = 21
 #      Sniping Menace, Steel Wall = 22 Iron Curtain, Stolen Capsules! = 23,
 #      Collector's Mind (Lv.2/Lv.3) = 16/24/25, Pest Control = 19,
@@ -280,7 +278,7 @@ MAX_PLAYERS = {
 ARCHIVE_ZONES = {2: 204, 4: 201, 8: 203, 16: 208, 22: 205, 24: 205, 25: 203,
                  37: 212, 38: 231}
 # 2026-09-24: the TIME LIMIT per mission, seconds, from the Lifestream
-# online-missions archive ("Time Limit | 5 Minutes", ...). None of these were
+# online-missions fan archive (each mission's time limit). None of these were
 # encoded before: a mission ran on whatever the client's record carried (600 s
 # live) or --gs-battle-length. 3/4/28 are matched by CONTENT (our client's
 # objective text), which the archive files under rotated exam names. Unlisted
@@ -303,12 +301,12 @@ def mission_setup(quest):
     return zone, sit, [models.index(c) for c in codes], players(quest)
 
 
-#: 2026-09-26: each mission's "Initial Supplies" (Lifestream archive,
-#: online-missions/2..4). Retail topped the player up per MISSION; there is no
-#: general enemy ammo drop in the archive (Silent Killing's 9 bullets were
-#: "fewer bullets than there were enemies"). Unlisted quests and PvP tables get
-#: the standard 36 handgun / 18 rifle / 60 machine gun. The archive's "??" for
-#: Trooper 2nd's rifle rounds is read as the standard 18.
+#: 2026-09-26: each mission's initial supplies (source: Lifestream fan
+#: archive, online missions). Retail topped the player up per MISSION; there
+#: is no general enemy ammo drop in the archive (Silent Killing's 9 bullets
+#: were fewer than its enemies). Unlisted quests and PvP tables get
+#: the standard 36 handgun / 18 rifle / 60 machine gun. The archive gives no
+#: figure for Trooper 2nd's rifle rounds, which is read as the standard 18.
 HANDGUN, RIFLE, MG = 0x62300000, 0x62300001, 0x62300002
 POTION = 0x69320000                # the ONLINE Potion (category 0x6932)
 STANDARD_SUPPLIES = ((HANDGUN, 36), (RIFLE, 18), (MG, 60))
@@ -332,7 +330,7 @@ def respawn_refill(start, held=None):
     """2026-09-26: the (item, qty) rows kind 25 carries on a KO (<= 3; the
     client SETS each qty into the bag, 0x00be7de8).
 
-    Retail (ameblo 2006-04-03, the 03-24 update): a respawn refills BULLETS
+    Retail (source: April 2006 player blog, on the March update): a respawn refills BULLETS
     only, and only up to the battle-start count when the player holds fewer.
     Potions (Beginner's Courses) are not refilled.
 
@@ -434,8 +432,8 @@ def verdict(quest, over, why, deaths):
 # ── RANK TABS (2026-09-24) ────────────────────────────────────────────────
 # SE filed every mission under a rank class, the client's "Mission: DG <class>"
 # tabs (L2 / R2; thresholds 0/3/6/9/12/15 at lobby.pex 0x00b12158). Source:
-# the Lifestream online-missions archive, pages 2 (Drone), 3 (Scout), 4
-# (Trooper), Wayback copies; pages 5-7 (Commander / General / Tsviet) hold only
+# the Lifestream online-missions fan archive, its Drone, Scout and Trooper
+# pages; the later pages (Commander / General / Tsviet) hold only
 # content added after this build (the Commander 3rd exam arrived Feb 27). Each
 # tab's order is the archive's, which puts Beginner's Course right after the
 # exams. Names: Pest Control = 19 Exterminators, Green Encounter = 27 Jade

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Dirge of Cerberus Online: the arena ITEM GENERATORS (2026-09-26).
 
-Retail maps put items on the field during a match -- the Lifestream archive:
-"Limit Breakers spawned regularly on this battlefield", "The stage spawned
-plenty of Ethers". Online, the SERVER placed them (notify kind 10, the field
+Retail maps put items on the field during a match (source: the Lifestream
+fan archive's map notes, e.g. Limit Breakers and Ethers appearing on certain
+maps). Online, the SERVER placed them (notify kind 10, the field
 the client's table [chan+1284] holds), so the timing was server logic.
 
 WHERE THE DATA IS (static RE on the retail client + the served 20060124_3

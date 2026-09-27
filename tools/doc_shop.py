@@ -38,12 +38,11 @@ the capture of that session names the BUY: request 66, not 145.
 
 STOCK, PRICES, TUNING, SELL RULE (2026-09-26, replaces the 09-13 placeholders)
 ------------------------------------------------------------------------------
-SOURCED from the 2006 RETAIL guides (via the Wayback Machine):
-  * EX-POTION dcff7/mshop.html + mitem.html (Wayback 20060505213120 /
-    20060505213111, unchanged at 20060618): the online shop list with prices,
-    and the "tune" trees with their fees.
-  * FFCheats dcff7/multi/item.html final rev (Wayback 20070208085459): the
-    same prices plus every item's SELL price.
+SOURCED from the 2006 retail player guides:
+  * source: 2006 player guide (EX-POTION), online shop price list and the
+    tune trees with their fees.
+  * source: player guide (FFCheats), final 2007 revision, the same prices
+    plus every item's sell price.
   Both agree: frames 200, barrels / options 150, scope / accessories /
   materia 100, suits 300; a tune costs 100 (frames) or 50 (barrels, scope,
   options) at the shop machine and needs NO kit; sell = 80 % of what the item
@@ -51,14 +50,14 @@ SOURCED from the 2006 RETAIL guides (via the Wayback Machine):
   Middle Barrel III 150 + 50 + 50 -> 200). Ammunition and consumables were
   NOT sold (mission supplies / field pickups only) -- none are stocked.
   2026-09-26: those sell prices are the 2007 revision. LAUNCH (January) sold
-  lower and per kind: LAUNCH_SELL, from the dcff7-online blog's 2006-01-26
-  shop list; the same blog gives the launch starting gil and kit.
+  lower and per kind: LAUNCH_SELL, from a January 2006 player blog's shop
+  list; the same blog gives the launch starting gil and kit.
 
 MEASURED on our build: every id below is NAMED in the 20060124_3 client's own
 item table (kelstr.bin via an offline run of the client's own code (doc_kelitem); the names are
 byte-identical to the 20051209_6 disc's), and every item the guides list has
-an id there. The older FFCheats rev (2006-05: frames 5000, upgrade kits,
-"Five Fourty" / "Stenberg" / "Parfum" ladders) names items our build only
+an id there. An older FFCheats revision (mid-2006: frames 5000, upgrade kits, and
+beta-era part ladders) names items our build only
 has as SE placeholders (OF1, OF12, OS0; the 0x6430 kits are "chi 1..15") --
 that is the beta economy the 09-13 stock was built from; it is gone.
 
@@ -70,7 +69,7 @@ shops. Its 474-row sorted {id -> u32} table is the story SELL value (Potion
 70 % of buy + tune fees) and every online id (0x6F3x, 0x6331) carries the
 default 10. So the disc confirms the MODEL (sell = a fixed share of buy +
 tune fees) but has no online prices; the guides give those. Flash Materia
-(0x6F34001B) stays out: Lifestream's timeline says a later update ADDED it.
+(0x6F34001B) stays out: per the Lifestream fan archive, a later update added it.
 """
 import json
 import os
@@ -107,20 +106,18 @@ LOGIN_BAG_OFF = 240          # src+196 with src = body[44]
 BAG_MAX = 50                 # the `Inventory n/50` cap; R's tally holds 256
 
 GIL_ID = 0x67300000
-#: SOURCED, January (2026-09-26): the dcff7-online blog's launch-day notes,
-#: ameblo entry-10008428317 "雑記" (2006-01-26 23:26): "ゲーム開始時所持金3000。
-#: ... 最初からアーマー以外のアイテムは所持している。アーマーは各300で買える。"
-#: (3000 gil at the start; you already hold every item except armor; armor
-#: is 300 each). It was 1000 (OURS, 09-26) and 20000 before that. Only a NEW
+#: source: January 2006 player blog, launch-day notes: a new character has
+#: 3000 gil, already holds every shop item except armor, and armor costs 300
+#: each. It was 1000 (OURS, 09-26) and 20000 before that. Only a NEW
 #: wallet starts with it: existing wallets keep their gil.
 START_GIL = 3000
 GIL_MAX = 0x7FFFFFFF
 QTY_MAX = 99
 #: The FALLBACK sell rule, for items outside LAUNCH_SELL (a --shop-stock file
-#: can stock other categories): FFCheats multi/item.html (20070208) sells at
-#: 80 % of the total paid. That is the 2007 revision, not launch.
+#: can stock other categories): source: player guide (FFCheats), 2007
+#: revision: sell at 80 % of the total paid. That is the 2007 revision, not launch.
 SELL_RATE = 0.8
-#: SOURCED sell prices outside the 80 % rule (FFCheats 20070208): the Broken
+#: SOURCED sell prices outside the 80 % rule (FFCheats, 2007): the Broken
 #: Handgun / Broken Barrel (Soar's quest items, never on sale) sell for 1.
 SELL_OVERRIDES = {0x6F300009: 1, 0x6F310009: 1}
 
@@ -137,8 +134,8 @@ def _parts(cat, rows):
     return [((cat << 16) | idx, price, name) for idx, price, name in rows]
 
 
-#: (item id, price, name) -- the Buy tab. SOURCED: EX-POTION mshop.html
-#: (20060505) and FFCheats item.html (20070208) agree on every price.
+#: (item id, price, name) -- the Buy tab. source: 2006 player guides
+#: (EX-POTION, FFCheats), shop price lists; they agree on every price.
 #: Override with --shop-stock.
 DEFAULT_STOCK = tuple(
     _parts(0x6F30, [(0x00, 200, "One-Eighty"),            # handgun frame
@@ -156,15 +153,15 @@ DEFAULT_STOCK = tuple(
                       (0x17, 100, "Fire Materia"), (0x18, 100, "Blizzard Materia"),
                       (0x19, 100, "Thunder Materia"), (0x1A, 100, "Cure Materia")])
     # 2026-09-24: no Flash Materia (0x6F34001B) -- a later update added it to
-    # the shop (Lifestream timeline); our client is the Jan 24 lobby
+    # the shop (Lifestream fan archive); our client is the Jan 24 lobby
     + _parts(0x6331, [(0x00, 300, "Soldier Suit"), (0x14, 300, "Snipe Suit"),
                       (0x28, 300, "Speed Suit"), (0x3C, 300, "Magic Suit"),
                       (0x50, 300, "Toughness Suit")])
 )
 
 
-#: SOURCED, January (2026-09-26): the launch SELL prices, ameblo
-#: entry-10008421189 "ショップ" (2006-01-26 21:04), buy/sell per item: every
+#: source: January 2006 player blog, shop list: the launch SELL prices,
+#: buy/sell per item: every
 #: frame 200/100, every barrel and option 150/120, the Snipe Scope and every
 #: accessory / materia 100/80, every suit 300/250. Not one flat share (50 %,
 #: 80 %, 80 %, 83 %), so it is a per-item table. The 80 % rule above is the
@@ -174,11 +171,10 @@ LAUNCH_SELL_BY_CAT = {0x6F30: 100, 0x6F31: 120, 0x6F32: 80, 0x6F33: 120,
 LAUNCH_SELL = {iid: LAUNCH_SELL_BY_CAT[iid >> 16] for iid, _p, _n in DEFAULT_STOCK}
 #: A TUNED item (a Modify result) sells for its BASE part's launch price: no
 #: January source prices a tuned item or says the tune fee comes back (the
-#: 01-29 tune list gives fees only; "+ tune fees" is the 2007 FFCheats rule).
+#: January tune list gives fees only; adding tune fees is the 2007 FFCheats rule).
 #: OURS, flagged.
 
-#: SOURCED, January: "最初からアーマー以外のアイテムは所持している" (ameblo
-#: 2006-01-26, above) -- every character starts holding every item the launch
+#: source: January 2006 player blog (above): every character starts holding every item the launch
 #: shop sells except armor (suits): the three frames, three barrels, the
 #: Snipe Scope, the four options and the eleven accessories / materia, one
 #: each (the count is not given; one each is OURS).
@@ -202,8 +198,8 @@ def _chain(ids, fee, names):
 
 
 #: Modify = the guides' TUNE trees: (source, result, kit, fee, result name).
-#: SOURCED: EX-POTION mitem.html (20060505) derivation tables + FFCheats
-#: item.html (20070208) "obtained: tune up <source>". Retail tuning needs no
+#: source: 2006 player guides (EX-POTION tune tables, FFCheats item list,
+#: which names each result's source part). Retail tuning needs no
 #: kit (kit 0 = the 142 row's "none"); the 0x6430 kit ids are unnamed SE
 #: placeholders in our build. (source, result) must be unique: request 145
 #: carries nothing else to tell recipes apart.
@@ -361,7 +357,7 @@ def apply_login(body, gil=None, bag=None):
 # default 1/1 at [[0x005dd968]+128/129]). Only Death Penalty self-issues
 # (0x004a6768 adds 300 of 0x62300003). Stackable, def+14 = 500 per stack.
 AMMO_HANDGUN, AMMO_RIFLE, AMMO_MG = 0x62300000, 0x62300001, 0x62300002
-#: Lifestream's "standard mission supplies" (read off the shipped string tables).
+#: the standard mission supplies (read off the shipped string tables).
 STANDARD_AMMO = ((AMMO_HANDGUN, 36), (AMMO_RIFLE, 18), (AMMO_MG, 60))
 AMMO_STACK_MAX = 500
 
@@ -786,8 +782,8 @@ if __name__ == "__main__":
     # every sourced tune is offered, none needs a kit
     assert len(shop.recipes) == len(DEFAULT_RECIPES) == 25, len(shop.recipes)
     assert all(k == 0 for k, _ in shop.recipes.values())
-    # the LAUNCH sell prices (ameblo 2006-01-26 shop list: buy/sell 200/100,
-    # 150/120, 100/80, 300/250); a tuned item sells as its base part
+    # the LAUNCH sell prices (January 2006 player blog, shop list: buy/sell
+    # 200/100, 150/120, 100/80, 300/250); a tuned item sells as its base part
     for iid, want in ((ONE_EIGHTY, 100), (TOMINTOUL, 100), (NELSON, 100),
                       (0x6F300003, 100), (0x6F30001E, 100),
                       (MIDDLE_BARREL, 120), (0x6F310001, 120), (0x6F310002, 120),

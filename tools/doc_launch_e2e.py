@@ -137,7 +137,7 @@ def run_door():
         check("[door] N's world door answered", b is not None)
         if b is not None:
             bag = door_bag(b)
-            check("[door] N (new): 3000 gil at body[52] (ameblo 2006-01-26)",
+            check("[door] N (new): 3000 gil at body[52] (January 2006 player blog)",
                   struct.unpack_from("<I", b, S.LOGIN_GIL_OFF)[0] == 3000,
                   "%d" % struct.unpack_from("<I", b, S.LOGIN_GIL_OFF)[0])
             check("[door] N: the launch kit -- every stocked part but the suits",

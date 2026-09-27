@@ -2353,8 +2353,8 @@ def main():
           (DC.KIND_SAY, DC.KIND_SHOUT, DC.KIND_TELL, DC.KIND_ENTRY,
            DC.KIND_TEAM) == (5, 6, 3, 2, 7))
 
-    # 2026-09-26 (launch-lobby): table Min/Max RP (dcff7.info 1/31, "RP
-    # limits are set in the game rules")
+    # 2026-09-26 (launch-lobby): table Min/Max RP are set in the table's game
+    # rules (source: January 2006 player guide, multiplayer page)
     _rr = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,
                                                maximum=6, map_idx=3, mode=1,
                                                flags=D.BT_FLAG_MAX_RP))
