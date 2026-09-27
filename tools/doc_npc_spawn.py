@@ -194,6 +194,11 @@ def _selftest():
     check(f[1] == 100 and f[2] == 4, "+4 HP, +8 type")
     check(f[3:6] == (1165, 0, -17), "+10/12/14 position in whole world units")
     check(f[6:9] == (-979, 0, 205), "+16/18/20 direction x 1000")
+    if not LOBBY_NPCS:
+        print("  SKIP  no doc_npc_table.json beside this module: the placement "
+              "checks need your own table (see the README)")
+        print("ALL PASS" if not fails else "%d FAIL" % len(fails))
+        return 1 if fails else 0
     check(LOBBY_NPCS and all(n[4] < 2000 for n in LOBBY_NPCS),
           "standing NPCs only, none of the parked (y ~31000) ones")
     ps = payloads()
