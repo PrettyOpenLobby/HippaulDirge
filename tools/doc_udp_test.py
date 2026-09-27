@@ -381,7 +381,7 @@ def main():
     check("reserve echo carries the table key at body[16..17] (0x00bcd6ac lhu)",
           struct.unpack_from("<H", be, 16)[0] == key)
     check("reserve echo is padded like every world answer", len(be) >= 176)
-    # sec 4fm: the leader's START request as captured live 2026-09-12
+    # sec 4fm: the leader's START request as captured live
     # 21:48:10 (RECV #145, 52 bytes, mode 2): body[12] = 03 = LOBBY_CMD_START.
     r240 = bytes.fromhex(
         "04023400 7dcd0000 b01c3be9 fc4cc98f 3f55ebbf 0dd17847 07f00000 01000000"
@@ -609,7 +609,7 @@ def main():
     check("fake teammate rides message 35 kind 31", struct.unpack_from("<H", ac, 0)[0] == 35
           and struct.unpack_from("<I", ac, 12)[0] == 31)
     check("kind 31 record: id at +20, TEAM in the HIGH nibble of byte +42 "
-          "(the briefing-room findings A)",
+          "(slot in the LOW nibble)",
           struct.unpack_from("<I", ac, 20)[0] == 0x9001 and ac[42] == 0x31,
           "byte +42 = 0x%02x" % ac[42])
     ac = body(D.build_gs_add_chara(0x9001, 1, slot=2))
@@ -729,7 +729,7 @@ def main():
         return (len(set(_arm_20(members, members[0], dist)[0][:len(dist)]))
                 == len(dist))
 
-    # live table 31 (2026-09-26 03:21Z): 0x41050/0x41068 team 1, 0x41078 team 0
+    # live table 31: 0x41050/0x41068 team 1, 0x41078 team 0
     _t31 = [0x41050, 0x41068, 0x41078]
     _t31t = {0x41050: 1, 0x41068: 1, 0x41078: 0}
     check("kind 20 (table 31 roster): every client's own index names ITSELF",
@@ -793,7 +793,7 @@ def main():
           D.gs_dist_due({"ready_at": None, "dist": True, "auto_at": 50.0},
                         5.0) is None)
     _at, _as = D.gs_auto_teams({_A: 1}, [_A, _B])
-    check("auto-team: the live 09-23 case (leader on 1, joiner never sent 31) "
+    check("auto-team: the live case (leader on 1, joiner never sent 31) "
           "-> joiner on team 0, and the table is READY",
           _at == {_A: 1, _B: 0} and _as == [_B]
           and D.gs_real_ready(_at, [_A, _B])[0], "%r %r" % (_at, _as))
@@ -819,7 +819,7 @@ def main():
     check("battle-over answer is selector 39 on subchannel 7",
           _bo[1] == 39 and _bo[0] == 7)
 
-    # sec 4fu: the PEER RELAY. Two live 0x83s (09-12, two consoles:
+    # sec 4fu: the PEER RELAY. Two live 0x83s (two consoles:
     # PC, mode 2). The relay re-sends one to the other client as a PEER
     # datagram: flags bit 3 set (parser 0x0058a0b0 + router arm 0x00581530),
     # mode 0, and byte-for-byte the sender's ms, id and 40-byte pose otherwise.
@@ -1188,7 +1188,7 @@ def main():
     # at Start it sends 38 (LOBBY channel, always lands) + the message-27 re-arm
     # (GAME-SERVER channel). With a stale endpoint the re-arm is swallowed,
     # [chan+204] bit 6 is never set, [chan+224] is never refreshed and the
-    # client paints CER-48101 40 s later. Measured live 2026-09-23:
+    # client paints CER-48101 40 s later. Measured live
     # the peer whose connect->Start gap was 2 m 10 s sent 0 game-server hellos
     # and its [chan+212] was still the uninitialised 65528.
     _EPSEL = getattr(D, "GS_ENDPOINT_SELECTOR", None)
@@ -1242,9 +1242,9 @@ def main():
         # record, and the LEADER's console verbs (create/config/adjust) were
         # served unrewritten -- so the leader's own table screen UNDID the 104
         # it had just been sent, while the joiner (list + selector 38, both
-        # rec_for'd) kept a good one. Measured on a test rig 2026-09-23:
-        # we declared the LAN address at 01:16:00Z and the client's
-        # [chan+184..191] still read 192.0.2.60 at 01:18:18Z.
+        # rec_for'd) kept a good one. Measured on a test rig:
+        # two minutes after the LAN address was declared, the client's
+        # [chan+184..191] still read the store's raw address.
         _st104 = D.BattletableStore([], gs_ip="192.0.2.60", gs_port=55040)
         _k104 = _st104.add_record(bytes(D.BT_REC_LEN), leader=0x41000)
 
@@ -1432,7 +1432,7 @@ def main():
     check("z208 (church) asks for m002, the piece that only streamed on a walk",
           D.battle_bmap(208, _ZP, (0, 0)) == (2, 0))
     check("z201 (Jungle) asks for SE's own pair 1,3 -- ev2045's "
-          "Zone.load(201, 1, 3); blank until control with 0,0 (live 09-23)",
+          "Zone.load(201, 1, 3); blank until control with 0,0 (live)",
           D.battle_bmap(201, _ZP, (0, 0)) == (1, 3))
     check("z203 (Kalm) asks for m004 + m001, the pieces around its spawn",
           D.battle_bmap(203, _ZP, (0, 0)) == (4, 1))
@@ -1501,7 +1501,7 @@ def main():
     _rr = D.battle_rules_from_record(bytes(_st.record(_mk)))
     check("...and the room clock built from that record is the same 300 s",
           _rr.time_limit == 300.0, "%r" % _rr.time_limit)
-    # 2026-09-26 MEASURED: group 51 (reward text, quest N = index N-1) of
+    # MEASURED: group 51 (reward text, quest N = index N-1) of
     # SE's 20060124_3 lobby.bin and of every served lobby.bin since the 09-22
     # retail rebase (20260923_8, 20260924 dg2fit / victoryfit) -- what the
     # player READS. The server must pay exactly that.
@@ -1706,7 +1706,7 @@ def main():
     check("a plain (non-capsule) battle's field takes a drop too",
           D.capsule_drop(_pf, 1, 0x62300002, 30, (0, 0, 0))[0][0][0] == 10
           and len(_pf.field) == 1)
-    # 2026-09-24 (live + RE): touching a kind-10 capsule sends a RELIABLE
+    # Seen live, with RE: touching a kind-10 capsule sends a RELIABLE
     # inner-119 (flags 0x01) to the server; body = {u32 slot, u32 1, u32 n,
     # f32 pos}. The live capture's body (slot 6), mode 4:
     _b119 = bytes.fromhex("06000000010000000000000000d7777f4477fb5ac12ac2acc4"[:48]
@@ -1722,7 +1722,7 @@ def main():
     check("TWIN: a reliable GS request (inner type 130) is not a pick-up",
           D.p2p_server_type(bytes(_w119), dict(_i119, type=D.GS_INNER_TYPE)) is None
           and D.p2p_server_type(bytes(_w119), dict(_i119, is_data=False)) is None)
-    # 2026-09-24 (LIVE, Jungle TBS): the controller's request 24 carries the
+    # Seen live (Jungle TBS): the controller's request 24 carries the
     # bases -- count at body+61, {u32 HP, u16 index, u16 0, u32 mask} from +64
     _r24 = bytes.fromhex(
         "1800020000000000010000000e010000110000003c10040047107d43521cd7c0"
@@ -1732,7 +1732,7 @@ def main():
           D.base_report(_r24) == [(0, 8000, 0), (1, 7562, 0)])
     check("TWIN: a short / non-base report parses to nothing",
           D.base_report(_r24[:70]) == [] and D.base_report(bytes(64)) == [])
-    check("Jungle bases: Ifrit (team 0) = gimmick 26, the RED one (live 09-24)",
+    check("Jungle bases: Ifrit (team 0) = gimmick 26, the RED one (live)",
           D.base_gimmicks(201) == (26, 23))
     _br = D.BattleRoom(14, [0xA, 0xB], {0xA: 0, 0xB: 1},
                        D.BattleRules(mode="TBS"), now=0.0)
@@ -1919,7 +1919,7 @@ def main():
     check("room: a second 47 does not restart the clock",
           not room.arrive(0x41018, 130.0) and room.started == 100.0)
     # 2026-09-26: MISSION SUPPLIES. Request 44 = this battle's rounds fired;
-    # the body below is a live one (09-24 11:23:58): 0x3000 x4, 0x3001 x6.
+    # the body below is a live one: 0x3000 x4, 0x3001 x6.
     import doc_shop as S_
     import doc_missions as M_
     _b44 = bytes.fromhex("2c000100000000000000000000300000040000000130000006000000") + bytes(48)

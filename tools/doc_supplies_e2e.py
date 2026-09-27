@@ -31,7 +31,7 @@ from doc_novice_e2e import door_req                      # noqa: E402
 
 PORT = int(os.environ.get("DOC_SUPPLIES_E2E_PORT", "41557"))
 A_CID = 0x0002A664
-#: live 09-24 11:23:58: request 44 body (0x3000 x4, 0x3001 x6)
+#: live request 44 body (0x3000 x4, 0x3001 x6)
 B44 = bytes.fromhex("2c000100000000000000000000300000040000000130000006000000") + bytes(48)
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LOOPBACK: a SOLO player LEAVES a running battle, and a dissolved table's room
-does not swallow the next battle (live 2026-09-23, 22:31-22:34Z).
+does not swallow the next battle (live).
 
 Live: a player quit the Wastelands arena (lobby command 4 = return to
 lobby), the room ran on for its 600 s, the table stayed on the list; they
@@ -165,7 +165,7 @@ def drive_dissolve(ca, dst):
     time.sleep(1.5)
     drain(ca)
     into_battle(ca, dst, 7)
-    # the restart orphan (live 23:00Z): CONFIG of a key the store never had
+    # the restart orphan (live): CONFIG of a key the store never had
     ca.sendto(world_req(A_CID, D.BT_REQ_CONFIG, struct.pack("<H", 9) + bytes(2)), dst)
     time.sleep(0.8)
     return [p for p in drain(ca) if len(p) > D.BODY_OFF + 1

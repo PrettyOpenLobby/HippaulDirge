@@ -827,7 +827,7 @@ if __name__ == "__main__":
     shop.data[k] = {"gil": 10000, "bag": {}, Shop.KIT_MARK: 1, Shop.KIT2_MARK: 1}
     shop.save()
     assert shop.login_fields(k) == (10000, [])
-    # the LIVE 09:11:51 request 66 (Auto Scope, a beta id our build has only
+    # the LIVE request 66 (Auto Scope, a beta id our build has only
     # as the placeholder "OS0"): no longer stocked -> an all-zero 67
     live66 = bytes.fromhex("074200000100ffffffffffff030000000000326f0100000000000000")
     assert parse_entry(live66) == {"shop": 3, "iid": 0x6F320000, "qty": 1}

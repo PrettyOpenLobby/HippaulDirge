@@ -2,8 +2,7 @@
 """LOOPBACK: a TEAM BASE table gets its bases, a TEAM CAPSULE table its
 capsules (2026-09-24).
 
-Live 09-24: "if there's supposed to be a base for me to shoot at in base
-battle I do not see one". The static RE (docudp BASE_GIMMICKS notes): the
+Live, a Team Base battle showed no base to shoot at. The static RE (docudp BASE_GIMMICKS notes): the
 client binds its arena's base gimmicks to the teams from notify kind 29 at
 zone setup, and learns base HP / controller from kind 33; we sent kind 29
 with a zero record. This drives the real docudp main() through a solo battle
@@ -65,7 +64,7 @@ PORT = int(os.environ.get("DOC_E2E_PORT", "41562"))
 
 
 def r24_req(cid, hps):
-    """The controller's request 24 (live 09-24 shape): count at body+61,
+    """The controller's request 24 (live shape): count at body+61,
     {u32 HP, u16 index, u16 0, u32 mask} from body+64."""
     body = bytearray(64 + 12 * len(hps))
     struct.pack_into("<H", body, 0, 24)
@@ -289,7 +288,7 @@ def main():
     check("[capmission] no scoreboard / hold (46-48 are the Team Capsule HUD)",
           not any(k in (46, 47, 48) for k, _ in notes))
 
-    # LIVE 09-24: a touch is a RELIABLE inner-119 to the server, slot first
+    # LIVE a touch is a RELIABLE inner-119 to the server, slot first
     text, notes = battle("captouch", 2, 4, 0, capsules=3, touch=2)
     k11 = k10_items(notes, 11)
     check("[captouch] no traceback", "Traceback" not in text)

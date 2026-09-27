@@ -34,7 +34,7 @@ where marked) and one live cast:
   * RETRANSMITS. Game-server requests are mode 4: the header is enciphered with
     a per-boot key we do not hold, so docudp can neither read the transport seq
     nor ACK, and the client's reliable layer (500 ms timer, doubling) resends
-    every request. Live 07:20:09Z, ONE cast: copies at +0.598 / +1.588 / +3.599
+    every request. Live, ONE cast: copies at +0.598 / +1.588 / +3.599
     / +7.585 s. The header is a block cipher (every byte changes per datagram,
     capture 09-24) and the plaintext prefix carries a send clock, so a resend is
     not byte-identical: the SCHEDULE is the only mark of a resend. A new 60
@@ -185,7 +185,7 @@ def _selftest():
           magic_restricted(0x20000, 0x02) and not magic_restricted(0, 0x02)
           and not magic_restricted(0x20000, 0x08))
 
-    # the live cast: 07:20:09.665 + resends, then a genuine second cast at +9 s
+    # the live cast at t=0 + resends, then a genuine second cast at +9 s
     L = Ledger()
     t0 = 1000.0
     live = [0.0, 0.598, 1.588, 3.599, 7.585]
