@@ -53,6 +53,28 @@ WHAT IS INFERRED:
     armor type", KelStr 35:24/25). The creation screen offers NO mask pick
     (checked in a live session, 09-13), so the mask is the standard DG Soldier Mask M or F by
     gender (chr_code bit 6, 1 = female).
+    WARNING: 2026-09-26, SOURCED against that: the SUIT is issued at creation, the
+    MASK is not. The Soldier Mask is EARNED on the DG Drone 2nd exam:
+    "入手方法：DGドローン 2nd class 昇格時に入手" (dcff7-online blog, ameblo
+    entry-10008498561, 2006-01-29); "DGドローン2nd昇進試験クリア後、試験教官から
+    入手可能 ... 捨てることができない" (dc.jpn.org wiki ソルジャーマスク, Wayback
+    20060828080401); "※クリア後にソルジャーマスク入手可能" (ameblo
+    entry-10008424977, 2006-04-03 exam page). And the 03-24 update fixed
+    "アイテム所持数がいっぱいだった場合にソルジャーマスクが取得できない不具合"
+    (ameblo entry-10010936385): with a full bag the mask was not received.
+    So a new character starts with NO mask: body[76] = NO_ITEM, which the
+    client handles like an unequipped mask (getEquipItems equips word 0 only
+    when that id is in the bag; the re-dress then clears costume bit 7 and
+    the created FACE shows, as after Change Mask -> remove). KelStr 35:3 /
+    35:24 ("Select Mask Type", "initial mask type") are unused strings: the
+    Jan creation screen has no mask row. settle_soldier_mask() below keeps
+    the mask for every character that was issued one before this rule
+    (a wallet without MASK_RULE_MARK) and delivers an earned one. OURS: a
+    mask owed while the bag is full stays owed until there is room (the
+    post-03-24 behaviour, not January's bug), and a held Soldier Mask is
+    worn at login unless the character's own Change Mask choice says
+    otherwise (GearStore); the exam instructor's hand-over scene is not
+    served, the mask arrives at the next world door.
 
 CHANGE MASK / CHANGE ARMOR (2026-09-13; measured offline by running the
 client's senders and its 241 arms, ALL PASS). Both are LOBBY COMMANDS on
@@ -128,6 +150,34 @@ def armor_for_suit(item):
     return (item & 0xFFFF) // SUIT_STEP
 
 
+#: 2026-09-24: THE PLAYER'S HP comes from the equipped SUIT. Retail
+#: data/bgd/bgd.bin (patch 20060124_3) section 4, a 1140-byte block the client
+#: holds at [[0x005e66e8]+0x14], is a run of 8-entry u16 grade tables; a suit's
+#: item record +16 is its class, then one 4-bit grade per stat, low nibble
+#: first. Client code reads the melee (+0x40c, 0x004a8448), mobility
+#: (+0x41c/+0x42c, 0x00699348), shooting (+0x43c) and magic (+0x45c) tables by
+#: their nibbles; NOTHING in the client reads +0x3fc, the table keyed by the
+#: first nibble (durability) -- the server sent the result as world-door HP.
+#: So this is the retail server's lookup, by the table order the client proves.
+#: Grade 7 (360) is unused by every real suit.
+SUIT_HP_TABLE = (210, 240, 250, 270, 340, 100, 200, 360)   # block +0x3fc
+#: suit index -> durability grade (bgd item +17 & 0xf). Soldier 3, Sniper 0,
+#: Speed 1 (and its variant 0x29), Magic 2, Toughness 4. The other 94 items
+#: of the category are unnamed placeholders ("服N") with filler grades past
+#: the table; they take their class's named suit.
+SUIT_DURABILITY = {0x00: 3, 0x14: 0, 0x28: 1, 0x29: 1, 0x3C: 2, 0x50: 4}
+
+
+def suit_hp(item):
+    """The max HP a suit gives (retail bgd durability table), or None."""
+    look = armor_for_suit(item)
+    if look is None:
+        return None
+    n = item & 0xFFFF
+    grade = SUIT_DURABILITY.get(n, SUIT_DURABILITY[look * SUIT_STEP])
+    return SUIT_HP_TABLE[grade]
+
+
 def mask_model(item):
     """The model a mask dresses the model in (its def +16), or None."""
     n = item & 0xFFFF
@@ -137,8 +187,63 @@ def mask_model(item):
 
 
 def starter_gear(female=False, armor=0):
-    """(mask id, suit id) issued into the bag and equipped at every login."""
+    """(mask id, suit id) of the old issue (mask + suit at every login).
+    Since 2026-09-26 only the SUIT is issued; see settle_soldier_mask."""
     return (MASK_DG_F if female else MASK_DG_M), suit_for_armor(armor)
+
+
+SOLDIER_MASKS = (MASK_DG_M, MASK_DG_F)
+#: the exam that earns it: quest 1 = DG Drone 2nd (doc_stats.EXAM_PROMOTIONS
+#: 1 -> rank 2, doc_missions.EXAMS[1])
+SOLDIER_MASK_EXAM = 1
+#: shop-wallet fields (doc_shop.Shop writes MASK_RULE_MARK on every NEW wallet)
+MASK_RULE_MARK = "smask"      # the earned-mask rule applies to this wallet
+MASK_DUE = "smask_due"        # a Soldier Mask is owed (earned / legacy)
+
+
+def soldier_mask(female=False):
+    return MASK_DG_F if female else MASK_DG_M
+
+
+def _held_masks(bag, female=False):
+    order = (soldier_mask(female), soldier_mask(not female))
+    return [m for m in order if bag.get("0x%08x" % m, 0) > 0]
+
+
+def owe_soldier_mask(wallet):
+    """The Drone 2nd exam was cleared: owe the mask unless one is held or
+    already owed. True when this call created the debt."""
+    if _held_masks(wallet.get("bag") or {}) or wallet.get(MASK_DUE):
+        return False
+    wallet[MASK_DUE] = 1
+    return True
+
+
+def settle_soldier_mask(wallet, female=False, bag_max=50):
+    """At login: (Soldier Mask to wear or None, [notes]); mutates `wallet`
+    (a doc_shop wallet dict). A wallet made before the rule (no
+    MASK_RULE_MARK) belongs to a character that was ISSUED the mask at
+    creation, so it keeps it: it is owed once and put in the persisted bag.
+    An owed mask goes into the bag when there is room for a new stack."""
+    bag = wallet.setdefault("bag", {})
+    notes = []
+    if not wallet.get(MASK_RULE_MARK):
+        wallet[MASK_RULE_MARK] = 1
+        if not _held_masks(bag, female):
+            wallet[MASK_DUE] = 1
+        notes.append("made before the earned-mask rule: keeps its Soldier Mask")
+    held = _held_masks(bag, female)
+    if wallet.get(MASK_DUE):
+        if held:
+            wallet.pop(MASK_DUE, None)
+        elif len([v for v in bag.values() if v > 0]) < bag_max:
+            bag["0x%08x" % soldier_mask(female)] = 1
+            wallet.pop(MASK_DUE, None)
+            held = _held_masks(bag, female)
+            notes.append("Soldier Mask 0x%08x put in the bag" % held[0])
+        else:
+            notes.append("Soldier Mask OWED, bag full (%d) -- stays owed" % bag_max)
+    return (held[0] if held else None), notes
 
 
 def slot_accepts(slot, item):
@@ -296,4 +401,44 @@ if __name__ == "__main__":
     assert equip_costume(0x1019, SLOT_MASK, 0x63310000) == 0x1019   # wrong category
     assert unequip_costume(0x19B9) == 0x1939
     assert parse_request(CMD_EQUIP, bytes(16) + b"\x00\x00\x00\x00\x00\x00\x30\x63") == (0, 0x63300000)
+    # 2026-09-26: the Soldier Mask is EARNED (Drone 2nd exam), not issued
+    w = {"gil": 3000, "bag": {}, MASK_RULE_MARK: 1}            # a new character
+    assert settle_soldier_mask(w, False) == (None, []) and w["bag"] == {}
+    assert owe_soldier_mask(w) and not owe_soldier_mask(w)      # owed once
+    m, n = settle_soldier_mask(w, True)
+    assert m == MASK_DG_F and w["bag"] == {"0x63300001": 1} and MASK_DUE not in w, n
+    assert not owe_soldier_mask(w), "TWIN: a held mask is never owed again"
+    assert settle_soldier_mask(w, True)[0] == MASK_DG_F and len(w["bag"]) == 1
+    old = {"gil": 10, "bag": {"0x6f300000": 1}}                # before the rule
+    assert settle_soldier_mask(old, False)[0] == MASK_DG_M, "legacy keeps it"
+    assert old["bag"]["0x63300000"] == 1 and old[MASK_RULE_MARK] == 1
+    assert settle_soldier_mask(old, False)[0] == MASK_DG_M and len(old["bag"]) == 2
+    full = {"bag": {"0x%08x" % i: 1 for i in range(50)}, MASK_RULE_MARK: 1,
+            MASK_DUE: 1}
+    m, n = settle_soldier_mask(full, False, 50)
+    assert m is None and full[MASK_DUE] == 1 and "bag full" in n[0], n
+    del full["bag"]["0x00000000"]
+    assert settle_soldier_mask(full, False, 50)[0] == MASK_DG_M and MASK_DUE not in full
+    # 2026-09-24: suit HP = the retail durability table
+    assert [suit_hp(suit_for_armor(t)) for t in range(5)] == [270, 210, 240, 250, 340]
+    assert suit_hp(0x63310029) == 240 and suit_hp(0x63310004) == 270   # placeholder -> class
+    assert suit_hp(0x63300000) is None and suit_hp(NO_ITEM) is None      # a mask / empty slot
+    # and re-derived from the game's own data/bgd/bgd.bin (patch 20060124_3)
+    # when POL_DOC_BGD names a copy read out of your own install, so the
+    # constants above cannot drift from the game data (the twin: a wrong table
+    # offset reads the float/-1 words before it and fails)
+    _bgd = os.environ.get("POL_DOC_BGD") or ""
+    if _bgd and os.path.exists(_bgd):
+        _b = open(_bgd, "rb").read()
+        # directory at +36: {offset, count, stride, 0} per section; 4 = the block
+        _blk = struct.unpack_from("<I", _b, 36 + 16 * 4)[0]
+        assert _blk == 12004
+        assert struct.unpack_from("<8H", _b, _blk + 0x3FC) == SUIT_HP_TABLE
+        assert struct.unpack_from("<8H", _b, _blk + 0x3F8) != SUIT_HP_TABLE
+        for _i in range(474):
+            _r = _b[260 + 24 * _i:284 + 24 * _i]
+            _id = struct.unpack_from("<I", _r)[0]
+            if _id >> 16 == SUIT_CAT and (_id & 0xFFFF) in SUIT_DURABILITY:
+                assert _r[17] & 0xF == SUIT_DURABILITY[_id & 0xFFFF], hex(_id)
+        print("doc_gear: suit HP table matches retail bgd.bin")
     print("doc_gear self-test PASS")

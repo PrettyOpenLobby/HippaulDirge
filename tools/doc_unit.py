@@ -9,7 +9,7 @@ the zeroed lobby-command answer of sec 4dy -- honestly "you have no units",
 and nothing could be registered.
 
 WHAT IS MEASURED (static RE, savestates doc_eastloaded_slot09 and
-doc_inworld_slot03; memory note doc-units-protocol-map):
+doc_inworld_slot03):
 
   Every Unit verb is a LOBBY COMMAND. Request selector 240 carries the command
   byte at body[12] and 12 argument bytes at body[16..27] (builder 0x00589c48,
@@ -76,8 +76,12 @@ WHAT IS INFERRED, and why:
     the server admin sets one. With --shop the server wallet pays the same fee.
 
 NOT DONE: the banned emblem word check (SE 43148) -- the 6-bit alphabet is not
-decoded, so letters are stored and logged raw. The nine stat triplets are
-served as zeros: nothing tallies unit battles yet.
+decoded, so letters are stored and logged raw.
+
+2026-09-24 UNIT BATTLES: record_battle() pays each unit the rank points its
+members earned in a unit battle and tallies {wins, draws, losses} in stat row
+UNIT_BATTLE_ROW (which of the nine rows SE used per mode is not read).
+join_allowed() is SE's 28:197 reservation rule: only the first two units.
 """
 import json
 import os
@@ -314,6 +318,30 @@ class Units:
                              *(int(x) & 0xFFFFFFFF for x in row[:3]))
         return b
 
+    def record_battle(self, sides):
+        """2026-09-24: settle one unit battle. `sides` = [(unit id, outcome
+        "w"/"d"/"l", rank points)]: SE's 28:197 "unit rank points are awarded
+        according to your team record" -- we pay each unit the battle rank
+        points its members earned (so a win pays more), and tally the record
+        in UNIT_BATTLE_ROW. Returns {hexid: (outcome, points, new total)}."""
+        self.load()
+        out = {}
+        col = {"w": 0, "d": 1, "l": 2}
+        for uid, outcome, pts in sides:
+            u = self.unit(uid)
+            if u is None or outcome not in col:
+                continue
+            u["pts"] = max(0, min(int(u.get("pts", 0)) + int(pts), 0x7FFFFFFF))
+            stats = [list(r) + [0] * (3 - len(r)) for r in (u.get("stats") or [])]
+            while len(stats) <= UNIT_BATTLE_ROW:
+                stats.append([0, 0, 0])
+            stats[UNIT_BATTLE_ROW][col[outcome]] += 1
+            u["stats"] = stats
+            out[hexid(uid)] = (outcome, int(pts), u["pts"])
+        if out:
+            self.save()
+        return out
+
     def mine_body(self, key, subchannel=7):
         b = answer_head(CMD_MINE, subchannel)
         ids = self.my_units(key)
@@ -422,6 +450,69 @@ class Units:
         return None, "unhandled"
 
 
+#: 2026-09-24: the stat row a UNIT BATTLE tallies into, {a wins, b draws,
+#: c losses}. The client sums every row's a and c (sub 24 -> +44 / +52), so
+#: wins and losses show whichever row holds them; WHICH of the nine rows SE
+#: meant per mode is not read, so every unit battle uses row 0.
+UNIT_BATTLE_ROW = 0
+
+
+def unit_sides(members, unit_of):
+    """The first two distinct units among `members` in seating order -- SE's
+    rule (28:197): "you cannot make a reservation unless you belong to one of
+    the first two units to reserve"."""
+    sides = []
+    for m in members:
+        u = unit_of(m) if m else 0
+        if u and u not in sides and len(sides) < 2:
+            sides.append(u)
+    return sides
+
+
+def join_allowed(members, unit_of, joiner):
+    """(ok, why) for `joiner` reserving at a unit table seating `members`."""
+    u = unit_of(joiner) if joiner else 0
+    if not u:
+        return False, "not enlisted in a unit"
+    sides = unit_sides(members, unit_of)
+    if u in sides or len(sides) < 2:
+        return True, "unit %s" % hexid(u)
+    return False, "unit %s is not one of the first two (%s)" % (
+        hexid(u), ", ".join(hexid(s) for s in sides))
+
+
+#: 2026-09-24: lobby command 34 = UNIT VERSUS INFO, sent when a unit table's
+#: window opens (phase 109, kelsvc vt+0x4d8 0x00bde2d0; request body[16..17]
+#: = the table id). Its 241 arm 0x00bd0f18 (sub table 0x00bf0250 entry 31)
+#: copies the answer into G+0x2b68 (G = [0x00b1a8d8]); the unit-table Start
+#: gate 0x00aa12c8 passes only when the byte G+0x2b6a -- the number of
+#: NONZERO unit ids in the answer -- is >= 2. Without it every unit table
+#: refuses Start with 0x683b "Conditions for victory are not configured".
+#: The arm only runs as the REPLY to the client's own 34 (kelsvc state 5 and
+#: [kelsvc+0x41c] set by the request), never unsolicited.
+CMD_VERSUS = 34
+VS_TABLE, VS_UNIT_A, VS_UNIT_B = 16, 20, 28          # u16, u64, u64
+VS_NAME_A, VS_NAME_B, VS_NAME_LEN = 36, 56, 20        # -> G+0x2b78 / +0x2b98
+VS_COUNT_A, VS_COUNT_B = 76, 77                       # u8 each; the window's
+#: per-side numbers ("%s %d"; INFERRED: the members each unit has seated)
+
+
+def versus_body(table_id, sides, subchannel=7):
+    """The 241 answer to command 34. `sides` = up to two (unit id, name,
+    seated count); a missing side is zeros ("Awaiting Entry")."""
+    b = answer_head(CMD_VERSUS, subchannel)
+    struct.pack_into("<H", b, VS_TABLE, table_id & 0xFFFF)
+    for i, (id_off, name_off, cnt_off) in enumerate(
+            ((VS_UNIT_A, VS_NAME_A, VS_COUNT_A), (VS_UNIT_B, VS_NAME_B, VS_COUNT_B))):
+        if i >= len(sides):
+            break
+        uid, name, count = sides[i]
+        struct.pack_into("<Q", b, id_off, uid & U64)
+        b[name_off:name_off + VS_NAME_LEN] = _name(name, VS_NAME_LEN)
+        b[cnt_off] = max(0, min(int(count), 0xFF))
+    return b
+
+
 def apply_login(body, unit_id):
     """Write the enlisted unit (or 0) into a selector-2 answer body."""
     need = LOGIN_UNIT_OFF + 8
@@ -512,5 +603,39 @@ if __name__ == "__main__":
     assert hdr(b) == (0, 0) and us.enlisted(k1) == 0 and hexid(G) not in us.data["units"]
     for f in (p, sp):
         os.remove(f)
+    # 2026-09-24: unit battles -- the first two units own the table
+    U1, U2, U3 = 0x101, 0x202, 0x303
+    of = {1: U1, 2: U1, 3: U2, 4: U3, 5: 0}.get
+    assert unit_sides([1, 2, 3, 4], of) == [U1, U2]
+    assert join_allowed([1], of, 3)[0]                 # second unit may take side 2
+    assert join_allowed([1, 3], of, 2)[0]              # a member of a seated unit
+    assert not join_allowed([1, 3], of, 4)[0]          # a third unit is refused
+    assert not join_allowed([1], of, 5)[0]             # no unit at all
+    assert join_allowed([], of, 4)[0]                  # the first reserver
+    G1, G2 = 0x0000000700000030, 0x0000000700000031
+    for g in (G1, G2):
+        b, note = us.body_for(CMD_REGISTER, req(CMD_REGISTER, g, 0x12, 0, 0), k1)
+        assert hdr(b) == (0, 0), note
+    p0 = us.unit(G1)["pts"]
+    r = us.record_battle([(G1, "w", 40), (G2, "l", 10), (0x999, "w", 5)])
+    assert set(r) == {hexid(G1), hexid(G2)}, r      # an unknown unit is skipped
+    r2 = us.record_battle([(G1, "d", 15)])
+    ug = us.unit(G1)
+    assert ug["stats"][UNIT_BATTLE_ROW] == [1, 1, 0] and ug["pts"] == p0 + 55
+    assert r2[hexid(G1)][2] == ug["pts"]
+    assert us.unit(G2)["stats"][UNIT_BATTLE_ROW] == [0, 0, 1]
+    assert struct.unpack_from("<III", us.info_body(G1), INFO_STATS) == (1, 1, 0)
+    assert Units(p).unit(G1)["stats"][UNIT_BATTLE_ROW] == [1, 1, 0]   # persisted
+    # command 34: two units -> the client's gate count (nonzero ids) is 2
+    vb = versus_body(7, [(G1, "Alpha", 2), (G2, "Bravo", 1)])
+    assert vb[1] == CMD_ANS and struct.unpack_from("<H", vb, ANS_CMD)[0] == 34
+    assert struct.unpack_from("<HxxQQ", vb, VS_TABLE) == (7, G1, G2)
+    assert vb[VS_NAME_A:VS_NAME_A + 5] == b"Alpha" and vb[VS_NAME_B:VS_NAME_B + 5] == b"Bravo"
+    assert (vb[VS_COUNT_A], vb[VS_COUNT_B]) == (2, 1) and hdr(vb) == (0, 0)
+    gate = lambda body: sum(1 for o in (VS_UNIT_A, VS_UNIT_B)
+                            if struct.unpack_from("<Q", body, o)[0])
+    assert gate(vb) == 2
+    assert gate(versus_body(7, [(G1, "Alpha", 1)])) == 1      # one unit: Start refused
+    assert gate(versus_body(7, [])) == 0
     print("doc_unit self-test PASS")
     sys.exit(0)

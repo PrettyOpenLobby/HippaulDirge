@@ -36,17 +36,41 @@ the capture of that session names the BUY: request 66, not 145.
   login  selector-2 world door: body[52] -> R+744 GIL, body[140] bag count,
          body[240+8i] {u32 id, u16 0, u16 qty} (MEASURED, doc_shop_proof.py).
 
-STOCK = the ONLINE catalogue. Categories 0x6932 / 0x6F3x carry SE's "O"
-placeholders (OI.., OF.., OB.., OS.., OO.., OA..) and hold Flash Materia, which
-Lifestream says an update ADDED to the online shop; Lifestream also says the
-shop machines sold WEAPONS and MATERIA. Online weapons are PARTS: 0x6F30 frames
-(handgun 00-08, rifle 0B-13, machine gun 14-1C), 0x6F31 barrels. The 0x6430
-upgrade KITS ("items necessary for upgrading weapon parts") are stocked too, so
-Modify is usable -- whether retail SOLD them is unknown (that category's
-placeholders are "QI", quest items). Left out: Broken Handgun / Scarlet Custom
-(special), the Gatling Gun ("a stationary firearm"), the SC Frame Kit (no
-recipe), tickets and plates. The retail stock LIST, recipes and PRICES do not
-survive; prices, fees and recipe ladders here are PLACEHOLDERS / inferred.
+STOCK, PRICES, TUNING, SELL RULE (2026-09-26, replaces the 09-13 placeholders)
+------------------------------------------------------------------------------
+SOURCED from the 2006 RETAIL guides (via the Wayback Machine):
+  * EX-POTION dcff7/mshop.html + mitem.html (Wayback 20060505213120 /
+    20060505213111, unchanged at 20060618): the online shop list with prices,
+    and the "tune" trees with their fees.
+  * FFCheats dcff7/multi/item.html final rev (Wayback 20070208085459): the
+    same prices plus every item's SELL price.
+  Both agree: frames 200, barrels / options 150, scope / accessories /
+  materia 100, suits 300; a tune costs 100 (frames) or 50 (barrels, scope,
+  options) at the shop machine and needs NO kit; sell = 80 % of what the item
+  cost in total (One-Eighty 200 -> 160, a tuned frame 200 + 100 -> 240,
+  Middle Barrel III 150 + 50 + 50 -> 200). Ammunition and consumables were
+  NOT sold (mission supplies / field pickups only) -- none are stocked.
+  2026-09-26: those sell prices are the 2007 revision. LAUNCH (January) sold
+  lower and per kind: LAUNCH_SELL, from the dcff7-online blog's 2006-01-26
+  shop list; the same blog gives the launch starting gil and kit.
+
+MEASURED on our build: every id below is NAMED in the 20060124_3 client's own
+item table (kelstr.bin via an offline run of the client's own code (doc_kelitem); the names are
+byte-identical to the 20051209_6 disc's), and every item the guides list has
+an id there. The older FFCheats rev (2006-05: frames 5000, upgrade kits,
+"Five Fourty" / "Stenberg" / "Parfum" ladders) names items our build only
+has as SE placeholders (OF1, OF12, OS0; the 0x6430 kits are "chi 1..15") --
+that is the beta economy the 09-13 stock was built from; it is gone.
+
+THE DISC's price table is NOT the online one: the 29,184-B "shop data" buffer
+(0x00551390) is filled from data/zone/zNNN/shp.bin (header "KelShop1.0
+2005/11/21", each shop decrypted with key 7 + zlib by 0x003bbad0) -- the STORY
+shops. Its 474-row sorted {id -> u32} table is the story SELL value (Potion
+100 buy -> 70, Cerberus 1000 -> 700, Cerberus II 1000 + 2000 tune -> 2100:
+70 % of buy + tune fees) and every online id (0x6F3x, 0x6331) carries the
+default 10. So the disc confirms the MODEL (sell = a fixed share of buy +
+tune fees) but has no online prices; the guides give those. Flash Materia
+(0x6F34001B) stays out: Lifestream's timeline says a later update ADDED it.
 """
 import json
 import os
@@ -83,101 +107,131 @@ LOGIN_BAG_OFF = 240          # src+196 with src = body[44]
 BAG_MAX = 50                 # the `Inventory n/50` cap; R's tally holds 256
 
 GIL_ID = 0x67300000
-START_GIL = 20000
+#: SOURCED, January (2026-09-26): the dcff7-online blog's launch-day notes,
+#: ameblo entry-10008428317 "雑記" (2006-01-26 23:26): "ゲーム開始時所持金3000。
+#: ... 最初からアーマー以外のアイテムは所持している。アーマーは各300で買える。"
+#: (3000 gil at the start; you already hold every item except armor; armor
+#: is 300 each). It was 1000 (OURS, 09-26) and 20000 before that. Only a NEW
+#: wallet starts with it: existing wallets keep their gil.
+START_GIL = 3000
 GIL_MAX = 0x7FFFFFFF
 QTY_MAX = 99
-SELL_RATE = 0.5              # placeholder, like the prices
+#: The FALLBACK sell rule, for items outside LAUNCH_SELL (a --shop-stock file
+#: can stock other categories): FFCheats multi/item.html (20070208) sells at
+#: 80 % of the total paid. That is the 2007 revision, not launch.
+SELL_RATE = 0.8
+#: SOURCED sell prices outside the 80 % rule (FFCheats 20070208): the Broken
+#: Handgun / Broken Barrel (Soar's quest items, never on sale) sell for 1.
+SELL_OVERRIDES = {0x6F300009: 1, 0x6F310009: 1}
+
+# The ids are our build's own (doc_kelitem.py on the 20060124_3 kelstr.bin);
+# the English names are the guides' / Lifestream's renderings.
+ONE_EIGHTY, TOMINTOUL, NELSON = 0x6F300000, 0x6F30000B, 0x6F300014
+MIDDLE_BARREL, LONG_BARREL, SHORT_BARREL = 0x6F310000, 0x6F310003, 0x6F310006
+SNIPE_SCOPE = 0x6F320002
+POWER_BOOSTER, RAPID_FIRE = 0x6F330000, 0x6F330003
+FLASH_MATERIA = 0x6F34001B
 
 
 def _parts(cat, rows):
     return [((cat << 16) | idx, price, name) for idx, price, name in rows]
 
 
-#: (item id, price, name). PLACEHOLDER prices -- override with --shop-stock.
-#: Order matters for the probe: the first 50 are sure to fit the 144 list.
+#: (item id, price, name) -- the Buy tab. SOURCED: EX-POTION mshop.html
+#: (20060505) and FFCheats item.html (20070208) agree on every price.
+#: Override with --shop-stock.
 DEFAULT_STOCK = tuple(
-    _parts(0x6932, [(0x00, 50, "Potion"), (0x01, 300, "Hi-Potion"),
-                    (0x02, 1000, "X-Potion"), (0x04, 800, "Phoenix Down"),
-                    (0x05, 2500, "Phoenix Pinion")])
-    + _parts(0x6F34, [(0x17, 3000, "Fire Materia"), (0x18, 3000, "Blizzard Materia"),
-                      (0x19, 3000, "Thunder Materia"), (0x1A, 4000, "Cure Materia"),
-                      (0x1B, 5000, "Flash Materia"), (0x1C, 5000, "Bind Materia"),
-                      (0x1D, 5000, "Grenade Materia")])
-    + _parts(0x6F30, [  # handgun frames
-        (0x00, 2000, "One Eighty"), (0x01, 4000, "Three Sixty"),
-        (0x02, 7000, "Five Fourty"), (0x03, 10000, "Seven Twenty"),
-        (0x04, 15000, "Caballerial"), (0x05, 15000, "Steelfish"),
-        (0x06, 15000, "Alley-Oop"), (0x07, 15000, "Elgarial"),
-        (0x08, 25000, "Miller Flip"),
-        # rifle frames
-        (0x0B, 3000, "Tomin"), (0x0C, 5000, "Balmen"), (0x0D, 8000, "Bror"),
-        (0x0E, 12000, "Clynel"), (0x0F, 18000, "Caol"), (0x10, 18000, "Tlemill"),
-        (0x11, 18000, "Ringbank"), (0x12, 18000, "Ockdhu"), (0x13, 30000, "Farran"),
-        # machine gun frames
-        (0x14, 3000, "Nelson"), (0x15, 5000, "Stenberg"), (0x16, 8000, "Ullman"),
-        (0x17, 12000, "Foresythe"), (0x18, 18000, "Grogono"),
-        (0x19, 18000, "Terashima"), (0x1A, 18000, "Smith"), (0x1B, 18000, "Revis"),
-        (0x1C, 30000, "Hopcroft")])
-    + _parts(0x6F31, [(0x00, 1500, "Vernis"), (0x01, 5000, "Vernis Prime"),
-                      (0x02, 12000, "Vernis X"), (0x03, 2000, "Rouge"),
-                      (0x04, 6000, "Rouge Prime"), (0x05, 14000, "Rouge X"),
-                      (0x06, 2000, "Parfum"), (0x07, 6000, "Parfum Prime"),
-                      (0x08, 14000, "Parfum X")])
-    # --- past row 48: whether these show a price settles 144's cap of 50
-    + _parts(0x6F32, [(0x00, 2000, "Auto Scope"), (0x01, 6000, "Auto Scope Revo"),
-                      (0x02, 2500, "Sniper Scope"), (0x03, 4000, "Materia Floater"),
-                      (0x04, 8000, "S Auto Scope")])
-    + _parts(0x6F33, [(0x00, 2000, "Power Booster"), (0x01, 6000, "Power Booster Revo"),
-                      (0x02, 2500, "Auto Reloader"), (0x03, 3000, "Rapidfire Unit"),
-                      (0x04, 8000, "Rapidfire Unit Revo"), (0x05, 3000, "Gravity Floater"),
-                      (0x06, 4000, "Materia Booster"), (0x07, 9000, "Materia Booster Beta")])
-    + _parts(0x6F34, [(0x00, 1500, "Guard Relief"), (0x01, 5000, "Revo Guard Relief"),
-                      (0x02, 2000, "Power Cross"), (0x03, 6000, "Power Cross Revo"),
-                      (0x04, 1500, "S Adjuster"), (0x05, 5000, "S Adjuster Revo"),
-                      (0x06, 1500, "M Adjuster"), (0x07, 5000, "M Adjuster Revo"),
-                      (0x08, 1500, "L Adjuster"), (0x09, 5000, "L Adjuster Revo"),
-                      (0x0A, 1500, "Recoil Limiter"), (0x0B, 1500, "Silencer"),
-                      (0x0C, 5000, "Limit Breaker"), (0x0D, 12000, "Limit Breaker Revo")])
-    # Modify kits (SC Frame Kit 0x64300005 left out: no recipe known)
-    + _parts(0x6430, [(0x00, 1000, "Power Kit"), (0x01, 1000, "Speed Kit"),
-                      (0x02, 1000, "Weight Kit"), (0x03, 2000, "Handgun Kit EX"),
-                      (0x04, 5000, "Handgun Kit ULT"), (0x06, 2000, "Rifle Kit EX"),
-                      (0x07, 5000, "Rifle Kit ULT"), (0x08, 2000, "Machine Gun Kit EX"),
-                      (0x09, 5000, "Machine Gun Kit ULT"), (0x0A, 1500, "N Barrel Kit"),
-                      (0x0B, 1500, "L Barrel Kit"), (0x0C, 1500, "S Barrel Kit"),
-                      (0x0D, 2500, "Materia Booster Kit"), (0x0E, 2000, "Auto Scope Kit")])
+    _parts(0x6F30, [(0x00, 200, "One-Eighty"),            # handgun frame
+                    (0x0B, 200, "Tomintoul"),             # rifle frame
+                    (0x14, 200, "Nelson")])               # machine gun frame
+    + _parts(0x6F31, [(0x00, 150, "Middle Barrel"), (0x03, 150, "Long Barrel"),
+                      (0x06, 150, "Short Barrel")])
+    + _parts(0x6F32, [(0x02, 100, "Snipe Scope")])
+    + _parts(0x6F33, [(0x00, 150, "Power Booster"), (0x02, 150, "Auto Reloader"),
+                      (0x03, 150, "Rapid Fire"), (0x05, 150, "Anti-Gravity Floater")])
+    + _parts(0x6F34, [(0x04, 100, "Near Adjuster"), (0x06, 100, "Middle Adjuster"),
+                      (0x08, 100, "Far Adjuster"), (0x0A, 100, "Recoil Limiter"),
+                      (0x0B, 100, "Silencer"), (0x0E, 100, "Quick Turn"),
+                      (0x0F, 100, "Auto Shot"),
+                      (0x17, 100, "Fire Materia"), (0x18, 100, "Blizzard Materia"),
+                      (0x19, 100, "Thunder Materia"), (0x1A, 100, "Cure Materia")])
+    # 2026-09-24: no Flash Materia (0x6F34001B) -- a later update added it to
+    # the shop (Lifestream timeline); our client is the Jan 24 lobby
+    + _parts(0x6331, [(0x00, 300, "Soldier Suit"), (0x14, 300, "Snipe Suit"),
+                      (0x28, 300, "Speed Suit"), (0x3C, 300, "Magic Suit"),
+                      (0x50, 300, "Toughness Suit")])
 )
 
 
-def _ladder(cat, idxs, kit):
-    return [((cat << 16) | a, (cat << 16) | b, kit) for a, b in zip(idxs, idxs[1:])]
+#: SOURCED, January (2026-09-26): the launch SELL prices, ameblo
+#: entry-10008421189 "ショップ" (2006-01-26 21:04), buy/sell per item: every
+#: frame 200/100, every barrel and option 150/120, the Snipe Scope and every
+#: accessory / materia 100/80, every suit 300/250. Not one flat share (50 %,
+#: 80 %, 80 %, 83 %), so it is a per-item table. The 80 % rule above is the
+#: 2007 revision (frames 160, suits 240).
+LAUNCH_SELL_BY_CAT = {0x6F30: 100, 0x6F31: 120, 0x6F32: 80, 0x6F33: 120,
+                      0x6F34: 80, 0x6331: 250}
+LAUNCH_SELL = {iid: LAUNCH_SELL_BY_CAT[iid >> 16] for iid, _p, _n in DEFAULT_STOCK}
+#: A TUNED item (a Modify result) sells for its BASE part's launch price: no
+#: January source prices a tuned item or says the tune fee comes back (the
+#: 01-29 tune list gives fees only; "+ tune fees" is the 2007 FFCheats rule).
+#: OURS, flagged.
+
+#: SOURCED, January: "最初からアーマー以外のアイテムは所持している" (ameblo
+#: 2006-01-26, above) -- every character starts holding every item the launch
+#: shop sells except armor (suits): the three frames, three barrels, the
+#: Snipe Scope, the four options and the eleven accessories / materia, one
+#: each (the count is not given; one each is OURS).
+STARTER_KIT = tuple((iid, 1) for iid, _p, _n in DEFAULT_STOCK
+                    if iid >> 16 != 0x6331)
+#: the kit every wallet got until 2026-09-26 (handgun + rifle frame + two
+#: Middle Barrels, the "kit" mark)
+OLD_STARTER_KIT = ((0x6F300000, 1), (0x6F30000B, 1), (0x6F310000, 2))
+#: = doc_gear.MASK_RULE_MARK: set on every wallet made from 2026-09-26 on, so
+#: the character EARNS its Soldier Mask (Drone 2nd exam); an older wallet
+#: keeps the mask it was issued (doc_gear.settle_soldier_mask)
+SOLDIER_MASK_RULE_MARK = "smask"
 
 
-#: Modify recipes (source, result, kit). INFERRED from the item names' tier
-#: ladders and the kit names -- SE's table does not survive. Fees are derived
-#: in Shop (half the price gap, at least 1000). (source, result) must be
-#: unique: request 145 carries nothing else to tell recipes apart.
+def _tunes(src, fee, results):
+    return [(src, res, 0, fee, name) for res, name in results]
+
+
+def _chain(ids, fee, names):
+    return [(a, b, 0, fee, n) for a, b, n in zip(ids, ids[1:], names)]
+
+
+#: Modify = the guides' TUNE trees: (source, result, kit, fee, result name).
+#: SOURCED: EX-POTION mitem.html (20060505) derivation tables + FFCheats
+#: item.html (20070208) "obtained: tune up <source>". Retail tuning needs no
+#: kit (kit 0 = the 142 row's "none"); the 0x6430 kit ids are unnamed SE
+#: placeholders in our build. (source, result) must be unique: request 145
+#: carries nothing else to tell recipes apart.
 DEFAULT_RECIPES = tuple(
-    _ladder(0x6F31, [0x00, 0x01, 0x02], 0x6430000A)       # Vernis -> Prime -> X
-    + _ladder(0x6F31, [0x03, 0x04, 0x05], 0x6430000B)     # Rouge
-    + _ladder(0x6F31, [0x06, 0x07, 0x08], 0x6430000C)     # Parfum
-    + _ladder(0x6F30, [0x00, 0x01, 0x02, 0x03], 0x64300003)   # handgun frames, Kit EX
-    + [(0x6F300003, 0x6F300008, 0x64300004)]              # Seven Twenty -> Miller Flip, ULT
-    + _ladder(0x6F30, [0x0B, 0x0C, 0x0D, 0x0E], 0x64300006)   # rifle frames
-    + [(0x6F30000E, 0x6F300013, 0x64300007)]              # Clynel -> Farran
-    + _ladder(0x6F30, [0x14, 0x15, 0x16, 0x17], 0x64300008)   # machine gun frames
-    + [(0x6F300017, 0x6F30001C, 0x64300009)]              # Foresythe -> Hopcroft
-    + [(0x6F320000, 0x6F320001, 0x6430000E),              # Auto Scope -> Revo
-       (0x6F330000, 0x6F330001, 0x64300000),              # Power Booster -> Revo
-       (0x6F330003, 0x6F330004, 0x64300001),              # Rapidfire Unit -> Revo
-       (0x6F330006, 0x6F330007, 0x6430000D),              # Materia Booster -> Beta
-       (0x6F340000, 0x6F340001, 0x64300002),              # Guard Relief -> Revo
-       (0x6F340002, 0x6F340003, 0x64300000),              # Power Cross -> Revo
-       (0x6F340004, 0x6F340005, 0x64300002),              # S Adjuster -> Revo
-       (0x6F340006, 0x6F340007, 0x64300002),              # M Adjuster -> Revo
-       (0x6F340008, 0x6F340009, 0x64300002),              # L Adjuster -> Revo
-       (0x6F34000C, 0x6F34000D, 0x64300000)]              # Limit Breaker -> Revo
+    _tunes(ONE_EIGHTY, 100, [(0x6F300003, "Three-Sixty"), (0x6F300004, "Cavalerial"),
+                             (0x6F300005, "Steelfish"), (0x6F300006, "Alley-Oop"),
+                             (0x6F30000A, "Scarlet Custom"),
+                             (0x6F30001D, "Auto-lock Handgun")])
+    + _tunes(TOMINTOUL, 100, [(0x6F30000E, "Clynelish"), (0x6F30000F, "Caol Ila"),
+                              (0x6F300010, "Littlemill"), (0x6F300011, "Springbank")])
+    + _tunes(NELSON, 100, [(0x6F300017, "Forsyth"), (0x6F300018, "Grogono"),
+                           (0x6F300019, "Terashima"), (0x6F30001A, "Smith"),
+                           (0x6F30001E, "Auto-lock Machinegun")])
+    + _chain([MIDDLE_BARREL, 0x6F310001, 0x6F310002], 50,
+             ["Middle Barrel II", "Middle Barrel III"])
+    + _chain([LONG_BARREL, 0x6F310004, 0x6F310005], 50,
+             ["Long Barrel II", "Long Barrel III"])
+    + _chain([SHORT_BARREL, 0x6F310007, 0x6F310008], 50,
+             ["Short Barrel II", "Short Barrel III"])
+    + _tunes(SNIPE_SCOPE, 50, [(0x6F320005, "Snipe Scope +"),
+                               (0x6F320006, "Snipe Scope -")])
+    + _tunes(POWER_BOOSTER, 50, [(0x6F330001, "Revo Power Booster")])
+    + _tunes(RAPID_FIRE, 50, [(0x6F330004, "Revo Rapid Fire")])
 )
+
+#: names for items that are neither stocked nor a tune result (log lines;
+#: the Broken Handgun / Barrel keep their hex ids -- doc_npcquest_e2e reads them)
+EXTRA_NAMES = {0x67300001: "Chocobo Coin"}
 
 
 def _int(v):
@@ -337,6 +391,99 @@ def issue_items(bag, issued):
     return sorted((i, q) for i, q in have.items() if q > 0)[:BAG_MAX]
 
 
+def fired_counts(body):
+    """{bullet item id: rounds} from a request-44 body (2026-09-26).
+
+    The client's per-battle shot tally [chan+1000..1063] -- 8 x {u32 key, u32
+    count} from body[12], incremented only by the shot sender 0x00be9500 and
+    zeroed by the kind-2 spawn arm (0x00bc2800 -> 0x00bc29e0), so one 44 =
+    one battle. Keys seen live (09-24): 0x3000 x4, 0x3001 x6 -- read as
+    the bullet category's low byte + index, i.e. 0x3000 = 0x62300000 (handgun)
+    and 0x3001 = rifle (INFERRED from that capture, not from the client)."""
+    out = {}
+    if body is None:
+        return out
+    for i in range(8):
+        off = 12 + 8 * i
+        if off + 8 > len(body):
+            break
+        key, n = struct.unpack_from("<II", body, off)
+        if key >> 8 == 0x30 and n:
+            iid = 0x62300000 | (key & 0xFF)
+            out[iid] = out.get(iid, 0) + n
+    return out
+
+
+def supply_grant(held, want):
+    """The (item, qty) pairs that bring `held` ({item: qty}) up to `want` --
+    never lowers, never above a stack (AMMO_STACK_MAX; Potion carries 4)."""
+    out = []
+    for iid, q in want:
+        q = min(q, AMMO_STACK_MAX)
+        if held.get(iid, 0) < q:
+            out.append((iid, q - held.get(iid, 0)))
+    return out
+
+
+# 2026-09-26: BETA-ERA PLACEHOLDERS. The old placeholder shop (and its kit
+# recipes) sold ids that our build's own item table names only by SE's
+# placeholder codes (kelstr item index: OF7, OS0, OA12, OI1, "chi"1 ...) -- the
+# Dec-2005 beta's parts, not retail items. Each is converted once per wallet:
+# to the retail item of the same kind where one exists (a frame to its gun
+# type's base frame, a scope to the Snipe Scope, an adjuster Revo to its
+# adjuster, Hi-/X-Potion to Potion, Phoenix Pinion to Phoenix Down), else to
+# gil at the retail sell rate of its kind. The pairings are OURS. Real items
+# the shop does not sell (Potion, Phoenix Down, the tuned frames) are kept.
+_POTION, _PHOENIX_DOWN = 0x69320000, 0x69320004
+_BASE_FRAME = {"hg": 0x6F300000, "rf": 0x6F30000B, "mg": 0x6F300014}
+
+
+def _frame_kind(idx):
+    return "hg" if idx <= 0x0A or idx == 0x1D else "rf" if idx <= 0x13 else "mg"
+
+
+#: placeholder id -> retail id (from the client's item table: every id below
+#: is named by a placeholder code in 20060124_3's kelstr)
+BETA_CONVERT = dict(
+    [((0x6F30 << 16) | i, _BASE_FRAME[_frame_kind(i)])
+     # (0x09 is NOT one: the Broken Handgun, a real quest reward)
+     for i in (0x01, 0x02, 0x07, 0x08, 0x0C, 0x0D, 0x12, 0x13, 0x15,
+               0x16, 0x1B, 0x1C)]
+    + [(0x6F320000, 0x6F320002), (0x6F320001, 0x6F320002),
+       (0x6F320003, 0x6F320002), (0x6F320004, 0x6F320002),
+       (0x6F330006, 0x6F330000), (0x6F330007, 0x6F330000),
+       (0x6F340005, 0x6F340004), (0x6F340007, 0x6F340006),
+       (0x6F340009, 0x6F340008),
+       (0x69320001, _POTION), (0x69320002, _POTION),
+       (0x69320005, _PHOENIX_DOWN)])
+#: placeholder id -> gil per unit (no retail counterpart): 80 = the sell value
+#: of a 100-gil accessory / materia (SELL_RATE)
+BETA_REFUND = dict(
+    [((0x6430 << 16) | i, 80) for i in range(0x00, 0x10)]           # kits
+    + [(0x6F340000, 80), (0x6F340001, 80), (0x6F340002, 80),
+       (0x6F340003, 80), (0x6F34000C, 80), (0x6F34000D, 80),
+       (0x6F34001C, 80), (0x6F34001D, 80)])                        # OA*
+
+
+def beta_convert(bag):
+    """(new bag, gil refund, notes) for a wallet bag {"0x%08x": qty}."""
+    out, refund, notes = {}, 0, []
+    for k, q in bag.items():
+        iid = int(k, 16)
+        if q <= 0:
+            continue
+        if iid in BETA_CONVERT:
+            t = "0x%08x" % BETA_CONVERT[iid]
+            out[t] = min(QTY_MAX, out.get(t, 0) + q)
+            notes.append("%s x%d -> %s" % (k, q, t))
+        elif iid in BETA_REFUND:
+            refund += BETA_REFUND[iid] * q
+            notes.append("%s x%d -> %d gil" % (k, q, BETA_REFUND[iid] * q))
+        else:
+            out[k] = min(QTY_MAX, out.get(k, 0) + q)
+    return out, refund, notes
+
+
 class Shop:
     """Stock + per-character wallets. Same deliberately-dumb JSON store shape as
     doc_charastore: synchronous, fsync'd, rewritten whole on every change."""
@@ -345,13 +492,27 @@ class Shop:
         self.path = path
         self.stock, file_gil = load_stock(stock_path)
         self.prices = {iid: price for iid, price, _ in self.stock}
-        self.names = {iid: name for iid, _, name in self.stock}
-        # (source, result) -> (kit, fee); only recipes whose ends are priced
+        self.names = dict(EXTRA_NAMES)
+        self.names.update({iid: name for iid, _, name in self.stock})
+        # 2026-09-26: an item's VALUE = everything paid for it: its buy price
+        # plus each tune fee on the way (the guides' sell rule is 80 % of
+        # that). (source, result) -> (kit, fee); a tune whose source has no
+        # value (not stocked, not itself a tune result) is not offered.
+        self.values = dict(self.prices)
+        self.base = {}                  # tune result -> the stocked part it came from
         self.recipes = {}
-        for src, res, kit in DEFAULT_RECIPES:
-            if src in self.prices and res in self.prices:
-                fee = max(1000, (self.prices[res] - self.prices[src]) // 2)
-                self.recipes[(src, res)] = (kit, fee)
+        pending = list(DEFAULT_RECIPES)
+        while pending:
+            left = [r for r in pending if r[0] not in self.values]
+            for src, res, kit, fee, name in pending:
+                if src in self.values:
+                    self.recipes[(src, res)] = (kit, fee)
+                    self.values.setdefault(res, self.values[src] + fee)
+                    self.base.setdefault(res, self.base.get(src, src))
+                    self.names.setdefault(res, name)
+            if len(left) == len(pending):
+                break
+            pending = left
         self.start_gil = (start_gil if start_gil is not None
                           else file_gil if file_gil is not None else START_GIL)
         self.data = {}
@@ -383,24 +544,66 @@ class Shop:
     #: DESIGN DECISION 2026-09-13: "players should absolutely have a starter set of
     #: both guns at creation for now". A gun with no frame/barrel holds 0
     #: rounds and cannot fire (measured offline against the client's gun code), and the
-    #: bag bullets cannot fill it. Handgun One Eighty + rifle Tomin, a Vernis
-    #: barrel each (the PC's Tomin + Vernis measured 4/4 rounds). Granted ONCE
+    #: bag bullets cannot fill it. Handgun One-Eighty + rifle Tomintoul, a
+    #: Middle Barrel each (0x6F310000 -- the 09-13 comment called it "Vernis",
+    #: a beta name; the PC's rifle + that barrel measured 4/4 rounds). Granted ONCE
     #: per character (the "kit" mark), so selling it is not free gil; a wallet
     #: made before the kit existed gets it at its next login.
-    STARTER_KIT = ((0x6F300000, 1), (0x6F30000B, 1), (0x6F310000, 2))
+    #: 2026-09-26: the kit is now the LAUNCH kit (STARTER_KIT above, every
+    #: part but the suits). A wallet that got the old kit (KIT_MARK only) gets
+    #: the parts the old kit lacked ONCE (KIT2_MARK); its gil is not touched.
+    STARTER_KIT = STARTER_KIT
     KIT_MARK = "kit"
+    KIT2_MARK = "kit2"
+    RETAIL_MARK = "retail"
+
+    @staticmethod
+    def _grant(bag, items):
+        """Add `items` to a wallet bag, a new stack only while the bag has
+        room (BAG_MAX). Returns the (id, qty) pairs that did not fit."""
+        left = []
+        for iid, q in items:
+            k = "0x%08x" % iid
+            if k not in bag and len([v for v in bag.values() if v > 0]) >= BAG_MAX:
+                left.append((iid, q))
+                continue
+            bag[k] = min(QTY_MAX, bag.get(k, 0) + q)
+        return left
 
     def wallet(self, key):
         w = self.data.get(key)
         if w is None:
-            w = self.data[key] = {"gil": self.start_gil, "bag": {}}
+            # SOLDIER_MASK_RULE_MARK: a character made from now on EARNS its
+            # Soldier Mask (doc_gear.settle_soldier_mask)
+            w = self.data[key] = {"gil": self.start_gil, "bag": {},
+                                  SOLDIER_MASK_RULE_MARK: 1}
             self.save()
         if not w.get(self.KIT_MARK):
-            bag = w["bag"]
-            for iid, q in self.STARTER_KIT:
-                k = "0x%08x" % iid
-                bag[k] = min(QTY_MAX, bag.get(k, 0) + q)
+            self._grant(w["bag"], self.STARTER_KIT)
             w[self.KIT_MARK] = 1
+            w[self.KIT2_MARK] = 1
+            self.save()
+        if not w.get(self.KIT2_MARK):
+            old = {i for i, _q in OLD_STARTER_KIT}
+            left = self._grant(w["bag"], [(i, q) for i, q in self.STARTER_KIT
+                                          if i not in old])
+            w[self.KIT2_MARK] = 1
+            print("  [shop] [%s] launch starter kit: the parts the old kit lacked "
+                  "granted once%s" % (key, (" (bag full, not given: %s)"
+                                             % ", ".join(self.name(i) for i, _q in left))
+                                      if left else ""), flush=True)
+            self.save()
+        if not w.get(self.RETAIL_MARK):
+            # 2026-09-26 (design decision): once per
+            # wallet, every placeholder id becomes its retail counterpart or
+            # its sell value in gil (beta_convert)
+            bag, refund, notes = beta_convert(w["bag"])
+            w["bag"] = bag
+            w["gil"] = min(GIL_MAX, w["gil"] + refund)
+            w[self.RETAIL_MARK] = 1
+            if notes:
+                print("  [shop] [%s] beta parts converted: %s"
+                      % (key, "; ".join(notes)), flush=True)
             self.save()
         return w
 
@@ -444,7 +647,7 @@ class Shop:
             return (0, 0), 0, ("REFUSED sell 0x%08x: not in the server's bag "
                                "(client-only item?)" % iid)
         n = min(qty, have)
-        gain = int(self.prices.get(iid, 0) * SELL_RATE) * n
+        gain = self.sell_value(iid) * n
         bag[k] = have - n
         if bag[k] <= 0:
             del bag[k]
@@ -486,7 +689,15 @@ class Shop:
         return True, "TRADE %s gave %s; %s gave %s" % (key_a, offer_a, key_b, offer_b)
 
     def sell_value(self, iid):
-        return int(self.prices.get(iid, 0) * SELL_RATE)
+        """What one `iid` sells for: the launch price (LAUNCH_SELL; a tuned
+        item its base part's), a sourced override, else 80 % of its value;
+        0 = not sellable (not listed on 144)."""
+        if iid in SELL_OVERRIDES:
+            return SELL_OVERRIDES[iid]
+        base = self.base.get(iid, iid)
+        if base in LAUNCH_SELL and iid in self.values:
+            return LAUNCH_SELL[base]
+        return int(self.values.get(iid, 0) * SELL_RATE)
 
     def sell_rows(self, key):
         """The Sell tab's 144 list: this character's bag at sell value."""
@@ -564,74 +775,124 @@ if __name__ == "__main__":
     except OSError:
         pass
     ids = [i for i, _, _ in DEFAULT_STOCK]
-    assert len(ids) == len(set(ids)) == STOCK_MAX == 89, len(ids)
-    pairs = [(s, r) for s, r, _ in DEFAULT_RECIPES]
+    assert len(ids) == len(set(ids)) <= STOCK_MAX == 89, len(ids)
+    # 2026-09-24: Flash Materia came with a later update, after our client
+    assert FLASH_MATERIA not in ids, "Flash Materia is not a launch item"
+    # 2026-09-26: the guides' shop sells no ammunition and no consumables
+    assert not [i for i in ids if i >> 16 in (0x6230, 0x6932, 0x6430)], ids
+    pairs = [(s, r) for s, r, _, _, _ in DEFAULT_RECIPES]
     assert len(pairs) == len(set(pairs)), "recipe (source, result) must be unique"
     shop = Shop(p, start_gil=10000)
-    # the STARTER KIT (design decision 09-13): both guns' parts, granted ONCE per character
+    # every sourced tune is offered, none needs a kit
+    assert len(shop.recipes) == len(DEFAULT_RECIPES) == 25, len(shop.recipes)
+    assert all(k == 0 for k, _ in shop.recipes.values())
+    # the LAUNCH sell prices (ameblo 2006-01-26 shop list: buy/sell 200/100,
+    # 150/120, 100/80, 300/250); a tuned item sells as its base part
+    for iid, want in ((ONE_EIGHTY, 100), (TOMINTOUL, 100), (NELSON, 100),
+                      (0x6F300003, 100), (0x6F30001E, 100),
+                      (MIDDLE_BARREL, 120), (0x6F310001, 120), (0x6F310002, 120),
+                      (SNIPE_SCOPE, 80), (0x6F320005, 80), (POWER_BOOSTER, 120),
+                      (0x6F330001, 120), (RAPID_FIRE, 120), (0x6F340017, 80),
+                      (0x6F34000B, 80), (0x6331003C, 250),
+                      (0x6F300009, 1), (0x6F310009, 1)):
+        assert shop.sell_value(iid) == want, (hex(iid), shop.sell_value(iid), want)
+    # TWIN: the 2007 80 % rule gives a frame 160 and a suit 240, not launch's
+    assert int(shop.prices[ONE_EIGHTY] * SELL_RATE) == 160 != shop.sell_value(ONE_EIGHTY)
+    assert int(shop.prices[0x6331003C] * SELL_RATE) == 240 != shop.sell_value(0x6331003C)
+    assert shop.sell_value(0x69320000) == 0, "an unstocked item still does not sell"
+    # the LAUNCH STARTER KIT: every stocked part but the suits, ONCE per character
+    assert len(STARTER_KIT) == 22 and not [i for i, _q in STARTER_KIT if i >> 16 == 0x6331]
+    assert {NELSON, SHORT_BARREL, 0x6F340019} <= {i for i, _q in STARTER_KIT}
     kk = "member:9/0x00000001"
-    assert shop.login_fields(kk) == (10000, [(0x6F300000, 1), (0x6F30000B, 1),
-                                             (0x6F310000, 2)]), shop.login_fields(kk)
+    assert shop.login_fields(kk) == (10000, sorted(STARTER_KIT)), shop.login_fields(kk)
     shop.wallet(kk)["bag"].clear()                   # sold / fitted away
     shop.save()
     assert Shop(p).login_fields(kk) == (10000, []), "kit granted once, never again"
+    # a wallet from before 09-26 (old kit, mark "kit" only) gets the parts the
+    # old kit lacked, ONCE, and keeps its gil and what it had
+    shop.data["pre"] = {"gil": 1234, "bag": {"0x6f300000": 1, "0x6f310000": 2,
+                                             "0x6f300014": 1}, Shop.KIT_MARK: 1}
+    g, b = shop.login_fields("pre")
+    bd = dict(b)
+    assert g == 1234 and bd[0x6F300000] == 1 and bd[0x6F310000] == 2, (g, b)
+    assert bd[NELSON] == 2 and bd[SHORT_BARREL] == 1 and TOMINTOUL not in bd, b
+    assert len(b) == 21, b                 # 22 kit ids minus the rifle frame (sold)
+    assert shop.login_fields("pre") == (g, b), "TWIN: the top-up runs once"
+    # a FULL bag: new stacks that do not fit are skipped, never over BAG_MAX
+    full = {"0x%08x" % (0x69000000 + i): 1 for i in range(BAG_MAX)}
+    shop.data["full"] = {"gil": 5, "bag": dict(full), Shop.KIT_MARK: 1}
+    assert len(shop.wallet("full")["bag"]) == BAG_MAX and shop.wallet("full")[Shop.KIT2_MARK]
     # the rest runs on a character that already received its kit
     k = "member:3/0x0002a664"
-    shop.data[k] = {"gil": 10000, "bag": {}, Shop.KIT_MARK: 1}
+    shop.data[k] = {"gil": 10000, "bag": {}, Shop.KIT_MARK: 1, Shop.KIT2_MARK: 1}
     shop.save()
     assert shop.login_fields(k) == (10000, [])
-    # the LIVE 09:11:51 request 66: Auto Scope x1 at shop 3
+    # the LIVE 09:11:51 request 66 (Auto Scope, a beta id our build has only
+    # as the placeholder "OS0"): no longer stocked -> an all-zero 67
     live66 = bytes.fromhex("074200000100ffffffffffff030000000000326f0100000000000000")
     assert parse_entry(live66) == {"shop": 3, "iid": 0x6F320000, "qty": 1}
     body, note = shop.body_for(BUY_REQ, live66, k)
-    assert body[1] == BUY_ANS, note
-    assert struct.unpack_from("<I", body, ANS_ADD_ID)[0] == 0x6F320000
-    assert struct.unpack_from("<H", body, ANS_ADD_QTY)[0] == 1
-    assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 2000
-    assert Shop(p).login_fields(k) == (8000, [(0x6F320000, 1)]), "persisted"
-    # refused: too expensive -> all-zero 67
+    assert body[1] == BUY_ANS and body[12:36] == bytes(24) and "not stocked" in note, note
+    # the same request for the Snipe Scope buys it at the guides' 100
     rq = bytearray(live66)
-    struct.pack_into("<I", rq, 16, 0x6F300013)      # Farran, 30000
+    struct.pack_into("<I", rq, 16, SNIPE_SCOPE)
+    body, note = shop.body_for(BUY_REQ, bytes(rq), k)
+    assert struct.unpack_from("<I", body, ANS_ADD_ID)[0] == SNIPE_SCOPE, note
+    assert struct.unpack_from("<H", body, ANS_ADD_QTY)[0] == 1
+    assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 100
+    assert Shop(p).login_fields(k) == (9900, [(SNIPE_SCOPE, 1)]), "persisted"
+    # refused: too expensive -> all-zero 67
+    shop.wallet(k)["gil"] = 50
     body, note = shop.body_for(BUY_REQ, bytes(rq), k)
     assert body[12:36] == bytes(24) and "REFUSED" in note, note
-    # sell the Auto Scope back: 69 removes it and ADDS half the price
-    body, note = shop.body_for(SELL_REQ, live66, k)
+    shop.wallet(k)["gil"] = 9900
+    # sell it back: 69 removes it and ADDS 80 % of the price
+    body, note = shop.body_for(SELL_REQ, bytes(rq), k)
     assert body[1] == SELL_ANS, note
-    assert struct.unpack_from("<I", body, ANS_REM_ID)[0] == 0x6F320000
+    assert struct.unpack_from("<I", body, ANS_REM_ID)[0] == SNIPE_SCOPE
     assert struct.unpack_from("<H", body, ANS_REM_QTY)[0] == 1
-    assert struct.unpack_from("<I", body, ANS_GAIN)[0] == 1000
-    assert shop.login_fields(k) == (9000, [])
+    assert struct.unpack_from("<I", body, ANS_GAIN)[0] == 80
+    assert shop.login_fields(k) == (9980, [])
     # selling what the server never gave is refused
-    body, note = shop.body_for(SELL_REQ, live66, k)
+    body, note = shop.body_for(SELL_REQ, bytes(rq), k)
     assert body[12:36] == bytes(24) and "REFUSED" in note, note
-    # MODIFY: Vernis + N Barrel Kit -> Vernis Prime, fee = (5000-1500)//2
-    VER, VERP, NKIT = 0x6F310000, 0x6F310001, 0x6430000A
+    # MODIFY (tune): Middle Barrel -> Middle Barrel II, 50 gil, no kit
+    MB, MB2, MB3 = MIDDLE_BARREL, 0x6F310001, 0x6F310002
     rq145 = bytearray(24)
-    struct.pack_into("<III", rq145, 12, 3, VER, VERP)
-    assert parse_modify(bytes(rq145)) == {"shop": 3, "src": VER, "res": VERP}
+    struct.pack_into("<III", rq145, 12, 3, MB, MB2)
+    assert parse_modify(bytes(rq145)) == {"shop": 3, "src": MB, "res": MB2}
     body, note = shop.body_for(TXN_REQ, bytes(rq145), k)       # nothing owned yet
     assert body[1] == TXN_ANS and body[12:36] == bytes(24) and "REFUSED" in note, note
-    shop.wallet(k)["bag"].update({"0x%08x" % VER: 1, "0x%08x" % NKIT: 1})
+    shop.wallet(k)["bag"].update({"0x%08x" % MB: 1})
     body, note = shop.body_for(TXN_REQ, bytes(rq145), k)
-    assert struct.unpack_from("<IIHH", body, 12) == (VERP, VER, 1, 1), note
-    assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 1750
-    assert struct.unpack_from("<I", body, ANS_KIT)[0] == NKIT
-    assert Shop(p).login_fields(k) == (9000 - 1750, [(VERP, 1)]), "persisted, kit used"
-    # the Modify tab: 142 rows {source, result, kit, fee}
+    assert struct.unpack_from("<IIHH", body, 12) == (MB2, MB, 1, 1), note
+    assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 50
+    assert struct.unpack_from("<I", body, ANS_KIT)[0] == 0, "retail tuning takes no kit"
+    assert Shop(p).login_fields(k) == (9930, [(MB2, 1)]), "persisted"
+    # ...and on to III (the ladder)
+    struct.pack_into("<III", rq145, 12, 3, MB2, MB3)
+    body, note = shop.body_for(TXN_REQ, bytes(rq145), k)
+    assert struct.unpack_from("<IIHH", body, 12) == (MB3, MB2, 1, 1), note
+    # TWIN: a tune the guides do not list (III -> II) is refused
+    struct.pack_into("<III", rq145, 12, 3, MB3, MB2)
+    body, note = shop.body_for(TXN_REQ, bytes(rq145), k)
+    assert body[12:36] == bytes(24) and "no such recipe" in note, note
+    # the Modify tab: 142 rows {source, result, kit 0, fee}
     b = shop.body_for(RECIPE_REQ, None, k)[0]
     n = struct.unpack_from("<I", b, LIST_COUNT_OFF)[0]
-    assert n == len(shop.recipes) >= 25 and len(b) == LIST_ROWS_OFF + RECIPE_ROW * n
-    assert struct.unpack_from("<IIII", b, LIST_ROWS_OFF) == (VER, VERP, NKIT, 1750)
-    # the Sell tab: 144 = this bag at SELL value (Vernis Prime 5000 -> 2500)
+    assert n == len(shop.recipes) == 25 and len(b) == LIST_ROWS_OFF + RECIPE_ROW * n
+    assert struct.unpack_from("<IIII", b, LIST_ROWS_OFF) == (ONE_EIGHTY, 0x6F300003, 0, 100)
+    # the Sell tab: 144 = this bag at SELL value (Middle Barrel III -> 120,
+    # its base part's launch price)
     b = shop.body_for(PRICE_REQ, None, k)[0]
     assert struct.unpack_from("<I", b, LIST_COUNT_OFF)[0] == 1
-    assert struct.unpack_from("<II", b, LIST_ROWS_OFF) == (VERP, 2500)
+    assert struct.unpack_from("<II", b, LIST_ROWS_OFF) == (MB3, 120)
     shop.wallet(k)["gil"] = 9000
     shop.wallet(k)["bag"].clear()
     shop.save()
     # the Buy tab
     b = stock_body(shop.stock)
-    assert struct.unpack_from("<I", b, LIST_COUNT_OFF)[0] == 89 and 24 + len(b) < 1472
+    assert struct.unpack_from("<I", b, LIST_COUNT_OFF)[0] == len(DEFAULT_STOCK) and 24 + len(b) < 1472
     # login fields
     lb = apply_login(bytearray(176), 550, [(0x69320000, 3)])
     assert struct.unpack_from("<I", lb, LOGIN_GIL_OFF)[0] == 550
@@ -643,6 +904,21 @@ if __name__ == "__main__":
     assert issue_items([(AMMO_HANDGUN, 400)], STANDARD_AMMO)[0] == (AMMO_HANDGUN, 400)
     assert parse_issue("off") == () and parse_issue("0x62300002:9999") == ((AMMO_MG, 500),)
     assert shop.login_fields(k) == (9000, []), "issuing never touches the wallet"
+    # 2026-09-26: beta placeholders convert ONCE per wallet (the live shapes:
+    # OI1/OI2/OI5, OS0 x2) -- real items stay, kits refund their sell value
+    nb, nr, _n = beta_convert({"0x69320001": 1, "0x69320002": 1, "0x69320005": 1,
+                               "0x6f320000": 2, "0x6f320002": 2, "0x69320000": 3,
+                               "0x6f300009": 1, "0x64300000": 2, "0x6f300015": 1})
+    assert nb == {"0x69320000": 5, "0x69320004": 1, "0x6f320002": 4,
+                  "0x6f300009": 1, "0x6f300014": 1}, nb
+    assert nr == 160, nr
+    shop.data["old"] = {"gil": 700, "bag": {"0x6f320000": 2}, Shop.KIT_MARK: 1,
+                        Shop.KIT2_MARK: 1}
+    assert shop.login_fields("old") == (700, [(0x6F320002, 2)])
+    assert shop.wallet("old")[Shop.RETAIL_MARK] == 1
+    shop.data["old"]["bag"]["0x6f320000"] = 1          # (cannot come back, but)
+    assert shop.login_fields("old")[1] == [(0x6F320000, 1), (0x6F320002, 2)],         "TWIN: the conversion runs once -- a marked wallet is left alone"
+    assert START_GIL == 3000 and Shop(p).wallet("fresh")["gil"] == 3000
     os.remove(p)
     print("doc_shop self-test PASS")
     sys.exit(0)

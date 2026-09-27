@@ -48,6 +48,22 @@ SUITES = [
     ("doc_gear",       [PY, "doc_gear.py"]),
     # player-to-player trade relay
     ("doc_trade",      [PY, "doc_trade.py"]),
+    # Mission Mode: the per-player mission ledger, exams, objectives, supplies
+    ("doc_missions",   [PY, "doc_missions.py"]),
+    # the new-player intro and the novice mark
+    ("doc_novice",     [PY, "doc_novice.py"]),
+    # the lobby item quests (Soar, Este-D, Hiren) and Sturm's lines
+    ("doc_npcquests",  [PY, "doc_npcquests.py"]),
+    # the quest reward notice block
+    ("doc_reward",     [PY, "doc_reward.py"]),
+    # the MP ledger (magic casts, refills)
+    ("doc_magic",      [PY, "doc_magic.py"]),
+    # item use answers and MP points
+    ("doc_items",      [PY, "doc_items.py"]),
+    # arena item generators (checks against the arena data need your table)
+    ("doc_field",      [PY, "doc_field.py"]),
+    # chat relay: say / shout / tell / entry / team scopes
+    ("doc_chat",       [PY, "doc_chat.py"]),
 ]
 
 
