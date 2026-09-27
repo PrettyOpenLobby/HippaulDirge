@@ -257,6 +257,66 @@ def encrypt(pkt, mode=None):
     return bytes(out)
 
 
+def _authentic(out):
+    return (len(out) >= HDR_OFF + BLOCK
+            and struct.unpack_from("<H", out, CKSUM_OFF)[0] == _folded_cksum(out))
+
+
+def decrypt_any(pkt, mode=None, path=None):
+    """(decrypted, key name) under whichever known key authenticates, or
+    (None, None) when none does.
+
+    The compiled-in keys are tried first ("builtin"), then any extra 16-byte
+    keys named in POL_DOC_KEL_EXTRA_KEYS (comma-separated hex). A client
+    stack whose game-server channel was built with a different key than the
+    one above sends traffic that authenticates under no mode; the extra keys
+    are where such a key goes once it is known. The 16-bit self-check is the
+    same one header() uses, so a wrong key cannot pass."""
+    pkt = bytes(pkt)
+    mode = pkt[1] if mode is None and len(pkt) > 1 else mode
+    out = decrypt(pkt, mode=mode)
+    if _authentic(out):
+        return out, "builtin"
+    if mode not in KEYS:
+        return None, None
+    for i, key in enumerate(_extra_keys()):
+        out = _decrypt_with(pkt, Twofish(key), IVS.get(mode, bytes(16)))
+        if _authentic(out):
+            return out, "extra%d" % i
+    return None, None
+
+
+_EXTRA = None
+
+
+def _extra_keys():
+    global _EXTRA
+    if _EXTRA is None:
+        _EXTRA = []
+        for word in (os.environ.get("POL_DOC_KEL_EXTRA_KEYS") or "").split(","):
+            word = word.strip()
+            try:
+                key = bytes.fromhex(word)
+            except ValueError:
+                continue
+            if len(key) == 16:
+                _EXTRA.append(key)
+    return _EXTRA
+
+
+def _decrypt_with(pkt, tf, iv):
+    if len(pkt) < HDR_OFF + BLOCK:
+        return pkt
+    out = bytearray(pkt)
+    prev = iv
+    for i in range(_blocks(pkt)):
+        s = HDR_OFF + BLOCK * i
+        c = pkt[s:s + BLOCK]
+        out[s:s + BLOCK] = _xor(tf.decrypt_block(c), prev)
+        prev = c
+    return bytes(out)
+
+
 def _folded_cksum(pkt):
     b = bytearray(pkt)
     b[CKSUM_OFF] = b[CKSUM_OFF + 1] = 0
@@ -274,12 +334,13 @@ def header(pkt, path=None):
     """
     if len(pkt) < HDR_OFF + BLOCK:
         return None
-    out = decrypt(pkt)
+    out, build = decrypt_any(pkt)
+    if out is None:
+        return None
     h = out[8:24]
     ck = struct.unpack_from("<H", h, 2)[0]
-    if ck != _folded_cksum(out):
-        return None
     return {
+        "build":   build,
         "type":    h[0],
         "flags":   h[1],
         "cksum":   ck,
