@@ -77,7 +77,7 @@ RANK_NAMES = ("DG Drone 3rd Class", "DG Drone 2nd Class", "DG Drone 1st Class",
 EXAM_PROMOTIONS = {1: 2, 2: 3, 28: 4, 3: 5, 6: 6, 4: 7, 7: 8, 8: 9, 9: 10,
                    10: 11, 11: 12, 12: 13, 13: 14, 14: 15, 15: 16}
 #: quest id -> fixed Rank Points / Gil = the reward text the client SHOWS,
-#: group 51 index N-1. WARNING: 2026-09-26 MEASURED: SE's 20060124_3 lobby.bin and
+#: group 51 index N-1. WARNING: MEASURED: SE's 20060124_3 lobby.bin and
 #: every served lobby.bin since the 09-22 retail rebase (20260923_8 listfit,
 #: 20260924 dg2fit / victoryfit) read 51:4 "+30", 51:22 "2000 Gil", 51:30..34
 #: "1000 Gil" ... The old values here (250/50/100/50/150/200 RP, 3000 and
@@ -149,7 +149,7 @@ MEDALS = {
 M_BT_CONQUEST, M_BT_HONOR, M_BT_DISHONOR, M_TEAM_MERIT, M_SURVIVOR, M_SLAYER, \
     M_ASSAULT, M_CAPSULE_SEEKER, M_LAST_CAPSULE, M_FLAG_CARRIER, M_FIRST_FLAG, \
     M_LEADER_SLAYER, M_BASE_ATTACK = range(16, 29)
-#: The Results window's medals PER MODE. MEASURED 2026-09-26: the launch
+#: The Results window's medals PER MODE. MEASURED the launch
 #: client's own table, retail lobby_rel 0x00b18d20 (doc_modules/lobby_rel.bin,
 #: base 0x00AA0000), three s8 medal ids per mode row, -1 = none:
 #:   [3 5] [4 5] [6 12] [7 8] [11] [9 10] [3 5] [0 1 2] [0 1 2]
@@ -460,7 +460,7 @@ def apply_login(body, c):
 #   +20 u32  OR'd into R+732 = the MEDAL-EARNED mask (bit n = medal id n)
 #   +30..44  15 award-holder ROSTER SLOTS; 0xFF (>= 32) = nobody. WARNING: 0 names
 #            roster slot 0 -- so zeros hand all 15 to the first player.
-#            2026-09-24 MEASURED: holder h IS MEDAL ID h (label table
+#            MEASURED: holder h IS MEDAL ID h (label table
 #            0x00afca68 = group 60 [16+h]: 0 BT Conquest .. 12 Base Attack,
 #            13 / 14 Reserved -- the launch client's table is 0x00b1ac08, the
 #            same 24 ids; every battle medal (MODE_MEDALS) is an id <= 12, so
@@ -592,7 +592,7 @@ def award_medals(mode, rows, winner):
     def leader(value, among=None):
         pool = rows if among is None else among
         if len(rows) < 2 or not pool:
-            # 2026-09-23 (live): "the most" needs someone to compare with --
+            # "the most" needs someone to compare with --
             # a solo mission handed out a "most KO'd" medal for one KO.
             return None
         vals = [(value(r), r["key"]) for r in pool]

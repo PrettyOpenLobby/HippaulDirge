@@ -2,7 +2,7 @@
 """LOOPBACK end-to-end for chat relay (world selector 255, 2026-09-26).
 
 Four fake clients enter the lobby (selector 12). The SAY body is the BYTES
-CAPTURED LIVE 2026-09-26; the other kinds are the same layout with the
+CAPTURED LIVE; the other kinds are the same layout with the
 kind numbers read out of the retail client (doc_chat: 0x00b1b1e8).
 
   Unscoped (no position streamed yet):
@@ -45,9 +45,9 @@ PORT = int(os.environ.get("DOC_CHAT_E2E_PORT",
 A_CID, B_CID, C_CID, D_CID = 0x00041050, 0x00041068, 0x00041078, 0x00041088
 NAMES = {A_CID: "A", B_CID: "B", C_CID: "C", D_CID: "D"}
 
-# live 03:49:05 / 03:18:38 (0x41078 / 0x41050): SAY "yo", body[12..] verbatim
+# live (0x41078 / 0x41050): SAY "yo", body[12..] verbatim
 SAY_YO = bytes.fromhex("050003 00ffffffff796f0000".replace(" ", ""))
-# the TELL shape seen live 03:48:38: target at stream+4 (text synthetic)
+# the TELL shape seen live: target at stream+4 (text synthetic)
 TELL_TXT = b"hello from B\0"
 
 # lobby positions (x, y, z): vl_main regions + the map anchors ID_PLACE_n

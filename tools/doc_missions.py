@@ -27,7 +27,7 @@ has two mission rows:
                                              kind 6, filter 0x00aa3b78 shows
                                              every row for kinds 4 and 6)
 The 159 -> 160 list / command 41 pick / Start -> mission 38 chain is docudp's
-(sec 4gr, live 09-13). What was missing is the LEDGER: the list was one static
+(sec 4gr, live). What was missing is the LEDGER: the list was one static
 `--solo-quests` set for everyone and the instructors always played their
 greeting, so no exam was ever "added to Missions".
 
@@ -196,7 +196,7 @@ WHY_QUIT = "player quit"          # docudp: the solo player returned to the lobb
 #      Betrayal = 36, Dual Horn Battlefield = 18.
 #   2. The client: each arena's situation model sets = bzd table 20, record
 #      4 + (sit - 3000) (records 0..3 = PvP sets), SE patch 20060124_3; the
-#      kind-15 NPC TYPE is an INDEX into that list (live 09-23). Controller
+#      kind-15 NPC TYPE is an INDEX into that list (live). Controller
 #      spawn counts (doc_mission_spawns.json) back several matches up:
 #      Jungle 3000 has 10 spawn points = the Drone 2nd exam's 10 Beast
 #      Soldiers.

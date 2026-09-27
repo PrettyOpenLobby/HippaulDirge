@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: a Unit command that arrives before any request has named the
-character is still keyed by that character (live 2026-09-23: the player went
+character is still keyed by that character (live: the player went
 straight to Unit Management after the world door; selector 240 carries ident
 0, so the server keyed them as the bare account, showed 0 units, and refused
 every Create as "already a unit").

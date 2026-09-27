@@ -270,7 +270,7 @@ def run(accounts=False):
                       for p in notifies(drain(cb), 11)))
         check("B's PICK-UP of generator slot 1: kind 11 reached BOTH, ident B"
               + ("" if _GEN else " (SKIPPED: no generator data)"), _gen_ok)
-        # 5d. 2026-09-26 (live): the PCSX2 client's pick-up is MODE 4 with an
+        # 5d. (live): the PCSX2 client's pick-up is MODE 4 with an
         #     unreadable header. Slot 45 is the one live read as GS request 45
         #     (leave) and answered with 46 -- it must be a pick-up, not a 46.
         m4 = field_req_mode4(struct.pack("<IIIfff", 45, 1, 4, 0.0, 0.0, 0.0))
@@ -336,7 +336,7 @@ def run(accounts=False):
                   "client's BT Medal of Dishonor) names nobody in a TBT",
                   ha[2] == hb[2] == 0xFF)
         # 8. A casts Fire AFTER the battle checks (the ~3 s it takes shifted the
-        #    battle timeline when it ran earlier) (live 09-24: request 60 arg 0x10001) -> message 61
+        #    battle timeline when it ran earlier) (live request 60 arg 0x10001) -> message 61
         #     {status 0, MP 100}; the old zero 61 set MP 0 after one cast
         #     --mp-model ledger: a cast, its resend on the client's schedule
         #     (+0.6 s), then a genuine recast off it (+2.4 s): Fire costs 30

@@ -74,7 +74,7 @@ ITEM_HP = {0x69320000: 150, 0x69320001: 150, 0x69320002: 150, 0x69320003: 150,
            0x69320005: 150, 0x6932000A: 150, 0x6932000B: 200, 0x6932000C: 200}
 PHOENIX_DOWN = 0x69320004
 #: the reliable layer's resend offsets (500 ms, doubling) -- doc_magic's,
-#: re-measured on request 21 live 09-26 03:54: +0.51 / +1.51 / +3.52 s
+#: re-measured on request 21 live +0.51 / +1.51 / +3.52 s
 RESEND_OFFSETS = (0.6, 1.6, 3.6, 7.6, 15.6)
 RESEND_TOLERANCE = 0.2
 
@@ -177,13 +177,13 @@ def _selftest():
           r[4 + 2] == 64 and struct.unpack_from("<Q", r, 8)[0] == (1 << 64) - 1
           and r[4] == r[5] == r[7] == 0 and len(r) == 68)
     check("kind 28 count clamps to 64", mp_points_record(99)[6] == 64)
-    # the live 09-26 uses: readable seqs 3147 / 3151 / 3152 in 0.3 s = 3 uses
+    # the live uses: readable seqs 3147 / 3151 / 3152 in 0.3 s = 3 uses
     L = UseLedger()
     got = [L.use(1, 0x69320000, 100.0 + d, seq=s)[0]
            for d, s in ((0.0, 3147), (0.074, 3151), (0.284, 3152), (0.5, 3147))]
     check("readable seqs: three distinct uses, the repeated seq is a resend",
           got == [True, True, True, False])
-    # the live 03:54 run: header unreadable, copies at +0.514 / +1.509 / +3.52
+    # the live run: header unreadable, copies at +0.514 / +1.509 / +3.52
     L = UseLedger()
     got = [L.use(1, 0x69320000, 200.0 + d)[0] for d in (0.0, 0.514, 1.509, 3.52)]
     check("unreadable: the resend schedule is ONE use", got == [True, False, False, False])

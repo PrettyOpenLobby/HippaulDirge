@@ -1,6 +1,6 @@
 """DoC chat: world selector 255 (subchannel 7), relayed to the players in scope.
 
-MEASURED live 2026-09-26: every chat line a player
+MEASURED live: every chat line a player
 typed arrived as a mode-2 type-127 request with selector 255, and the byte
 stream at body[12] is
 

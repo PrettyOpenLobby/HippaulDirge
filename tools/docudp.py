@@ -1283,9 +1283,8 @@ LOBBY_ZONE_OFF = 42
 
 # KEY: THE ARENA ZONE EACH ROSTER MAP IS PLAYED IN (sec 4hb, 2026-09-23).
 #
-# The picker works now, and the chosen map REACHES US -- a live log, the
-# night a tester reported "whatever map I choose, the battle starts in the
-# Jungle":
+# The picker works, and the chosen map REACHES US -- yet every battle started
+# in the Jungle. A live log:
 #
 #     CREATE -> table 1 (map 9, mode 1, max 12) for 0x0004103c
 #     CREATE -> table 2 (map 7, mode 1 [coerced 0->1], max 6) for 0x00041050
@@ -1393,11 +1392,10 @@ def parse_map_zones(spec):
     return out
 
 
-# 2026-09-23 (live + savestate): WHICH PIECES AN ARENA LOADS ON ARRIVAL.
+# WHICH PIECES AN ARENA LOADS ON ARRIVAL (seen live and in a savestate).
 #
-# A tester: "the wasteland doesn't have an area model -- just the skybox", and
-# walking did not bring it in; the church "didn't load right away, but when I
-# walked around it did".  Slot-4 savestate in z204: m000/model.rfd resident
+# The Wastelands drew only the skybox and walking did not bring the terrain
+# in; the church's terrain streamed in only once the player walked around.  Slot-4 savestate in z204: m000/model.rfd resident
 # (122/128 samples -- a 138-vertex shell spanning +-16,000 = the SKY), m002
 # resident, m001 (1.27 MB, the whole terrain, and the piece our spawn stands
 # in) ABSENT, 0/128 of its collision.  Kind 2's M0/M1 (rec+24/+25) reach
@@ -1407,11 +1405,11 @@ def parse_map_zones(spec):
 # Jungle's terrain pieces.  We sent 0,0 everywhere: the church's terrain is
 # m002 (streams in on a walk), the Wastelands' is m001 (never does).
 # Terrain piece per zone, measured from data/zone/zNNN/m0xx/model.rfd sizes.
-# LIVE 09-23: z204 at 1,0 -> "Win! I see the wastelands!!!" (M0 IS the piece).
+# LIVE: z204 at 1,0 draws the Wastelands terrain (M0 IS the piece).
 # z201 (Jungle) at 0,0 stayed blank until the player got control (seen live,
-# mission 39 at 23:42Z); its terrain is m001 + m003..m005, and 1,3 is SE's own
-# pair -- ev2045.battlefield's respawn does Zone.load(201, 1, 3). LIVE 09-23.
-# z203 (Kalm) at 0,0 "only partially loaded" (09-23). Kalm spreads
+# mission 39); its terrain is m001 + m003..m005, and 1,3 is SE's own
+# pair -- ev2045.battlefield's respawn does Zone.load(201, 1, 3). LIVE.
+# z203 (Kalm) at 0,0 loaded only partially. Kalm spreads
 # over m000..m005; the two pieces with the most model vertices within 300 of
 # its spawn (-1016.1, 911.1) are m004 (2980) and m001 (802) -> 4,1; the rest
 # stream in on movement. z205 (Sewers, unseen) by the same count: m003 (7946),
@@ -1903,7 +1901,7 @@ GS_REQ_ANSWERS = {31: 32, 33: 34, 36: 37, 47: 48, 56: 57, 58: 59, 60: 61,
                   # and 54 -> 55 (0x00bc5214: body[4] < 0 would KICK with an
                   # error; zero is the plain epilogue)
                   38: 39, 45: 46, 54: 55, 46: 47}
-# 2026-09-23 (live): request 46 = a character STATUS-BIT change (engine
+# request 46 = a character STATUS-BIT change (engine
 # interface vt+68 / vt+76 -> builder 0x00bce5d8). The client marks a request
 # outstanding ([chan+2136] = 2) and message 47 (handler 0x00bccd3c) is what sets
 # it back to 1. Unanswered, every revive left the channel stuck and the player
@@ -2084,9 +2082,9 @@ def gs_dist_due(g, settle):
 
 
 def gs_auto_teams(teams, members):
-    """2026-09-23 (live): (teams, assigned) with every seated member that never
+    """(teams, assigned) with every seated member that never
     chose a team put on the SMALLER side (ties -> team 0), so a briefing whose
-    countdown ran out still gets its distribution. Live 18:20-18:24Z: the
+    countdown ran out still gets its distribution. Live: the
     joiner stood on a team space but its client never sent request 31, so
     gs_real_ready said 'no team yet' forever and the countdown ended in
     nothing. Pure: the caller decides when."""
@@ -2109,7 +2107,7 @@ def gs_real_distribution(teams, members):
     """sec 4ft: the kind-20 entries for a REAL table, in seat order: every
     seated member that has chosen a team, slot = its index in THIS LIST.
 
-    2026-09-26 (live tables 31/32, "3 joined, only 2 got in-game"): the slot
+    Seen live (tables 31/32, "3 joined, only 2 got in-game"): the slot
     is NOT a per-team index. The arm 0x00bc23d8 swaps each id to battle
     roster [chan+2144] entry `slot` (0x00bc254c..0x00bc25b0, then writes the
     id there at 0x00bc2610) and stores the client's own index [chan+16] =
@@ -2496,7 +2494,7 @@ class BattleRoom(object):
         if last is not None and now - last < dedupe_s:
             return None
         if victim in self.dead_until and now < self.dead_until[victim]:
-            # 2026-09-23 (live): the client resends an unacknowledged kill
+            # the client resends an unacknowledged kill
             # report for seconds; while the victim is still down it is the
             # same death, not a second one.
             return None
@@ -2816,8 +2814,7 @@ def build_gs_team_set(ident, team, slot=0, seq=0):
 
 def build_gs_team_leave(ident, seq=0):
     """Notify kind 1 = the entity (message IDENT) leaves its team: Set Team
-    with no new team, so its row counts down (the briefing-room findings A,
-    probe case g). The answer to a leaveTeam (request 33)."""
+    with no new team, so its row counts down. The answer to a leaveTeam (request 33)."""
     return build_gs_notify(1, bytes(4), seq=seq, ident=ident)
 
 
@@ -2826,9 +2823,8 @@ def build_gs_add_chara(ident, team, slot=0, seq=0, self_ident=0):
     +20 u16, +22 byte = TEAM in the HIGH nibble (15 = none -> 0xff) and the
     roster SLOT in the LOW nibble, +23 bit0 -> 0x00bc35a8.  Own id is skipped
     by the arm (0x00bc4514).
-    WARNING: 2026-09-23 (the briefing-room findings A, measured at the arm): the
-    nibbles were packed the other way round, so "team 1" wrote roster slot 1
-    -- over the client's OWN entry. And the arm pre-sets the member's team
+    WARNING: the byte is TEAM high, SLOT low; packed the other way round,
+    "team 1" writes roster slot 1 over the client's OWN entry. And the arm pre-sets the member's team
     before Set Team runs, so a kind 31 with a team never moves a count: send
     team=None here (0xF) and a kind 0 after it for the team."""
     rec = bytearray(48)
@@ -2891,7 +2887,7 @@ def npc_controller_payload(ctrl_id, n=None):
     9000/9001, 9100..9103, i.e. the SITUATION numbering. We always sent id 0,
     which names no controller, so no mission enemy was ever created."""
     rec = bytearray(64)
-    # 2026-09-23 (live: fences, no NPCs): the kind-28 arm (retail 0x00bcc128)
+    # Seen live (fences, no NPCs): the kind-28 arm (retail 0x00bcc128)
     # reads rec[2] = NPC SLOT COUNT (<= 64) and a 64-bit mask at rec+4
     # (0x00bcaf88: slots < count -> [chan+1304] present, mask bits ->
     # [chan+1316]); rec[3] bit0 copies the controller id at rec+12 ->
@@ -2925,7 +2921,7 @@ CONTROLLER_NPCS = {3000: 10, 3001: 8, 3002: 4, 9001: 10,
 # request 24), rec+4 = HP -> what the HUD shows.
 #: arena zone -> the two base gimmick instances its 11xx situations list
 #: (team 0's first -- INFERRED order); None = no base in that arena.
-# LIVE 09-24 (Jungle, player on team 0 = Ifrit): with (23, 26) the RED base
+# LIVE (Jungle, player on team 0 = Ifrit): with (23, 26) the RED base
 # (Ifrit's model) was named "Team Shiva's base" -- the order was backwards.
 BASE_GIMMICKS = {201: (26, 23), 204: None}
 # 2026-09-24 (static RE, table 14 + the 1100 controllers): every arena's base
@@ -3019,7 +3015,7 @@ def base_objects_payload(gimmicks, teams=(0, 1)):
     return bytes(4) + bytes(rec)
 
 
-# LIVE 09-24: the controller's request 24 carries the bases, exactly the proto
+# LIVE: the controller's request 24 carries the bases, exactly the proto
 # builder's layout: count at body+61, then 12-byte entries from body+64 {u32
 # HP, u16 index, u16 0, u32 attacker mask}. Jungle: 2 entries, 8000 each; the
 # one shot fell 8000 -> 7968 -> 7562 with mask 1 while being hit.
@@ -3694,7 +3690,7 @@ BT_REQ_DISSOLVE = 125
 # getMyReservationTableId() returns) = 0xffff, R+0x2fa &= ~1 (the held bit),
 # kelsvc+0x10c = 0xffff, and the reserved table's member list emptied. The
 # selector-156 CLEAR sent since 09-13/09-22 touches none of that on this build
-# (row 51) -- live 23:00Z it was sent twice and the "!!na!!" table stayed.
+# (row 51) -- live it was sent twice and the "!!na!!" table stayed.
 BT_RESERVATION_CLEAR_SEL = 110
 QUEST_LIST_REQ = 159      # Solo Battle (story mode) quest-id list, answer 160
 
@@ -3889,8 +3885,8 @@ BT_PASSWORD_OFF = 16       # 8 bytes, requests 30 and 153 (0x00bcda28)
 LOBBY_CMD_APPOINT = 1      # 0x00bd1c28, phase 56, "%s has been appointed leader"
 LOBBY_CMD_KICK = 2         # 0x00bd1cf0, phase 54, "%s has been kicked"
 LOBBY_CMD_RETURN = 4       # 0x00bd1fb8: RETURN TO LOBBY (its poll runs the full
-                           # reset 0x00bd2a38, selector 39's arm). Live 09-23
-                           # 22:32:41: the player quit the Wastelands arena with
+                           # reset 0x00bd2a38, selector 39's arm). Live,
+                           # a player quit the Wastelands arena with
                            # it and the room ran on for 600 s.
 LOBBY_CMD_START = 3        # 0x00bd1db8 (kelsvc vt+604): netclient bit 0x40 =
                            # start_onlinebattle -> the LEADER's "start the
@@ -5090,14 +5086,14 @@ def p2p_battle_type(data, inner):
 
 
 def p2p_server_type(data, inner):
-    """2026-09-24 (LIVE + static RE): a capsule PICK-UP / DROP sent to the
+    """Seen live, with static RE: a capsule PICK-UP / DROP sent to the
     SERVER, or None. Touching a kind-10 item goes 0x00683838 -> 0x004c9470 ->
     builder 0x00bee578 -> sender 0x00bee6d0; with netobj+4 bit 0 set it rides
     the RELIABLE sender 0x0058d288 to the game server (inner type 119, flags
     0x01, resent every 500 ms until ACKed), not the flags-0x08 P2P broadcast
     p2p_battle_type() reads. Body from wire+24 = the P2P payload: 119 {u32
     SLOT, u32 1, u32 n (a per-sender counter, never echoed), f32 x, y, z = the
-    PICKER's position}. Live 09-24 it was misread as "GS request 6" (slot 6).
+    PICKER's position}. Live it was misread as "GS request 6" (slot 6).
     2026-09-26: 117 (an MP point, doc_items) rides the same sender."""
     if inner is None or not inner.get("is_data") or inner.get("plain") is None:
         return None
@@ -5108,7 +5104,7 @@ def p2p_server_type(data, inner):
 
 
 def p2p_server_type_mode4(data, inner):
-    """2026-09-26 (LIVE log): the same 119 / 118 from a PCSX2 client is
+    """Seen in a live log: the same 119 / 118 from a PCSX2 client is
     MODE 4 -- header enciphered with the cipher we do not hold (REJECTED by
     its own checksum), body plaintext -- so p2p_server_type() never saw one,
     and every pick-up was read as "GS request <slot>" (slot 45 was answered
@@ -5838,7 +5834,7 @@ def main():
                          "type and the log names id -> type, so a live look pins "
                          "which value draws the mission's model. Empty = the "
                          "arena test types. 'SIT:t,t;SIT:t;default' sets them per "
-                         "situation: live 09-23 every type drew situation 3000's "
+                         "situation: live, every type drew situation 3000's "
                          "dog, which reads as type = INDEX into the situation's "
                          "loaded model list (bzd table 20: 3001 = e030 dog, w010, "
                          "w003, e102; 3004 = w003, e102) -- e102 = index 3 / 1.")
@@ -6493,7 +6489,7 @@ def main():
                          "screen's Map picker writes) to the arena zone kind 2 "
                          "serves at rec+26. Empty = the decoded default "
                          "(BT_MAP_ZONES_DEFAULT): the 20 of 28 roster entries "
-                         "whose label matches a 'マルチ・' arena in the title's "
+                         "whose label matches a 'multi' (maruchi) arena in the title's "
                          "own data/zone/zonelist.txt. 'off' = none, i.e. every "
                          "table plays in --gs-battle-zone (the behaviour up to "
                          "2026-09-23, which is the bug: the map was chosen and "
@@ -6548,8 +6544,7 @@ def main():
                     help="2026-09-23: do NOT re-send the message-27 arm on each "
                          "keepalive after a 38 until the client's first team "
                          "request (31/33). Default on: a client whose one 27 "
-                         "was lost can keep alive but never send request 31 "
-                         "(the briefing-room findings C).")
+                         "was lost can keep alive but never send request 31.")
     ap.add_argument("--gs-auto-team-after", type=float, default=120.0,
                     help="2026-09-23: seconds after a 2+-member Start before a "
                          "seated member who never chose a team (no request 31) "
@@ -6678,7 +6673,7 @@ def main():
                          "`21` is the honest trigger: selector 21 is the "
                          "phase-44 answer, i.e. the last rung of a COMPLETED "
                          "reservation (sec 4dw). "
-                         "\u26a0 If this re-opens the slingshot the answer is NOT "
+                         "WARNING: if this re-opens the slingshot the answer is NOT "
                          "to drop 38 again -- that re-breaks the door -- it is "
                          "that the trigger is still too early.")
     ap.add_argument("--gs-connect-selectors", default="104",
@@ -6705,8 +6700,8 @@ def main():
                          "and the Start (0x00bc03b8, sec 4cx) leaves it stale, "
                          "the re-arm is swallowed at the gate, [chan+204] bit 6 "
                          "is never set, [chan+224] is never refreshed and the "
-                         "client paints CER-48101 40 s later. MEASURED live "
-                         "2026-09-23 live: the peer whose connect->Start gap "
+                         "client paints CER-48101 40 s later. MEASURED live: "
+                         "the peer whose connect->Start gap "
                          "was 2 m 10 s sent ZERO game-server hellos and its "
                          "[chan+212] was still 65528. Unlike --gs-rearm-ms this "
                          "sends selector %d ONLY (never message %d on its own), "
@@ -8221,7 +8216,7 @@ def main():
         --gs-connect block has always used and the order --gs-rearm-ms replays.
         104 must come FIRST because it is what makes the other two deliverable
         at all; the arm must come LAST because 38's routine 0x00bc0260 zeroes
-        [chan+204] (sec 4eb, CER-48101 live 09-11). Re-running 104 on a HEALTHY
+        [chan+204] (sec 4eb, CER-48101 live). Re-running 104 on a HEALTHY
         channel is harmless -- measured in an offline run of the client's own code (doc_gsseq_proof) and
         already relied on by --gs-rearm-ms (sec 4cx).
 
@@ -8444,7 +8439,7 @@ def main():
                         shown[cid] = team
                     continue
                 if cid not in shown:
-                    # 2026-09-23 (the briefing-room findings A): every seated
+                    # every seated
                     # member is already in this observer's roster from ITS 38
                     # (gs_ready_roster), filed with team 0xff, so a plain kind 0
                     # is a +1 on the row. The kind 31 we sent here could never
@@ -8524,7 +8519,7 @@ def main():
         room = battles.get(key) if key is not None else None
         if room is None:
             for r in battles.values():
-                # 2026-09-23 (live 22:34:23): never a room whose TABLE is gone
+                # never a room whose TABLE is gone
                 # -- the church battle "ARRIVED in table 1's room" (the
                 # dissolved Wastelands table) and so never opened its own.
                 if (cid in r.kills and cid not in r.left
@@ -8577,7 +8572,7 @@ def main():
             rec, default_length=a.gs_battle_length,
             default_kill=a.bt_kill_target, default_respawn=a.bt_respawn_s,
             time_unit=a.bt_time_unit)
-        # 2026-09-23 (live): RETAIL never sends command 41, so `mission` (from
+        # RETAIL never sends command 41, so `mission` (from
         # _mission_battle) stayed None while the TABLE said Mission (flags
         # 0x10000, quest at wire+26 = rules.mission): the room was labelled
         # MISSION but no mission hook (scoring, NPC HP, killer fallback,
@@ -8825,7 +8820,7 @@ def main():
         for room in list(battles.values()):
             if room.key != -1 and room.key not in bt_store.tables:
                 # its table was dissolved (selector 125) or emptied (155)
-                # under it: the room must not outlive it (live 09-23).
+                # under it: the room must not outlive it (live).
                 battles.pop(room.key, None)
                 print("  [battle] table %d is GONE -- its room CLOSED"
                       % room.key, flush=True)
@@ -8882,7 +8877,7 @@ def main():
                 # 0 -> max); 19 also clears the dead flags 0x2400 and resets the
                 # battle object (vt+220). ident = the revived character, body+16
                 # u32 HP (0 = full).
-                # 2026-09-23 (live + savestate): 18/19 revived the HP but never
+                # Seen live and in a savestate: 18/19 revived the HP but never
                 # touched the state word entry+0x56 that kind 9 set to 1, and
                 # the damage path 0x00beec10 skips a character in state 1 or 2
                 # -> INVINCIBLE. Kind 13 pushes action code 13 (state := 0)
@@ -9615,7 +9610,7 @@ def main():
         and the byte on the wire can never disagree."""
         q = _mission_battle.get(key) if key else None
         if q is None and cid:
-            # 2026-09-24 (live): Accept Mission -> a mission TABLE never sends
+            # Accept Mission -> a mission TABLE never sends
             # command 41, so _mission_battle stayed empty and Collector's Mind
             # (quest 16, Church) opened in the table map's Jungle. The table
             # record itself names the quest (flags 0x10000, wire+26).
@@ -10372,7 +10367,7 @@ def main():
                          _ctr[2], doc_npc_spawn.ARENA_ID_BASE,
                          sess.gs_join_src[0][0], sess.gs_join_src[0][1]),
                       flush=True)
-            # 2026-09-23 (live, slot 7): the Add-Npc entries DO land in the
+            # Seen live (slot 7): the Add-Npc entries DO land in the
             # char table (8 x HP 100, flags 0x40050211) but never render: an
             # NPC entry gets an actor only from movement updates, and nobody
             # controls these. Notify kind 27 (retail arm 0x00bcc084) hands an
@@ -11009,12 +11004,11 @@ def main():
                 print("  GS request 1 (keepalive) -> SENT 1 (the [chan+224] "
                       "stamp)", flush=True)
                 if sess.gs_rearm_pending[0]:
-                    # 2026-09-23 (the briefing-room findings C): the team-join
+                    # the team-join
                     # builder sends request 31 only while [chan+204] & 0x40 is
                     # set, and ONLY message 27 sets it. Keepalives flow without
                     # it, so a lost / early 27 leaves a client that can never
-                    # join a team (live: the joiner sent nothing but request
-                    # 1). Arm again until its first 31/33 proves it is armed.
+                    # join a team (it sends nothing but request 1). Arm again until its first 31/33 proves it is armed.
                     # WARNING: EMPTY on purpose: message 27 is also a reward GRANT
                     # (--gs-stats), and this one repeats every 7 s
                     s.sendto(build_gs_stats([], state=a.gs_arm_state,
@@ -11046,7 +11040,7 @@ def main():
                 if (_kr is None and not (_gbody is not None and len(_gbody) >= 12
                         and struct.unpack_from("<I", _gbody, 8)[0]
                         == (seen_charid[0] or -1))):
-                    # 2026-09-23 (live): the fallback was skipped with the room
+                    # the fallback was skipped with the room
                     # open -- say exactly which condition failed.
                     print("  GS request 30 fallback skipped: me=0x%x room=%s "
                           "mission=%s body=%s kills=%s"
@@ -11099,7 +11093,7 @@ def main():
                 print("  GS request 43 (ack of the kill notice) from 0x%x -- "
                       "no answer" % (seen_charid[0] or 0), flush=True)
             elif _gmt == GS_ITEM_USE_REQ and a.item_use_answer != "off":
-                # 2026-09-23 (live): a Potion in battle sent request 21 and the
+                # a Potion in battle sent request 21 and the
                 # client kept resending it. Request 21 = {u16 21, u16 session,
                 # u32 0, u32 ITEM} (builder 0x00bc53f0, arena state); there is
                 # no target -- an item is used on oneself.
@@ -11111,7 +11105,7 @@ def main():
                 # on the LOCAL chara only (R+48 overwrites it every frame), so
                 # the server pushes kind 44. The CLIENT took the item out of
                 # its bag when it sent the request (0x00be6c08), so every NEW
-                # use is answered -- live 09-26 03:12:32 three uses (seqs 3147,
+                # use is answered -- live, three uses (seqs 3147,
                 # 3151, 3152 in 0.3 s) got ONE answer under the old 10 s
                 # window. A resend = the same transport seq, or (header
                 # unreadable) the same item on the reliable resend schedule.
@@ -11161,7 +11155,7 @@ def main():
                             _me21, _bk21, doc_items.ITEM_MP[_itm], _rs21),
                             "item 0x%08x +%d" % (_itm, doc_items.ITEM_MP[_itm]))
             elif _gmt == GS_MAGIC_REQ and a.mp_model != "zero":
-                # 2026-09-24 (live 07:20:09Z): one Fire cast = request 60 arg
+                # one Fire cast = request 60 arg
                 # 0x10001, resent at +0.6/+1.6/+3.6/+7.6 s, each answered with
                 # the ZERO 61 -> MP 0 for the rest of the battle ("cast once,
                 # then couldn't"). build_magic_answer has the client side;
@@ -11278,11 +11272,10 @@ def main():
                               % len(_roster), flush=True)
                 if (_real_key is None and _gmt in (31, 33) and seen_charid[0]
                         and a.gs_real_roster):
-                    # 2026-09-23 (live, "1-member MS: Ready 0 player(s)"): a
-                    # SOLO table never reaches gs_sync_table, so its player got
+                    # a SOLO table never reaches gs_sync_table, so its player got
                     # a bare 32 and the Ready row stayed 0 until the kind-20
-                    # distribution. Kind 0 to itself is the +1 (briefing-room findings A,
-                    # probe case a); kind 1 takes it back off on 33. The client
+                    # distribution. Kind 0 to itself is the +1;
+                    # kind 1 takes it back off on 33. The client
                     # re-sends 31 every 0.5-4 s; a repeat Set Team to the same
                     # team is dec+inc = no change.
                     _me = seen_charid[0]
@@ -11647,7 +11640,7 @@ def main():
                               and data[BODY_OFF + 1] in doc_trade.SHORT_REQS)))
         if (a.world_answer and (not _short or _short_ok)
                 and _itype == a.world_type
-                # 2026-09-23 (live CER-48102): a MODE-4 (game-server) datagram
+                # Seen live (CER-48102): a MODE-4 (game-server) datagram
                 # whose header did not decrypt has no trustworthy type -- a
                 # 136-byte 1 Hz NPC report read as 0x7f, was answered as lobby
                 # "selector 73", and its garbage ident became the session's
@@ -11692,7 +11685,7 @@ def main():
                           "(record+4) -- getMyCharaId() now answers, sec 4dv"
                           % _ident, flush=True)
                 seen_charid[0] = _ident
-                # 2026-09-23 (live): register the NAME now, not at the first
+                # register the NAME now, not at the first
                 # user-list request. The relay's peer records read `players`,
                 # and until that request they went out as "Player_41050" --
                 # which the other client keeps for good (first sight wins).
@@ -11922,7 +11915,7 @@ def main():
                     # 2026-09-13: the mirror of that echo. After a DISSOLVE-ok
                     # the leader still held the reservation the echo gave them
                     # (R+2970 / R+684 bit 4), so "Reserved Table" pointed at a
-                    # dead key and asked CONFIG for it (live 16:40 table 1,
+                    # dead key and asked CONFIG for it (live table 1,
                     # 16:55 table 3). The CANCEL-ok arm ("Cancel %d", kel
                     # 0x00bcd6c0) calls the clear 0x00be33b0 when body[12]
                     # >= 0; the clear is a no-op if bit 4 is already off.
@@ -11949,7 +11942,7 @@ def main():
                     # Battletable" row appears, CONFIG asks for a table we do not
                     # have, and our all-zero answer renders as a junk table
                     # (!!na!!, Max 0, Time Limit 35931752 min -- savestates 06/07,
-                    # live 13:37 table 4114 with [store: 0 table(s), 0 seated]).
+                    # live table 4114 with [store: 0 table(s), 0 seated]).
                     # Leaving re-enters it because the reservation is still set.
                     # Clear it on the way out, exactly as the DISSOLVE-ok does.
                     if (_req_sel == BT_REQ_CONFIG and "table gone" in _vnote
@@ -11966,7 +11959,7 @@ def main():
                               "does not have, so the client's reservation is an "
                               "orphan" % a.world_type, flush=True)
                         # ...and the one that WORKS on this build (the 156
-                        # above left the "!!na!!" table up, live 23:00Z)
+                        # above left the "!!na!!" table up, live)
                         send_reservation_clear(_ident or seen_charid[0], dst=src,
                                                why="CONFIG of a table the store "
                                                "does not have")
@@ -12685,7 +12678,7 @@ def main():
                     print("  [self-name] selector 2: self record name <- %r at "
                           "answer body[112..127] (char 0x%08x)" % (_self_name, _nc),
                           flush=True)
-            # 2026-09-23 (live): LEARN the character id here. The world door
+            # LEARN the character id here. The world door
             # clears seen_charid (sec 4dv) and it came back only from a later
             # request's record+4 -- but lobby commands (selector 240: units,
             # Start) carry ident 0, so a player who went straight to Unit
@@ -12906,14 +12899,14 @@ def main():
                 if _cmd == LOBBY_CMD_RETURN and seen_charid[0]:
                     # a player who ARRIVED in a running room and returns to the
                     # lobby has left it; fire_battles ends an empty room and
-                    # close_battle dissolves its table (live 09-23: the quit
+                    # close_battle dissolves its table (live: the quit
                     # Wastelands table stayed listed, its room ran on).
                     _rr = battle_of(seen_charid[0])
                     if (_rr is not None and not _rr.over
                             and seen_charid[0] in _rr.arrived
                             and _rr.mission is not None
                             and len(_rr.present()) <= 1):
-                        # 2026-09-23 (live): quitting a solo MISSION showed the
+                        # quitting a solo MISSION showed the
                         # client's own result screen with the WIN bits left by
                         # the previous battle ([chan+1388] is written only by
                         # kind 4). End it as a quit instead: kind 4 carries the
@@ -13049,7 +13042,7 @@ def main():
                     # SERVER channel, whose receive handler drops anything whose
                     # source != [chan+184..191]. That sockaddr was written once,
                     # at --gs-connect, and any channel reset since has wiped it.
-                    # Live 2026-09-23 (table 2): the peer
+                    # Live (table 2): the peer
                     # with a 2 m 10 s connect->Start gap sent 0 game-server
                     # hellos and its [chan+212] was still the uninitialised
                     # 65528 -- not one of our datagrams was ever accepted.
@@ -13108,7 +13101,7 @@ def main():
                                      _tk), flush=True)
                         else:
                             _mission_battle.pop(sess.key, None)
-                        # 2026-09-23 (live): RETAIL picks a mission with command
+                        # RETAIL picks a mission with command
                         # 29 and CREATEs a mission table itself, so the quest-pick
                         # branch above never runs and the table's own situation
                         # (1100, the PvP set) went out -- no enemies. A mission's

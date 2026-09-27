@@ -37,7 +37,7 @@ NPC_EVENTS is the client's own table (quest_scr003.ev, int arrays at locals
 25..54 in the retail class); SIDE is the single-id side table beside some of
 them; GREETING is the id we answer a bare "I talked to NPC n" with.
 
-VERIFIED: The trigger IS the lnpc number -- PROVEN LIVE 2026-09-22: the
+VERIFIED: The trigger IS the lnpc number -- PROVEN LIVE: the
 client sent command 26 with trigger 40, 31 and 4, which are exactly the lnpc
 numbers of the NPCs a player walked up to (an area officer, Restrictor-East
 and Argento). It is no longer an inference from the switch range.

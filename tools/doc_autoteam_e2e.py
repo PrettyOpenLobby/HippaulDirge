@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: a joiner who never chooses a team is AUTO-TEAMED when the
-briefing time runs out, and the distribution goes out (live 2026-09-23: the
+briefing time runs out, and the distribution goes out (live: the
 joiner's client sent only keepalives, the leader's countdown hit 0 and nothing
 started).
 
@@ -136,13 +136,13 @@ def main():
           "SENT notify 20 (PLAYER DISTRIBUTION) over the REAL" in text, lp)
     check("kind 20 reached BOTH clients", ka and kb,
           "A %d, B %d" % (len(ka), len(kb)))
-    # the briefing-room findings C: B never sent 31 -> re-armed on keepalives
+    # B never sent 31 -> re-armed on keepalives
     check("B (no team request) is RE-ARMED on its keepalives",
           ("no team request from 0x%08x" % E.B_CID) in text
           and len(msg(pb, D.GS_ARM_MSG)) >= 1, lp)
     check("A (sent 31) is NOT re-armed on its keepalives",
           ("no team request from 0x%08x" % E.A_CID) not in text, lp)
-    # the briefing-room findings A: the other player's team reaches B as a KIND 0, not kind 31
+    # the other player's team reaches B as a KIND 0 (a kind 31 never moves a count)
     check("A's team reaches B as kind 0 (first sight), no kind 31",
           ("SENT notify 0 (set team) 0x%08x -> team 1 -> 0x%08x's briefing "
            "(first sight)" % (E.A_CID, E.B_CID)) in text
@@ -161,7 +161,7 @@ def main():
     check("TWIN: the table stalls on 'no team yet' (the live bug)",
           ("no team yet for 0x%x" % E.B_CID) in text, lp)
     check("TWIN: no kind 20 to anyone", not ka and not kb)
-    print("run 3: SOLO table (live 09-23 '1-member MS: Ready 0 player(s)')")
+    print("run 3: SOLO table (live '1-member MS: Ready 0 player(s)')")
     text, pa, pb, lp = run(-1, a_leaves=True, solo=True)
     check("solo: request 31 -> kind 0 (set team) to ITSELF",
           ("solo: SENT notify 0 (set team) 0x%08x -> team 1 to ITSELF" % E.A_CID)
