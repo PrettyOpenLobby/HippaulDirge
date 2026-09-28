@@ -18,6 +18,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
+import docdb  # noqa: E402
+import docpg  # noqa: E402
 
 FAILS = []
 
@@ -70,6 +72,8 @@ def entrance_request():
 
 
 def main():
+    # the gear, shop and career checks write to a store: PostgreSQL tables
+    docpg.need_database("doc_udp")
     print("doc_udp_test")
 
     # --- checksum: the client folds a byte sum with the field zeroed (sec 4c)
@@ -1114,9 +1118,8 @@ def main():
           [i for i, q in S.issue_items([], [(_gear[0], 1), (_gear[1], 1)])]
           == [0x63300001, 0x63310000])
     # 2026-09-13: CHANGE MASK / ARMOR = lobby commands 17 / 18 (doc_gear.py).
-    import tempfile as _tf
-    _gdir = _tf.mkdtemp()
-    _gs = G.GearStore(os.path.join(_gdir, "doc-gear.json"))
+    docdb.store("gear").clear()
+    _gs = G.GearStore(docdb.store("gear"))
     _gk = "member:15/0x0004103c"
 
     def _gear_req(cmd, slot, item=0):
@@ -1132,7 +1135,7 @@ def main():
           "(0x1019 -> 0x1799)",
           struct.unpack_from("<H", _gb, 6)[0] == 0x1799)
     check("gear cmd 17: stored and served back at login",
-          G.GearStore(_gs.path).login(_gk, G.starter_gear(False), 0x1019)
+          G.GearStore(docdb.store("gear")).login(_gk, G.starter_gear(False), 0x1019)
           == (0x63300009, 0x63310000, 0x1799))
     _gb, _gn = _gs.body_for(17, _gear_req(17, 1, 0x63310050), _gk, 0x1019)
     check("gear cmd 17 Armored Suit (0x..50 = armor 4): armor bits follow, mask kept "
@@ -1162,6 +1165,7 @@ def main():
     check("gear: a never-changed character gets the starter pair + creation look",
           _gs.login("member:1/0x00000002", G.starter_gear(True), 0x1059)
           == (0x63300001, 0x63310000, 0x1059))
+    docdb.store("gear").clear()
     for _usel in (13, 21):
         check("units: never written on selector %d" % _usel,
               body(D.build_world_answer(world_door_request(), selector=_usel,
@@ -2437,12 +2441,8 @@ def main():
     import doc_shop as S26
     check("mask: doc_shop's new-wallet mark IS doc_gear's rule mark",
           S26.SOLDIER_MASK_RULE_MARK == G26.MASK_RULE_MARK)
-    _p26 = os.path.join(os.environ.get("TEMP", "."), "doc_udp_test_mask26.json")
-    try:
-        os.remove(_p26)
-    except OSError:
-        pass
-    _sh26 = S26.Shop(_p26)
+    docdb.store("shop").clear()
+    _sh26 = S26.Shop(docdb.store("shop"))
     _w26 = _sh26.wallet("anon/0x00000026")
     check("mask: a new character holds no mask (settle -> None, bag untouched)",
           G26.settle_soldier_mask(_w26, False)[0] is None
@@ -2450,7 +2450,7 @@ def main():
     _w26.pop(G26.MASK_RULE_MARK)
     check("mask: TWIN -- a wallet from before the rule keeps its mask",
           G26.settle_soldier_mask(_w26, False)[0] == G26.MASK_DG_M)
-    os.remove(_p26)
+    docdb.store("shop").clear()
     _wg26 = body(D.build_world_answer(world_door_request(), selector=2, pad_to=176,
                                       ident=0, self_gear=(G26.NO_ITEM, 0x63310000)))
     check("mask: no mask = 0xFFFFFFFF at world-door body[76], the suit at [80]",
@@ -2479,7 +2479,6 @@ def main():
 
     # 2026-09-26: the WEEKLY medals (doc_stats.WEEKLY_MEDALS, ids 19..22)
     import doc_stats as WK
-    import tempfile as _tf
     check("weekly: the four are SE's 60:[35..38], medal ids 19..22, inside the "
           "24-bit door mask and the +168 count block",
           [i for _f, i in WK.WEEKLY_MEDALS] == [35, 36, 37, 38]
@@ -2498,12 +2497,8 @@ def main():
           "OLD week, JST in the new one",
           WK.week_of(_W + 8 * 3600, WK.parse_week_start("mon 00:00 +00:00"))
           != _W and WK.week_of(_W + 8 * 3600, _ph) == _W)
-    _wp = os.path.join(_tf.gettempdir(), "doc_udp_test_weekly.json")
-    try:
-        os.remove(_wp)
-    except OSError:
-        pass
-    _ws = WK.Stats(_wp)
+    docdb.store("stats").clear()
+    _ws = WK.Stats(docdb.store("stats"))
     _ws.clock = lambda: _W + 60
     _ws.record_battle("BT", [{"key": "p", "team": 1, "kills": 2},
                              {"key": "q", "team": 2, "kills": 0}], 1, 120)
@@ -2515,10 +2510,10 @@ def main():
           "(40) vs q (10 + 40 = 50) -> q",
           _aw == {35: "q", 36: None, 37: "q", 38: "p"}, "%r" % _aw)
     check("weekly: a closed week closes once (restart included)",
-          _ws.close_week(_W) is None and WK.Stats(_wp).close_due(
+          _ws.close_week(_W) is None and WK.Stats(docdb.store("stats")).close_due(
               now=_W + 5 * WK.WEEK_SECS) == []
-          and WK.medal_count(WK.Stats(_wp).career("q"), 37) == 1)
-    os.remove(_wp)
+          and WK.medal_count(WK.Stats(docdb.store("stats")).career("q"), 37) == 1)
+    docdb.store("stats").clear()
     check("weekly: docudp closes on startup AND on the rollover deadline, "
           "gated by --weekly-medals",
           'weekly_close("startup catch-up")' in _src26

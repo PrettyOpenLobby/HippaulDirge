@@ -74,7 +74,6 @@ tune fees) but has no online prices; the guides give those. Flash Materia
 import json
 import os
 import struct
-import tempfile
 
 STOCK_REQ, STOCK_ANS = 64, 65
 BUY_REQ, BUY_ANS = 66, 67
@@ -484,8 +483,11 @@ class Shop:
     """Stock + per-character wallets. Same deliberately-dumb JSON store shape as
     doc_charastore: synchronous, fsync'd, rewritten whole on every change."""
 
-    def __init__(self, path, stock_path="", start_gil=None):
-        self.path = path
+    def __init__(self, store, stock_path="", start_gil=None):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('shop') or None")
+        self.store = store
         self.stock, file_gil = load_stock(stock_path)
         self.prices = {iid: price for iid, price, _ in self.stock}
         self.names = dict(EXTRA_NAMES)
@@ -515,27 +517,13 @@ class Shop:
         self.load()
 
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read the store. A database that cannot be reached raises
+        (docdb.py): the responder does not run on an empty store."""
+        self.data = self.store.load() if self.store is not None else {}
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".shop-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     #: DESIGN DECISION 2026-09-13: "players should absolutely have a starter set of
     #: both guns at creation for now". A gun with no frame/barrel holds 0
@@ -765,10 +753,15 @@ class Shop:
 
 if __name__ == "__main__":
     import sys
-    p = os.path.join(tempfile.gettempdir(), "doc_shop_selftest.json")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import docdb
+    import docpg
+    docpg.need_database("doc_shop")
+    docdb.store("shop").clear()
     try:
-        os.remove(p)
-    except OSError:
+        Shop("doc-shop.json")
+        raise AssertionError("a file path must be refused")
+    except TypeError:
         pass
     ids = [i for i, _, _ in DEFAULT_STOCK]
     assert len(ids) == len(set(ids)) <= STOCK_MAX == 89, len(ids)
@@ -778,7 +771,7 @@ if __name__ == "__main__":
     assert not [i for i in ids if i >> 16 in (0x6230, 0x6932, 0x6430)], ids
     pairs = [(s, r) for s, r, _, _, _ in DEFAULT_RECIPES]
     assert len(pairs) == len(set(pairs)), "recipe (source, result) must be unique"
-    shop = Shop(p, start_gil=10000)
+    shop = Shop(docdb.store("shop"), start_gil=10000)
     # every sourced tune is offered, none needs a kit
     assert len(shop.recipes) == len(DEFAULT_RECIPES) == 25, len(shop.recipes)
     assert all(k == 0 for k, _ in shop.recipes.values())
@@ -803,7 +796,7 @@ if __name__ == "__main__":
     assert shop.login_fields(kk) == (10000, sorted(STARTER_KIT)), shop.login_fields(kk)
     shop.wallet(kk)["bag"].clear()                   # sold / fitted away
     shop.save()
-    assert Shop(p).login_fields(kk) == (10000, []), "kit granted once, never again"
+    assert Shop(docdb.store("shop")).login_fields(kk) == (10000, []), "kit granted once, never again"
     # a wallet from before 09-26 (old kit, mark "kit" only) gets the parts the
     # old kit lacked, ONCE, and keeps its gil and what it had
     shop.data["pre"] = {"gil": 1234, "bag": {"0x6f300000": 1, "0x6f310000": 2,
@@ -836,7 +829,7 @@ if __name__ == "__main__":
     assert struct.unpack_from("<I", body, ANS_ADD_ID)[0] == SNIPE_SCOPE, note
     assert struct.unpack_from("<H", body, ANS_ADD_QTY)[0] == 1
     assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 100
-    assert Shop(p).login_fields(k) == (9900, [(SNIPE_SCOPE, 1)]), "persisted"
+    assert Shop(docdb.store("shop")).login_fields(k) == (9900, [(SNIPE_SCOPE, 1)]), "persisted"
     # refused: too expensive -> all-zero 67
     shop.wallet(k)["gil"] = 50
     body, note = shop.body_for(BUY_REQ, bytes(rq), k)
@@ -864,7 +857,7 @@ if __name__ == "__main__":
     assert struct.unpack_from("<IIHH", body, 12) == (MB2, MB, 1, 1), note
     assert struct.unpack_from("<I", body, ANS_SPEND)[0] == 50
     assert struct.unpack_from("<I", body, ANS_KIT)[0] == 0, "retail tuning takes no kit"
-    assert Shop(p).login_fields(k) == (9930, [(MB2, 1)]), "persisted"
+    assert Shop(docdb.store("shop")).login_fields(k) == (9930, [(MB2, 1)]), "persisted"
     # ...and on to III (the ladder)
     struct.pack_into("<III", rq145, 12, 3, MB2, MB3)
     body, note = shop.body_for(TXN_REQ, bytes(rq145), k)
@@ -914,7 +907,7 @@ if __name__ == "__main__":
     assert shop.wallet("old")[Shop.RETAIL_MARK] == 1
     shop.data["old"]["bag"]["0x6f320000"] = 1          # (cannot come back, but)
     assert shop.login_fields("old")[1] == [(0x6F320000, 1), (0x6F320002, 2)],         "TWIN: the conversion runs once -- a marked wallet is left alone"
-    assert START_GIL == 3000 and Shop(p).wallet("fresh")["gil"] == 3000
-    os.remove(p)
+    assert START_GIL == 3000 and Shop(docdb.store("shop")).wallet("fresh")["gil"] == 3000
+    docdb.store("shop").clear()
     print("doc_shop self-test PASS")
     sys.exit(0)

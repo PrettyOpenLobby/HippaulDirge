@@ -4,8 +4,11 @@
 Until now the DoC responder seeded four fixed "Quarry" slots (`--lobby-chara-*`)
 and threw away every REGISTER and DELETE: creating a character was acknowledged
 and forgotten, and a second account saw the first one's roster.  This is the
-persistent store that replaces the seeding -- one JSON file, keyed by the
-account uid the client reveals at the entrance (docudp.early_uid).
+persistent store that replaces the seeding -- one roster per account, in the
+doc_character table of the stack's PostgreSQL database (docdb.py; it was
+doc-characters.json on the logs volume), keyed by the account the client is
+resolved to (see AccountResolver) or the uid it reveals at the entrance
+(docudp.early_uid).
 
 Record, as parsed off the 232-byte REGISTER submission (sec 4bc/4bd, all
 PLAINTEXT on the wire -- mode 2 enciphers only the 16-byte inner header):
@@ -17,18 +20,19 @@ PLAINTEXT on the wire -- mode 2 enciphers only the 16-byte inner header):
                                  can name them without re-capturing)
     wire+127         voice       zero-based (Type N = N-1)
 
-The store is deliberately dumb and synchronous: this responder serves ONE
-client at a time (`--peer`), so there is no concurrency to manage, and a
-per-write fsync keeps a create durable across the reconnect a reservation
-triggers.  Slots are 0..3 (four is the client's roster size).
+The store is deliberately dumb and synchronous: the responder is one
+process, so there is no concurrency to manage, and every change is written
+before the answer goes out, so a create is durable across the reconnect a
+reservation triggers.  Slots are 0..3 (four is the client's roster size).
 """
 import datetime
-import json
 import os
-import sqlite3
-import struct
-import tempfile
-import urllib.request
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import docdb  # noqa: E402
 
 MAX_SLOTS = 4
 NAME_OFF = 104
@@ -109,9 +113,15 @@ def parse_register(body):
 #:
 #: No account configured = the old uid keying, unchanged, so the emulator and
 #: every dev run behave exactly as before.
+#:
+#: `store` is where the rosters live: docdb.store("characters") (the
+#: doc_character table), or None for rosters kept in memory only.
 class CharaStore:
-    def __init__(self, path, account=None):
-        self.path = path
+    def __init__(self, store, account=None):
+        if isinstance(store, str):
+            raise TypeError("CharaStore takes docdb.store('characters') or None, "
+                            "not a file path (the rosters are in PostgreSQL)")
+        self.store = store
         self.account = (account or "").strip() or None
         self.data = {}
         self.load()
@@ -127,9 +137,9 @@ class CharaStore:
         With several, WHICH is theirs is a question for the player, not for a
         heuristic: two rosters can both hold a "Lex", and merging by slot would
         overwrite one with the other. So several -> nothing, logged, and
-        `python doc_charastore.py --adopt <uid> --account <key> <store>` settles
+        `python doc_charastore.py --adopt <uid> --account <key>` settles
         it explicitly. The uid rosters are never deleted either way -- they stay
-        on disk as the record of what was there.
+        in the store as the record of what was there.
         """
         if self.account in self.data:
             return
@@ -146,9 +156,9 @@ class CharaStore:
             print("[chara] WARNING account %r has no roster and %d uid rosters exist "
                   "(%s) -- NOT adopting any: which one is this player's is not "
                   "something to guess. Run doc_charastore.py --adopt <uid> "
-                  "--account %s %s"
+                  "--account %s"
                   % (self.account, len(uids), ", ".join(sorted(uids)),
-                     self.account, self.path), flush=True)
+                     self.account), flush=True)
 
     def adopt(self, uid_key):
         """Copy the roster stored under `uid_key` to this store's account.
@@ -162,27 +172,14 @@ class CharaStore:
         self.save()
 
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read every roster. A database that cannot be reached raises: a
+        responder that started on an empty store would hand out slots that
+        are taken."""
+        self.data = self.store.load() if self.store is not None else {}
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".chara-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     def _key(self, uid):
         """The configured ACCOUNT when there is one, else the entrance uid.
@@ -256,7 +253,8 @@ def _utcnow_str():
 #: The fix is the one services/feident.py already uses for Fantasy Earth: the
 #: login service writes a `session` row (member_id, nick, peer_ip, created_at)
 #: on every POL sign-in, a PS2 title follows a POL login from the same box, and
-#: prod runs host networking, so peer_ip is the real client address.
+#: prod runs host networking, so peer_ip is the real client address. The rows
+#: are read through OpenLobby's accounts.sessions_by_ip().
 class AccountResolver:
     """The store key for a client address: its POL member, remembered.
 
@@ -265,26 +263,34 @@ class AccountResolver:
          members at one address (a PC with the Windows viewer AND PCSX2 signed
          in) -> the one that already owns DoC characters; if that does not
          separate them, the freshest, logged AMBIGUOUS and not remembered;
-      2. the member last resolved at that address. POL purges session rows an
-         hour after they are made, on every login, and the doc container is
-         recreated far more often than a player signs in;
+      2. the member last resolved at that address (`memory`, the
+         doc_ip_member table). POL purges session rows an hour after they are
+         made, on every login, and the doc container is recreated far more
+         often than a player signs in;
       3. `addr:<ip>` -- per machine, NEVER one shared bucket.
     Never raises: a database fault falls through to 2/3 and is logged.
+
+    `connect` opens a connection to the account database (default
+    accounts.connect); `memory` is docdb.store("ip_members").
     """
     WINDOW = 24 * 3600
 
-    def __init__(self, accounts_db, memory_path, store=None, window=None):
-        self.accounts_db = accounts_db
-        self.memory_path = memory_path
+    def __init__(self, memory, store=None, window=None, connect=None):
+        if isinstance(memory, str):
+            raise TypeError("AccountResolver takes docdb.store('ip_members'), "
+                            "not a file path")
+        self.memory = memory
         self.store = store
         self.window = self.WINDOW if window is None else window
+        self.connect = connect or (lambda: docdb.accounts().connect())
 
     def _memory(self):
         try:
-            with open(self.memory_path, "r", encoding="utf-8") as f:
-                m = json.load(f)
+            m = self.memory.load()
             return m if isinstance(m, dict) else {}
-        except (OSError, ValueError):
+        except docdb.errors() as e:
+            print("[chara] WARN could not read the remembered members (%r)" % (e,),
+                  flush=True)
             return {}
 
     def _remember(self, ip, key):
@@ -292,30 +298,16 @@ class AccountResolver:
         if (m.get(ip) or {}).get("key") == key:
             return
         m[ip] = {"key": key, "at": _utcnow_str()}
-        d = os.path.dirname(os.path.abspath(self.memory_path)) or "."
-        try:
-            fd, tmp = tempfile.mkstemp(dir=d, prefix=".ipmem-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(m, f, indent=1, sort_keys=True)
-            os.replace(tmp, self.memory_path)
-        except OSError as e:
-            print("[chara] WARN could not remember %s -> %s (%r)" % (ip, key, e),
+        if not self.memory.save(m):
+            print("[chara] WARN could not remember %s -> %s" % (ip, key),
                   flush=True)
 
     def _sessions(self, ip):
-        cutoff = (datetime.datetime.now(datetime.timezone.utc)
-                  - datetime.timedelta(seconds=self.window)
-                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        uri = "file:%s?mode=ro" % urllib.request.pathname2url(
-            os.path.abspath(self.accounts_db))
-        db = sqlite3.connect(uri, uri=True, timeout=2)
+        conn = self.connect()
         try:
-            rows = db.execute(
-                "SELECT member_id, nick, created_at FROM session"
-                " WHERE peer_ip = ? AND created_at >= ?"
-                " ORDER BY created_at DESC LIMIT 32", (ip, cutoff)).fetchall()
+            rows = docdb.accounts().sessions_by_ip(conn, ip, self.window, 32)
         finally:
-            db.close()
+            conn.close()
         seen = {}
         for mid, nick, at in rows:
             seen.setdefault(mid, (mid, nick, at))
@@ -323,10 +315,10 @@ class AccountResolver:
 
     def resolve(self, ip):
         try:
-            cands = self._sessions(ip) if self.accounts_db else []
+            cands = self._sessions(ip)
         except Exception as e:                  # noqa: BLE001 -- see docstring
             print("[chara] WARN POL member lookup for %s failed (%r; %s) -- "
-                  "falling back" % (ip, e, self.accounts_db), flush=True)
+                  "falling back" % (ip, e, docdb.where()), flush=True)
             cands = []
         if cands:
             pick, how = cands[0], "sole"
@@ -355,36 +347,43 @@ class AccountResolver:
         return key
 
 
-if __name__ == "__main__":
-    import sys
-    if "--adopt" in sys.argv or "--show" in sys.argv:
-        # python doc_charastore.py --show <store>
-        # python doc_charastore.py --adopt <uid-key> --account <key> <store>
-        argv = sys.argv[1:]
-        def _opt(name):
-            i = argv.index(name)
-            return argv[i + 1]
-        store_path = [x for i, x in enumerate(argv)
-                      if not x.startswith("--")
-                      and (i == 0 or argv[i - 1] not in ("--adopt", "--account"))][-1]
-        if "--show" in argv:
-            for k, v in sorted(CharaStore(store_path).data.items()):
-                print("%-14s %s" % (k, [(ch.get("slot"), ch.get("name")) for ch in v]))
-            sys.exit(0)
-        st = CharaStore(store_path)          # NO account yet: no auto-adopt here
-        st.account = _opt("--account")
-        st.adopt(_opt("--adopt"))
-        print("adopted %s -> %s: %s (source kept)" % (
-            _opt("--adopt"), st.account,
-            [ch.get("name") for ch in st.data[st.account]]))
-        sys.exit(0)
-    # tiny self-test
-    p = os.path.join(tempfile.gettempdir(), "doc_charastore_selftest.json")
-    try:
-        os.remove(p)
-    except OSError:
-        pass
-    st = CharaStore(p)
+def _cli(argv):
+    """python doc_charastore.py --show
+    python doc_charastore.py --adopt <uid-key> --account <key>
+
+    Both work on the doc_character table of the database POL_DATABASE_URL
+    names."""
+    def _opt(name):
+        i = argv.index(name)
+        return argv[i + 1]
+    if "--show" in argv:
+        for k, v in sorted(CharaStore(docdb.store("characters")).data.items()):
+            print("%-14s %s" % (k, [(ch.get("slot"), ch.get("name")) for ch in v]))
+        return 0
+    st = CharaStore(docdb.store("characters"))   # NO account yet: no auto-adopt
+    st.account = _opt("--account")
+    st.adopt(_opt("--adopt"))
+    print("adopted %s -> %s: %s (source kept)" % (
+        _opt("--adopt"), st.account,
+        [ch.get("name") for ch in st.data[st.account]]))
+    return 0
+
+
+def _selftest():
+    import docpg
+    docpg.need_database("doc_charastore")
+    table = docdb.store("characters")
+
+    def fresh():
+        """What deleting the store file was: an empty table."""
+        table.clear()
+
+    def S(account=None):
+        """A new store object, reading the table afresh (a reload)."""
+        return CharaStore(docdb.store("characters"), account=account)
+
+    fresh()
+    st = S()
     body = bytearray(232)
     nm = b"Zackary"
     body[NAME_OFF:NAME_OFF + len(nm)] = nm
@@ -398,112 +397,126 @@ if __name__ == "__main__":
     assert st.add(uid, c) == 0            # idempotent on the same name
     c2 = dict(c, name="Vince")
     assert st.add(uid, c2) == 1
-    st2 = CharaStore(p)                    # reloads from disk
+    st2 = S()                              # reloads from the database
     r = st2.roster(uid)
     assert r[0]["name"] == "Zackary" and r[1]["name"] == "Vince" and r[2] is None
     assert st2.delete(uid, 0) is True
-    assert CharaStore(p).roster(uid)[0] is None
-    os.remove(p)
+    assert S().roster(uid)[0] is None
+    fresh()
+    # a file path is not a store any more: refused, not silently ignored
+    try:
+        CharaStore("doc-characters.json")
+        raise AssertionError("a path must be refused")
+    except TypeError:
+        pass
+    # memory only (no store): works, and nothing reaches the table
+    mem_only = CharaStore(None)
+    assert mem_only.add(uid, c) == 0 and table.count() == 0
 
     # --- THE ACCOUNT KEY (2026-09-12). Each case is the prod failure or the
     # hazard its fix could introduce. ------------------------------------------
     # 1. The bug: uid keying splits one player's roster when the uid rotates.
-    st = CharaStore(p)
+    st = S()
     st.add(0xA756A69A, dict(c, name="Lex"))
-    assert CharaStore(p).roster(0xA455A599)[0] is None, \
+    assert S().roster(0xA455A599)[0] is None, \
         "control: under uid keying a new session uid sees an EMPTY roster"
-    os.remove(p)
+    fresh()
     # 2. The fix: under an account, both session uids see the same roster.
-    st = CharaStore(p, account="member:3")
+    st = S(account="member:3")
     st.add(0xA756A69A, dict(c, name="Lex"))
-    again = CharaStore(p, account="member:3")
+    again = S(account="member:3")
     assert again.roster(0xA455A599)[0]["name"] == "Lex", \
         "a rotated uid must see the roster the previous session made"
-    os.remove(p)
+    fresh()
     # 3. Adoption: exactly ONE leftover uid roster -> carried over, kept as backup.
-    CharaStore(p).add(0xA455A599, dict(c, name="Lex"))
-    st = CharaStore(p, account="member:3")
+    S().add(0xA455A599, dict(c, name="Lex"))
+    st = S(account="member:3")
     assert st.roster(0)[0]["name"] == "Lex", "the single uid roster is adopted"
     assert "0xa455a599" in st.data, "the source is NOT deleted"
-    os.remove(p)
+    assert "0xa455a599" in S().data, "...in the database either"
+    fresh()
     # 4. The hazard: SEVERAL uid rosters (prod's actual state) -> adopt NONE.
-    base = CharaStore(p)
+    base = S()
     base.add(0xA455A599, dict(c, name="Lex"))
     base.add(0xA455A599, dict(c, name="Test"))
     base.add(0xA756A69A, dict(c, name="Lex"))
-    st = CharaStore(p, account="member:3")
+    st = S(account="member:3")
     assert "member:3" not in st.data, \
         "two uid rosters must not be merged or picked between by guesswork"
     # ...and the explicit adopt settles it, non-destructively.
     st.adopt("0xa455a599")
-    names = [s["name"] for s in CharaStore(p, account="member:3").roster(0) if s]
+    names = [s["name"] for s in S(account="member:3").roster(0) if s]
     assert names == ["Lex", "Test"], names
-    assert "0xa756a69a" in CharaStore(p).data, "the other roster survives"
-    os.remove(p)
+    assert "0xa756a69a" in S().data, "the other roster survives"
+    fresh()
     # 5. No account = the old behaviour exactly (the emulator, dev runs).
-    assert CharaStore(p)._key(0xA455A599) == "0xa455a599"
-    try:
-        os.remove(p)
-    except OSError:
-        pass
+    assert S()._key(0xA455A599) == "0xa455a599"
+    fresh()
     # --- sec 4ft: PER-CLIENT keying by the POL member at the address. -------
-    adb = os.path.join(tempfile.gettempdir(), "doc_charastore_selftest_acc.db")
-    mem = os.path.join(tempfile.gettempdir(), "doc_charastore_selftest_ip.json")
-    for f in (p, adb, mem):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
-    now = _utcnow_str()
-    db = sqlite3.connect(adb)
-    db.execute("CREATE TABLE session (member_id INTEGER, nick TEXT, "
-               "peer_ip TEXT, created_at TEXT)")
-    db.executemany("INSERT INTO session VALUES (?,?,?,?)",
-                   [(15, "PCSX2", "192.0.2.1", now),
-                    (6, "DECK", "192.0.2.2", now)])
-    db.commit()
-    db.close()
-    st = CharaStore(p)
-    rs = AccountResolver(adb, mem, st)
+    # The session rows are the core's own, made the way its login makes them.
+    acc = docdb.accounts()
+    conn = acc.connect()
+    acc.create_polid(conn, "DOCTEST01", "pw-doctest")
+    m_pc = acc.add_member(conn, "DOCTEST01", "doctest-pc", "pw-doctest")
+    m_deck = acc.add_member(conn, "DOCTEST01", "doctest-deck", "pw-doctest")
+    m_viewer = acc.add_member(conn, "DOCTEST01", "doctest-viewer", "pw-doctest")
+    acc.open_session(conn, m_pc, nick="PCSX2", peer_ip="192.0.2.1")
+    acc.open_session(conn, m_deck, nick="DECK", peer_ip="192.0.2.2")
+    k_pc_want, k_deck_want = "member:%d" % m_pc, "member:%d" % m_deck
+    memory = docdb.store("ip_members")
+    memory.clear()
+    st = S()
+    rs = AccountResolver(memory, st)
     # 1. The 09-13 bug: two machines, two members, two rosters -- and the
     #    Deck's delete must not touch the PC's characters.
     k_pc, k_deck = rs.resolve("192.0.2.1"), rs.resolve("192.0.2.2")
-    assert (k_pc, k_deck) == ("member:15", "member:6"), (k_pc, k_deck)
+    assert (k_pc, k_deck) == (k_pc_want, k_deck_want), (k_pc, k_deck)
     st.add(k_pc, dict(c, name="Lex"))
     st.add(k_pc, dict(c, name="Test"))
     st.add(k_deck, dict(c, name="Deck"))
     assert st.delete(k_deck, 0) is True
-    names = [s["name"] for s in CharaStore(p).roster("member:15") if s]
+    names = [s["name"] for s in S().roster(k_pc_want) if s]
     assert names == ["Lex", "Test"], names
     # 2. POL purged the rows: the remembered member still resolves.
-    db = sqlite3.connect(adb)
-    db.execute("DELETE FROM session")
-    db.commit()
-    db.close()
-    assert AccountResolver(adb, mem, st).resolve("192.0.2.1") == "member:15"
+    for m in (m_pc, m_deck):
+        acc.close_sessions(conn, m)
+    assert acc.sessions_by_ip(conn, "192.0.2.1", 3600) == []
+    assert (AccountResolver(docdb.store("ip_members"), st).resolve("192.0.2.1")
+            == k_pc_want)
     # 3. Unknown address, nothing remembered: its own key, never a shared one.
-    assert (AccountResolver(adb, mem, st).resolve("192.0.2.99")
+    assert (AccountResolver(docdb.store("ip_members"), st).resolve("192.0.2.99")
             == "addr:192.0.2.99")
     # 4. Two members at one address (Windows viewer + PCSX2): the one that
     #    owns DoC characters wins, even though the other row is fresher.
-    db = sqlite3.connect(adb)
-    db.executemany("INSERT INTO session VALUES (?,?,?,?)",
-                   [(15, "PCSX2", "192.0.2.1", "2026-01-01T00:00:00Z"),
-                    (15, "PCSX2", "192.0.2.1", now),
-                    (3, "VIEWER", "192.0.2.1", now + "~")])
-    db.commit()
-    db.close()
-    assert AccountResolver(adb, mem, st).resolve("192.0.2.1") == "member:15"
-    # 5. A database that cannot be opened must not raise -- memory answers.
-    assert (AccountResolver(os.path.join(tempfile.gettempdir(), "nope", "x.db"),
-                            mem, st).resolve("192.0.2.1") == "member:15")
+    now = _utcnow_str()
+    old_tok = acc.open_session(conn, m_pc, nick="PCSX2", peer_ip="192.0.2.1")
+    acc.open_session(conn, m_pc, nick="PCSX2", peer_ip="192.0.2.1")
+    new_tok = acc.open_session(conn, m_viewer, nick="VIEWER", peer_ip="192.0.2.1")
+    # fixture only: the rows' ages, which open_session always stamps "now"
+    conn.execute("UPDATE session SET created_at = %s WHERE token = %s",
+                 ("2026-01-01T00:00:00Z", old_tok))
+    conn.execute("UPDATE session SET created_at = %s WHERE token = %s",
+                 (now + "~", new_tok))
+    conn.commit()
+    docdb.store("ip_members").clear()      # the roster decides, not memory
+    assert (AccountResolver(docdb.store("ip_members"), st).resolve("192.0.2.1")
+            == k_pc_want)
+    # 5. A database that cannot be reached must not raise -- memory answers.
+    def broken():
+        raise docdb.db.OperationalError("the account database is down")
+    assert (AccountResolver(docdb.store("ip_members"), st, connect=broken)
+            .resolve("192.0.2.1") == k_pc_want)
     # 6. A resolved key passes through _key(); an int uid keys as before.
-    assert CharaStore(p, account="member:3")._key("member:6") == "member:6"
-    assert CharaStore(p)._key(0xA455A599) == "0xa455a599"
-    for f in (p, adb, mem):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+    assert S(account="member:3")._key("member:6") == "member:6"
+    assert S()._key(0xA455A599) == "0xa455a599"
+    conn.close()
+    fresh()
+    docdb.store("ip_members").clear()
     print("doc_charastore self-test PASS")
-    sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    if "--adopt" in sys.argv or "--show" in sys.argv:
+        sys.exit(_cli(sys.argv[1:]))
+    sys.exit(_selftest())
