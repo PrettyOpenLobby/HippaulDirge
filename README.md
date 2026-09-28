@@ -56,12 +56,50 @@ to work on the private deployment before their meaning was decoded;
 ## How it fits the core
 
 The core (OpenLobby) does the login, the DNS and the member profile; this
-repository is one UDP service, `docudp.py`, on port 55040. It joins the core's
-data volume read-only, to learn which PlayOnline member is signed in at each
-console's address, and the core's logs volume, where it keeps its stores
-(characters, careers, shop, units, rankings) as JSON files. The title plugin
-below reads two of those files to fill the game's content profile (character
-name, rank, ranking points) in the PlayOnline Viewer.
+repository is one UDP service, `docudp.py`, on port 55040. It runs in the
+core's compose project and uses the core's PostgreSQL database: the core's
+session table tells it which PlayOnline member is signed in at each console's
+address, and its own `doc_*` tables hold its stores (characters, careers,
+shop, units, rankings). The title plugin below reads two of those tables to
+fill the game's content profile (character name, rank, ranking points) in the
+PlayOnline Viewer.
+
+## Where the data lives
+
+Every store is a set of tables in the core's database, created by this
+repository's migrations (`tools/doc_migrations/`, versions 5001 and up) when
+the responder starts. Until this release each was a JSON file on the logs
+volume:
+
+| old file | tables |
+| --- | --- |
+| `doc-characters.json` | `doc_character` |
+| `doc-ip-members.json` | `doc_ip_member` |
+| `doc-shop.json` | `doc_wallet` |
+| `doc-gear.json` | `doc_gear` |
+| `doc-playtime.json` | `doc_playtime` |
+| `doc-stats.json` | `doc_career`, `doc_week`, `doc_week_closed` |
+| `doc-rankings.json` | `doc_rank_char`, `doc_rank_unit` |
+| `doc-units.json` | `doc_unit`, `doc_unit_enlist` |
+
+Each table keeps one row per key of the old file, so an old file loads as it
+was. The responder reads its stores when it starts, so bring the old files
+over while it is stopped, with its own image (the same compose flags as the
+bring-up below, `run` in place of `up`):
+
+```
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+    run --rm --entrypoint python doc docdb.py import stats /logs/doc-stats.json
+```
+
+with the store names `characters`, `ip_members`, `shop`, `gear`, `playtime`,
+`stats`, `rankings` and `units`. An import refuses a store that already holds
+rows. `python docdb.py export <store>` prints a store in the old file's shape.
+The responder keeps no live state outside its own process, so it does not use
+the core's Valkey. `doc-sessions-live.json` on the logs volume, the deploy
+gate's count of connected consoles, is still a file.
 
 ## The title plugin (the Viewer's profile)
 
@@ -76,13 +114,15 @@ checked out beside it:
 docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.title.yml     up -d --build login authsess
 ```
 
-Without it the game plays the same; only the Viewer's profile screen for a Dirge Content ID stays empty. The plugin reads the character and stats files the responder keeps on the core's logs volume. To run several titles, build each title image on the previous
+Without it the game plays the same; only the Viewer's profile screen for a Dirge Content ID stays empty. The plugin reads the `doc_character` and `doc_career` tables from the core's database. To run several titles, build each title image on the previous
 one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
 `.env`, for example `POL_TITLES=tmtitle,doctitle`.
 
 ## Prerequisites
 
-- The core lobby stack (OpenLobby) running on the same Docker host
+- The core lobby stack (OpenLobby) checked out beside this repository, its
+  image built (`openlobby:latest`), and its stack running on the same Docker
+  host
 - Docker with Compose v2
 - A Japanese Dirge of Cerberus disc with the online mode, and a PlayOnline
   install on a PlayStation 2 hard disk (real hardware, or an emulator that
@@ -94,14 +134,25 @@ one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
 
 ```
 cp .env.example .env        # set POL_ADVERTISE to your server's LAN/VPN IP
-docker compose up -d --build
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+    up -d --build doc
 ```
+
+`docker-compose.yml` is an override of the core's compose file: the service
+joins the core's project and network and starts once its PostgreSQL is
+healthy. The image is built on the core image (`OPENLOBBY_IMAGE`, default
+`openlobby:latest`).
 
 Without building, from the image published to
 `ghcr.io/prettyopenlobby/crystaldirge` on every push:
 
 ```
-docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+    -f docker-compose.ghcr.yml up -d doc
 ```
 
 `POL_ADVERTISE` must be the address the console reaches this host on; it is
@@ -177,7 +228,12 @@ packets of every mode and length round-tripped), every measured wire offset
 the responder ships, the character store, careers, play time, NPCs, the
 shop, rankings, units, gear, trade, missions, the novice mark, the lobby item
 quests, rewards, magic, items, the field, chat and the arena data reader.
-Nothing opens a socket.
+Nothing opens a socket. The stores are tables, so the suites need the core's
+`polcore` (the core checked out beside this repository, or `OPENLOBBY_DIR`
+naming it), the `psycopg[binary]` and `psycopg-pool` packages, and a
+PostgreSQL server for throwaway databases: Docker, where the core's
+`tools/pgtest.py` starts one, or `POL_TEST_DATABASE_URL`. Without one a store
+suite reports SKIP; `POL_TEST_REQUIRE_DB=1` makes that a failure.
 
 The `tools/doc_*_e2e.py` scripts and `tests/test_doc_session_nat.py` go one
 step further: each starts a real `docudp.py` on a loopback port and drives it
