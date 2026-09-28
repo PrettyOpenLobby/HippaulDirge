@@ -1936,6 +1936,50 @@ def main():
           and struct.unpack_from("<H", rl, D.CKSUM_OFF)[0] == D.cksum(
               bytearray(rl[:D.CKSUM_OFF]) + bytes(2) + bytearray(rl[D.CKSUM_OFF + 2:])))
 
+    # 2026-09-28: a shot / damage whose mode-4 header does not decrypt is named
+    # by its body (the live shapes: one hit = count + a 16-byte entry)
+    _me, _foe = 0x2a664, 0x41018
+    _mem = [_me, _foe]
+    def m4(body):
+        pkt = bytearray(os.urandom(D.BODY_OFF)) + body
+        pkt[0:4] = b"\x04\x04" + struct.pack("<H", len(pkt))
+        return bytes(pkt)
+    m4d = m4(struct.pack("<IIiII", 1, _foe, 10, _me, 0x27))
+    check("unreadable 44-byte mode-4 {1, victim, dmg, me, shot} is a DAMAGE",
+          len(m4d) == 44 and D.p2p_battle_type_mode4(m4d, None, _me, _mem) == 113)
+    _slots = bytes([0x1e, 0x30, 8, 0x31, 6, 0x32, 1, 0x33, 10, 0x34, 2, 0x30,
+                    0x21, 0x43, 0, 0, 0x43, 3, 0xff, 0x3f, 0x27, 0, 0, 0])
+    m4s = m4(_slots + struct.pack("<6f", 107.5, -12.3, 12.3, 92.6, -14.9, 13.9)
+             + struct.pack("<II", 0x190b827b, 0xFFFFFFFF))
+    check("unreadable 80-byte mode-4 with the '0'..'4' slot table is a SHOT",
+          len(m4s) == 80 and D.p2p_battle_type_mode4(m4s, None, _me, _mem) == 112)
+    check("TWIN: a readable header is p2p_battle_type()'s, not the body namer's",
+          D.p2p_battle_type_mode4(m4d, {"plain": m4d}, _me, _mem) is None)
+    check("TWIN: no battle room, no naming",
+          D.p2p_battle_type_mode4(m4d, None, _me, ()) is None)
+    check("TWIN: a keepalive-shaped body (count 1, zeros) is not a DAMAGE",
+          D.p2p_battle_type_mode4(m4(struct.pack("<I", 1) + bytes(16)),
+                                  None, _me, _mem) is None)
+    check("TWIN: damage by SOMEONE ELSE is not this sender's hit",
+          D.p2p_battle_type_mode4(m4(struct.pack("<IIiII", 1, _foe, 10, 0x5555, 3)),
+                                  None, _me, _mem) is None)
+    check("TWIN: a victim outside the room is not a hit",
+          D.p2p_battle_type_mode4(m4(struct.pack("<IIiII", 1, 0x7777, 10, _me, 3)),
+                                  None, _me, _mem) is None)
+    check("TWIN: an 80-byte body without the slot table is not a SHOT",
+          D.p2p_battle_type_mode4(m4(bytes(56)), None, _me, _mem) is None)
+    _sd = D.synth_p2p_inner(m4d, 113, _me)
+    _sp = _sd["plain"]
+    check("synth 113 header: type, flags 8, sender +16, victim +20, body verbatim",
+          (_sp[8], _sp[9]) == (113, 8)
+          and struct.unpack_from("<II", _sp, 16) == (_me, _foe)
+          and _sp[D.BODY_OFF:] == m4d[D.BODY_OFF:]
+          and struct.unpack_from("<H", _sp, D.CKSUM_OFF)[0] == D.cksum(
+              bytearray(_sp[:D.CKSUM_OFF]) + bytes(2) + bytearray(_sp[D.CKSUM_OFF + 2:])))
+    check("synth 112 header: target -1 (everyone)",
+          struct.unpack_from("<I", D.synth_p2p_inner(m4s, 112, _me)["plain"], 20)[0]
+          == 0xFFFFFFFF)
+
     # request 30: killer at body+8 (wire+32), victim = inner u32_20 (wire+20)
     r30 = bytearray(D.BODY_OFF + 12)
     struct.pack_into("<H", r30, D.BODY_OFF, 30)
