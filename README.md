@@ -159,6 +159,13 @@ with synthetic client datagrams (a battle from table to result screen, the
 chat scopes, the mission supplies, two consoles behind one address, and so
 on). Run any of them with `python <script>` from its own directory.
 
+`python tools/doc_run_all.py --e2e` runs all of them one after another, which
+takes several minutes, and `--all` runs both groups. The default run leaves
+them out. A script that needs arena data you have not generated (see "Arena
+data") prints a line starting with SKIP and is counted as skipped. The
+scripts use fixed loopback ports, so two runs at the same time on one
+machine get in each other's way.
+
 ## What is not included, and why
 
 - No game data. The NPC placement table and the arena data (above) are the

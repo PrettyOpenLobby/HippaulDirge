@@ -20,3 +20,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tools/doc_run_all.py
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: loopback end-to-end scripts
+        run: python tools/doc_run_all.py --e2e
+        env:
+          TEMP: ${{ runner.temp }}
