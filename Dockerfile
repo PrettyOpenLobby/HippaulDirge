@@ -1,10 +1,23 @@
-# The Dirge of Cerberus world responder. One process, one UDP port (55040),
-# standard library only; docker-compose.yml passes the argument set.
-# Digest pinned 2026-09-15; bump deliberately, not by surprise.
-FROM python:3.12-slim@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79
+# The Dirge of Cerberus world responder. One process, one UDP port (55040);
+# docker-compose.yml passes the argument set.
+#
+# Built on the OpenLobby core image, which carries polcore (the PostgreSQL
+# and Valkey layer every service shares), the core's account code the
+# responder reads the POL sessions through, and their drivers. Build the core
+# first, or point OPENLOBBY_IMAGE at the image you use.
+ARG OPENLOBBY_IMAGE=openlobby:latest
+FROM ${OPENLOBBY_IMAGE}
 
 WORKDIR /app
 COPY tools/ /app/
+
+RUN python - <<'EOF'
+import os, sys
+if not os.path.isdir("polcore") or not os.path.isfile("accounts.py"):
+    sys.exit("the base image has no polcore/ or accounts.py - build it FROM the OpenLobby image")
+if not os.path.isdir("doc_migrations"):
+    sys.exit("tools/doc_migrations/ is missing from the build context")
+EOF
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 55040/udp

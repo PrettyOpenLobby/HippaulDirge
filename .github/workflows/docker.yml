@@ -45,6 +45,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          # built on the published OpenLobby core image (polcore and its drivers)
+          build-args: |
+            OPENLOBBY_IMAGE=ghcr.io/prettyopenlobby/openlobby:latest
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

@@ -1,36 +1,49 @@
 # Dirge of Cerberus (the 2006 PlayStation 2 online mode) for the OpenLobby
-# core. Requires the core lobby stack (openlobby) running on the same Docker
-# host: this compose joins its data volume (read-only, for the account and
-# session tables that name the player at each console) and its logs volume
-# (where the character, career, shop, unit and ranking stores live, and where
-# the core's lobby reads the character name and rank for the member profile).
+# core. This file is an OVERRIDE of OpenLobby's compose file, not a stack of
+# its own: the responder runs in OpenLobby's compose project, beside the
+# core, on its network, with its PostgreSQL database (the account and session
+# tables that name the player at each console, and this title's own doc_*
+# tables: characters, wallets, gear, play time, careers, rankings and units)
+# and its logs volume. With both repositories checked out side by side, from
+# this directory:
 #
 #   cp .env.example .env      # set POL_ADVERTISE to your server's LAN/VPN IP
-#   docker compose up -d --build
+#   docker compose --project-directory ../openlobby \
+#       --env-file ../openlobby/.env --env-file .env \
+#       -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+#       up -d --build doc
 #
-# The console reaches this service by name: the core's DNS answers
-# kel-1001.pol.com with the advertised address, and the game dials UDP 55040.
-
-volumes:
-  pol-data:
-    external: true
-    name: openlobby_pol-data
-  pol-logs:
-    external: true
-    name: openlobby_pol-logs
+# (OpenLobby's .env first, so its POL_DB_PASSWORD reaches the connection
+# string below; this repository's .env second, for the POL_DOC_* knobs.)
+#
+# Build the core image first (openlobby:latest, `docker compose build` in
+# ../openlobby) or point OPENLOBBY_IMAGE at the one you use: this image is
+# built on it. The console reaches this service by name: the core's DNS
+# answers kel-1001.pol.com with the advertised address, and the game dials
+# UDP 55040.
+#
+# Relative paths below resolve against ../openlobby (the project directory).
 
 services:
   doc:
     image: crystaldirge:latest
-    build: .
+    build:
+      context: ../crystaldirge
+      args:
+        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build
     restart: unless-stopped
     ports:
       - "55040:55040/udp"
     volumes:
-      - pol-data:/data:ro
       - pol-logs:/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
+      # OpenLobby's PostgreSQL (its docs/database.md). The responder's tables
+      # are CrystalDirge's own migrations (doc_*), applied at start.
+      POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
       # The address handed to a client is chosen per client (docworld/advertise.py
       # host_for): POL_ADVERTISE_PUBLIC for a peer with a global address,
       # POL_ADVERTISE_LAN for a private-range peer. Empty = POL_ADVERTISE.
@@ -38,7 +51,7 @@ services:
       POL_ADVERTISE_LAN: "${POL_ADVERTISE_LAN:-}"
     # The argument set below is the one the private deployment runs; each
     # flag is documented in docudp.py --help. The addresses are the advertised
-    # host; the stores are files under /logs.
+    # host; the stores are PostgreSQL tables (docdb.py).
     command:
       - "--mode=subtype"
       - "--subtype=4"
@@ -56,8 +69,8 @@ services:
       - "--lobby-chara-allow=16"
       # persistent per-player characters, keyed by the core member signed in
       # at the console's address (the login service's session table)
-      - "--chara-store=/logs/doc-characters.json"
-      - "--accounts-db=/data/accounts.db"
+      - "--chara-store=on"
+      - "--pol-members=on"
       - "--self-costume-auto"
       - "--self-costume-file=/logs/doc-self-costume.txt"
       - "--lobby-spawn=east"
@@ -84,10 +97,10 @@ services:
       - "--npc-spawn=${POL_DOC_NPC_SPAWN:-off}"
       - "--npc-spawn-only=${POL_DOC_NPC_SPAWN_ONLY:-}"
       - "--npc-arena=${POL_DOC_NPC_ARENA:-off}"
-      - "--rankings=/logs/doc-rankings.json"
-      - "--shop=/logs/doc-shop.json"
-      - "--units=/logs/doc-units.json"
-      - "--stats=/logs/doc-stats.json"
+      - "--rankings=on"
+      - "--shop=on"
+      - "--units=on"
+      - "--stats=on"
       # Mission Mode: the per-player mission ledger (the instructors grant the
       # rank exams into it; on/off), which situation a quest's arena loads
       # (QUEST:SITUATION pairs) and the enemy types a mission situation's NPC
