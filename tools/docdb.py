@@ -55,7 +55,21 @@ starts with `doc_`.
     python docdb.py migrate               apply what is pending
     python docdb.py status                CrystalDirge's migrations and their state
     python docdb.py export STORE          print a store as its old JSON file
-    python docdb.py import STORE FILE     load an old JSON file into an EMPTY store
+    python docdb.py import STORE FILE [--merge] [--dry-run]
+                                          load an old JSON file into the store
+
+`import` reads one old file into its store's tables, in one transaction, the
+way the other titles' importers do. Each key of the file (of each section,
+for a store with sections) is one row. An empty table takes every row. A
+table that already holds rows is refused (exit 2) when the file has keys it
+lacks, unless --merge is given, which adds only those keys; a key in both
+whose value differs keeps the table's value and is listed. A table that
+already holds every key prints "Nothing to import" and exits 0, so a second
+run is harmless. --dry-run prints the same report and writes nothing, not
+even the migrations. A file that cannot be read as a JSON object exits 1.
+A section the store does not have is listed and skipped. The values are
+written as every save writes them (docdb's own JSON text, keys sorted as
+the old files wrote them), and the rows go in in the file's key order.
 """
 import json
 import os
@@ -356,26 +370,140 @@ def export(name):
     return store(name).load()
 
 
-def import_file(name, path):
-    """Load an old JSON file into the store `name`, which must be empty.
-    Returns the number of rows written."""
-    st = store(name)
-    if st.count():
-        raise RuntimeError("store %r is not empty; refusing to import over it"
-                           % name)
+class _Rollback(Exception):
+    pass
+
+
+def _read_source(name, path):
+    """{table: [(key, value)]} in the file's key order, and [(what, why)]
+    skipped, from an old JSON file for the store `name`. Raises OSError or
+    ValueError when the file cannot be read as that store's file."""
+    spec = STORES[name]
     with open(path, "r", encoding="utf-8") as f:
         doc = json.load(f)
     if not isinstance(doc, dict):
         raise ValueError("%s does not hold a JSON object" % path)
-    if isinstance(st, Sections):
-        doc = {sec: doc.get(sec) or {} for sec in st.tables}
-    if not st.save(doc):
-        raise RuntimeError("the import of %s did not reach the database" % path)
-    return st.count()
+    skipped = []
+    if not isinstance(spec, dict):
+        return {spec: [(str(k), v) for k, v in doc.items()]}, skipped
+    rows = {}
+    for sec, table in spec.items():
+        part = doc.get(sec) or {}
+        if not isinstance(part, dict):
+            raise ValueError("%s: section %r holds a %s, not an object"
+                             % (path, sec, type(part).__name__))
+        rows[table] = [(str(k), v) for k, v in part.items()]
+    for sec in doc:
+        if sec not in spec:
+            skipped.append(("section %r" % sec, "the store has no table for it"))
+    return rows, skipped
+
+
+def import_file(name, path, merge=False, dry_run=False, out=print):
+    """Import an old JSON file into the store `name`. Returns the exit
+    status: 0 done, nothing to do or dry run; 1 the file or the database
+    failed; 2 refused, a table already holds rows and the file has keys it
+    lacks (without --merge). See the module docstring."""
+    try:
+        rows, skipped = _read_source(name, path)
+    except (OSError, ValueError) as exc:
+        out("error: cannot read %s: %s" % (path, exc))
+        return 1
+    out("import %s: %s" % (name, path))
+    for what, why in skipped:
+        out("  skipped %s: %s" % (what, why))
+    if not dry_run:
+        ensure_schema(log=lambda msg: out("  " + msg))
+    plans = []
+    status = None
+    try:
+        with db.transaction(lock="crystaldirge.import") as conn:
+            for table, items in rows.items():
+                exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
+                                      (table,)).fetchone()["ok"]
+                if not exists and not dry_run:
+                    raise RuntimeError("%s does not exist after the migrations"
+                                       % table)
+                have = {}
+                if exists:
+                    have = {r["key"]: r["data"] for r in conn.execute(
+                        "SELECT key, data::text AS data FROM %s" % table)}
+                new, same, differs = [], 0, []
+                for key, value in items:
+                    text = _dump(value)
+                    if key not in have:
+                        new.append((key, text))
+                    elif _dump(json.loads(have[key])) == text:
+                        same += 1
+                    else:
+                        differs.append(key)
+                plans.append((table, len(have), new, differs))
+                out("  %s: %d read, %d in the table%s, %d already there, %d to "
+                    "insert" % (table, len(items), len(have),
+                                "" if exists else " (not created yet)",
+                                same + len(differs), len(new)))
+                for key in differs:
+                    out("    kept the table's row, the file's differs: %s" % key)
+            if any(new and target for _t, target, new, _d in plans) and not merge:
+                status = "refused"
+                raise _Rollback()
+            if dry_run:
+                status = "dry-run"
+                raise _Rollback()
+            written = 0
+            for table, _target, new, _d in plans:
+                for key, text in new:
+                    written += conn.execute(
+                        "INSERT INTO %s (key, data, updated_at) VALUES "
+                        "(%%s, %%s::json, now()) ON CONFLICT (key) DO NOTHING"
+                        % table, (key, text)).rowcount
+            status = "done" if written else "nothing"
+    except _Rollback:
+        pass
+    except errors() + (RuntimeError,) as exc:
+        out("FAILED, rolled back: %s" % exc)
+        return 1
+    if status == "refused":
+        out("REFUSED: %s already holds rows. Nothing was written. Run again "
+            "with --merge to add only the keys it lacks."
+            % ", ".join(t for t, target, new, _d in plans if new and target))
+        return 2
+    if status == "dry-run":
+        out("Dry run: nothing was written.")
+    elif status == "nothing":
+        out("Nothing to import: the store already holds every key. "
+            "Nothing was changed.")
+    else:
+        out("Done: %d row(s) written." % written)
+    return 0
+
+
+def _import_main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="python docdb.py import",
+                                 description="Import an old JSON store file "
+                                 "(uses POL_DATABASE_URL).")
+    ap.add_argument("store", choices=list(STORES))
+    ap.add_argument("source")
+    ap.add_argument("--merge", action="store_true",
+                    help="add only the keys the tables lack")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would be imported; write nothing")
+    args = ap.parse_args(argv)
+    try:
+        return import_file(args.store, args.source, merge=args.merge,
+                           dry_run=args.dry_run)
+    except errors() as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        db.close()
 
 
 def _main(argv):
     cmds = ("migrate", "status", "export", "import")
+    if argv and argv[0] == "import":
+        return _import_main(argv[1:])
     if not argv or argv[0] not in cmds:
         print(__doc__)
         return 2
@@ -389,15 +517,12 @@ def _main(argv):
                 row = have.get(version)
                 print("%-32s %s" % (name, "applied %s" % row["applied_at"]
                                     if row else "pending"))
-        elif argv[0] == "export":
-            print(json.dumps(export(argv[1]), indent=1, sort_keys=True))
         else:
-            n = import_file(argv[1], argv[2])
-            print("imported %s into %s: %d row(s)" % (argv[2], argv[1], n))
+            print(json.dumps(export(argv[1]), indent=1, sort_keys=True))
         return 0
     except (IndexError, KeyError):
-        print("usage: docdb.py export STORE | import STORE FILE; stores: %s"
-              % ", ".join(STORES), file=sys.stderr)
+        print("usage: docdb.py export STORE | import STORE FILE [--merge] "
+              "[--dry-run]; stores: %s" % ", ".join(STORES), file=sys.stderr)
         return 2
     except errors() + (RuntimeError, ValueError, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)

@@ -91,12 +91,15 @@ bring-up below, `run` in place of `up`):
 docker compose --project-directory ../openlobby \
     --env-file ../openlobby/.env --env-file .env \
     -f ../openlobby/docker-compose.yml -f docker-compose.yml \
-    run --rm --entrypoint python doc docdb.py import stats /logs/doc-stats.json
+    run --rm --no-deps --entrypoint python doc docdb.py import stats /logs/doc-stats.json
 ```
 
 with the store names `characters`, `ip_members`, `shop`, `gear`, `playtime`,
-`stats`, `rankings` and `units`. An import refuses a store that already holds
-rows. `python docdb.py export <store>` prints a store in the old file's shape.
+`stats`, `rankings` and `units`. An import only reads the file and runs in
+one transaction. It refuses a store that already holds rows when the file
+has keys the store lacks, unless given `--merge`, which adds only those and
+lists the keys whose value differs; a second run prints "Nothing to import".
+`--dry-run` prints the same report and writes nothing. `python docdb.py export <store>` prints a store in the old file's shape.
 The one thing the responder keeps in the core's Valkey is the deploy gate's
 count of connected consoles, published every 10 seconds through the core's
 `live_sessions.py` as `live:doc` (it used to be `doc-sessions-live.json` on

@@ -85,8 +85,9 @@ the numbers 5001 to 5999 and every table it creates starts with `doc_`. A
 migration that has shipped is never edited: a change to a table, or a new
 store, is a new numbered file, and a new store is also added to
 `docdb.STORES`. A server that still has the old JSON files loads each one
-into its empty store with `python docdb.py import STORE FILE`, run from
-`tools/`.
+into its store with `python docdb.py import STORE FILE [--merge]
+[--dry-run]`, run from `tools/`, which keeps the contract of the other
+titles' importers (the module docstring has it).
 
 `live_sessions.py`, which publishes the count of connected consoles the
 deploy gate reads (`live:doc` in the core's Valkey), is the core's module and
