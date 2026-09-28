@@ -568,37 +568,25 @@ def main():
     sessions = {}            # (src IP, src port) -> Session
 
     # sec 4ha: PUBLISH THE POPULATION, ON A THREAD. Each session-carrying
-    # service writes `<dir>/<service>-sessions-live.json` = {count, stamp}, so a
-    # deploy script can defer a restart while someone is live and a status bot
-    # can show the count (POL_DOC_LIVE_DIR, default /logs).
+    # service publishes {count, stamp} through the core's live_sessions.py
+    # (`live:<service>` in the core's Valkey), so a deploy script can defer a
+    # restart while someone is live and a status bot can show the count. This
+    # service is "doc": `python live_sessions.py count doc`. It used to be
+    # doc-sessions-live.json on the logs volume.
     # WARNING: NOT on the packet loop, which is where this started. The loop blocks
     # in select() while nobody is connected, so the marker was written once at
     # startup and never again and a reader saw it go stale after a few minutes.
-    # A thread ticks whether or not anyone sends a packet, which is the whole
-    # point of a liveness marker.
-    # WARNING: /logs, NOT POL_DATA_DIR: /data is mounted READ-ONLY in this container,
-    # so the write failed silently there. /logs is the writable mount.
-    # This marker is the live_sessions.py contract ({count, stamp} per
-    # service, read by the deploy gate), so it stays a file until that
-    # contract moves; the player stores are in PostgreSQL (docdb.py).
-    def _publish_live_sessions():
-        import time as _t
-        while True:
-            try:
-                _lp = os.path.join(os.environ.get("POL_DOC_LIVE_DIR", "/logs"),
-                                   "doc-sessions-live.json")
-                _lt = "%s.tmp.%d" % (_lp, os.getpid())
-                with open(_lt, "w") as _lf:
-                    _lf.write('{"count": %d, "stamp": %f}'
-                              % (len(sessions), _t.time()))
-                os.replace(_lt, _lp)
-            except Exception:
-                pass                 # a status line is never worth an exception
-            _t.sleep(10.0)
-
-    import threading as _threading
-    _threading.Thread(target=_publish_live_sessions, name="doc-live-sessions",
-                      daemon=True).start()
+    # start_heartbeat's thread ticks whether or not anyone sends a packet, which
+    # is the whole point of a liveness marker.
+    # live_sessions.py is the core's module: the image is built FROM the
+    # OpenLobby image, and in a checkout it sits beside polcore, which docdb
+    # (imported above) has put on sys.path. A copy is never added here.
+    try:
+        import live_sessions as _live_sessions
+        _live_sessions.start_heartbeat("doc", lambda: len(sessions))
+    except Exception as _e:                           # noqa: BLE001
+        print("[live] WARN live-session heartbeat not started (%r)" % (_e,),
+              flush=True)
     current = [None]         # sec 4fq: the session of the packet in hand
     players = {}             # sec 4fr: charid -> {name, uid}, SHARED so
                              # each client is served the OTHER players

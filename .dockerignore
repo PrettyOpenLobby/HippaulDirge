@@ -1,0 +1,8 @@
+# The OpenLobby image this one builds on already has live_sessions.py, the
+# Valkey-backed version every service shares. `COPY tools/ /app/` must never
+# put an older copy over it, so none is sent even if one turns up here.
+tools/live_sessions.py
+**/__pycache__
+**/*.pyc
+.git
+.env

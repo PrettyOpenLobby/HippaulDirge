@@ -97,9 +97,11 @@ docker compose --project-directory ../openlobby \
 with the store names `characters`, `ip_members`, `shop`, `gear`, `playtime`,
 `stats`, `rankings` and `units`. An import refuses a store that already holds
 rows. `python docdb.py export <store>` prints a store in the old file's shape.
-The responder keeps no live state outside its own process, so it does not use
-the core's Valkey. `doc-sessions-live.json` on the logs volume, the deploy
-gate's count of connected consoles, is still a file.
+The one thing the responder keeps in the core's Valkey is the deploy gate's
+count of connected consoles, published every 10 seconds through the core's
+`live_sessions.py` as `live:doc` (it used to be `doc-sessions-live.json` on
+the logs volume). `python live_sessions.py count doc`, run in the `doc`
+container, prints it.
 
 ## The title plugin (the Viewer's profile)
 
