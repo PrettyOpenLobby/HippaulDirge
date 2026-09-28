@@ -28,6 +28,8 @@ SUITES = [
     ("doc_kelcrypt",   [PY, "doc_kelcrypt.py", "--selftest"]),
     # every MEASURED byte offset the responder ships, checked on the wire
     ("doc_udp",        [PY, "doc_udp_test.py"]),
+    # docudp.py forwards every read and write to the docworld module that owns it
+    ("docudp_facade",  [PY, "facade_rebind_check.py"]),
     # the per-player character store: parse a REGISTER, persist it, serve it
     ("doc_charastore", [PY, "doc_charastore.py"]),
     # career stats: the battle tally, the medal rules, the exam ladder
