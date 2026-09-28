@@ -30,7 +30,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D                                                 # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as DS                                             # noqa: E402
 from doc_battle_e2e import (world_req, gs_req, field_req, notifies,  # noqa: E402
                             check, FAILS)
@@ -73,7 +73,7 @@ def run(twin):
     t = "[twin] " if twin else ""
     res_a = res_b = []
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check(t + "docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", PORT)
         ca = udp_socket()

@@ -19,6 +19,7 @@ would on Linux.
     sock = udp_socket()          # in place of socket.socket(AF_INET, SOCK_DGRAM)
 """
 import socket
+import time
 
 
 class E2ESocket(socket.socket):
@@ -42,6 +43,32 @@ class E2ESocket(socket.socket):
 def udp_socket():
     """A fresh IPv4 UDP socket for a loopback test client."""
     return E2ESocket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+#: what docudp.py prints once its socket is bound
+LISTENING = "[docudp] listening on"
+
+
+def wait_listening(log, srv, count=1, timeout=30.0):
+    """Wait until the docudp.py started as `srv`, writing to the file object
+    (or path) `log`, has bound its port: its log holds `count` listening
+    lines (2 after a restart into the same log). A datagram sent before that
+    is lost, and on a loaded machine the start can take several seconds, so a
+    fixed sleep is not enough. False if the server exited or `timeout`
+    passed first."""
+    path = getattr(log, "name", log)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if srv.poll() is not None:
+            return False
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                if f.read().count(LISTENING) >= count:
+                    return True
+        except OSError:
+            pass
+        time.sleep(0.05)
+    return False
 
 
 def selftest():

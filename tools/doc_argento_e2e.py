@@ -27,7 +27,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D           # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening, LISTENING  # noqa: E402
 import doc_npc as N          # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
 
@@ -45,8 +45,11 @@ def run(stats, log, extra=()):
             "--bt-no-onfly-reserve", "--session-idle-drop=0",
             "--stats", stats] + list(extra)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    # every run writes to the same log: wait for THIS start's listening line
+    with io.open(log.name, encoding="utf-8", errors="replace") as f:
+        started = f.read().count(LISTENING)
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=HERE)
-    time.sleep(2.5)
+    wait_listening(log, srv, count=started + 1)
     check("docudp is up", srv.poll() is None)
     return srv
 

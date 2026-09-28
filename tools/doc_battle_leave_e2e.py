@@ -29,7 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41556"))
 A_CID = 0x0002A664
@@ -94,7 +94,7 @@ def run(tag, drive, extra=()):
                            cwd=HERE)
     listed = None
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("[%s] docudp is up" % tag, srv.poll() is None)
         ca = udp_socket()
         ca.bind(("127.0.0.1", 0))
