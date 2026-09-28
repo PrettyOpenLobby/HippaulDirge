@@ -916,7 +916,8 @@ def main():
     def gs_table_state(key):
         return gs_tables.setdefault(key, {"teams": {}, "shown": {},
                                           "ready_at": None, "dist": False,
-                                          "why": None, "auto_at": None})
+                                          "why": None, "auto_at": None,
+                                          "brief_end": None})
 
     # sec 4gk addendum 5: player-to-player TRADE (doc_trade.py). The server is
     # a relay: offers go to the partner as 42/44, and when both have confirmed
@@ -1158,7 +1159,20 @@ def main():
         # team -- seat them on the smaller side so the distribution can go out
         if (a.gs_real_dist and not g["dist"] and g.get("auto_at")
                 and time.time() >= g["auto_at"]):
-            if len(members) >= 2 and len(live) < len(members):
+            if len(members) == 1 and a.gs_solo_dist:
+                # 2026-09-24: a SOLO player who never stepped on a team space
+                # sent no request 31, so the post-join timer (the only solo
+                # start) was never armed and the countdown ended in nothing
+                g["auto_at"] = None
+                _ms1 = live.get(members[0])
+                if (_ms1 is not None and not _ms1.gs_join_deadline[0]
+                        and battle_of(members[0]) is None):
+                    _ms1.gs_join_src[0] = _ms1.gs_src[0]
+                    _ms1.gs_join_deadline[0] = time.time()
+                    print("  [roster] table %d: briefing time is up -- SOLO "
+                          "0x%x never chose a team, starting on team 0"
+                          % (key, members[0]), flush=True)
+            elif len(members) >= 2 and len(live) < len(members):
                 # not everyone is in the briefing room yet: look again in 5 s
                 # (the deadline is also the timer loop's wake-up, so it must
                 # move or the loop spins)
@@ -1244,10 +1258,12 @@ def main():
             return
         if g["ready_at"] is None:
             g["ready_at"] = now
+            _due = teamdist.gs_dist_due(g, a.gs_real_dist_settle)
             print("  [roster] table %d READY -- the distribution goes out in "
-                  "%.0f s unless someone changes side" % (key, a.gs_real_dist_settle),
-                  flush=True)
-        if now - g["ready_at"] < a.gs_real_dist_settle:
+                  "%.0f s%s unless someone changes side"
+                  % (key, _due - now, " (the end of the briefing countdown)"
+                     if _due > now + a.gs_real_dist_settle else ""), flush=True)
+        if now < teamdist.gs_dist_due(g, a.gs_real_dist_settle):
             return
         dist = teamdist.gs_real_distribution(g["teams"], members)
         for obs, ms in live.items():
@@ -4075,10 +4091,24 @@ def main():
                     if not gs_join_deadline[0]:
                         # sec 4fn: arm ONCE per 38 -- the repeated 31s used to
                         # push the deadline out forever.
-                        gs_join_deadline[0] = time.time() + a.gs_battle_after_join
+                        # 2026-09-24: with a Briefing Time, at its zero (25 s
+                        # after the first step used to start a 5:00 briefing
+                        # at 0:35)
+                        _jk = (bt_store.table_of(seen_charid[0])
+                               if seen_charid[0] else None)
+                        _jbe = (gs_tables.get(_jk, {}).get("brief_end")
+                                if _jk is not None else None)
+                        if _jbe:
+                            gs_join_deadline[0] = max(
+                                _jbe, time.time() + a.gs_real_dist_settle)
+                        else:
+                            gs_join_deadline[0] = (time.time()
+                                                   + a.gs_battle_after_join)
                         print("  [gs] battle start armed for %.0f s after this "
-                              "join (arm-once, sec 4fn)"
-                              % a.gs_battle_after_join, flush=True)
+                              "join (arm-once, sec 4fn%s)"
+                              % (gs_join_deadline[0] - time.time(),
+                                 ", the end of the briefing" if _jbe else ""),
+                              flush=True)
                     else:
                         print("  [gs] repeat join -- battle start already armed, "
                               "%.0f s left"
@@ -5936,9 +5966,22 @@ def main():
                                 # 2026-09-23: the briefing countdown's end =
                                 # the record's Briefing Time, else the knob
                                 _brec = bt_store.record(_sk)
-                                _bsec = (float(_brec[tablerecords.BT_OFF_BRIEFING]) * 60.0
+                                _rsec = (float(_brec[tablerecords.BT_OFF_BRIEFING])
+                                         * a.gs_briefing_minute
                                          if _brec and len(_brec) > tablerecords.BT_OFF_BRIEFING
-                                         else 0.0) or a.gs_auto_team_after
+                                         else 0.0)
+                                _bsec = _rsec or a.gs_auto_team_after
+                                # 2026-09-24: the client counts wire+111 minutes
+                                # down from this 38 (lobby 0x00ada55c) and
+                                # does nothing at zero -- the start is ours, at
+                                # the zero it shows. 0 = None: no countdown drawn.
+                                if _rsec and a.gs_briefing_clock:
+                                    gs_table_state(_sk)["brief_end"] = (
+                                        time.time() + _rsec + 1.0)
+                                    print("  [start-all] table %d: briefing "
+                                          "countdown %.0f s -- the battle "
+                                          "starts when it reaches 0"
+                                          % (_sk, _rsec), flush=True)
                                 if a.gs_auto_team_after >= 0:
                                     gs_table_state(_sk)["auto_at"] = (
                                         time.time() + _bsec + 2.0)
