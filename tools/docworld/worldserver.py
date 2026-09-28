@@ -6033,6 +6033,13 @@ def main():
                                          * a.gs_briefing_minute
                                          if _brec and len(_brec) > tablerecords.BT_OFF_BRIEFING
                                          else 0.0)
+                                # 2026-09-28: a SOLO table has nobody to wait
+                                # for, so it keeps the old start (the post-join
+                                # timer). Holding it for a 5:00 Briefing Time
+                                # read as "stuck in briefing" (Beginner's Course
+                                # I/II, live 09-28: three tries, left at ~4:20).
+                                if not _others:
+                                    _rsec = 0.0
                                 _bsec = _rsec or a.gs_auto_team_after
                                 # 2026-09-24: the client counts wire+111 minutes
                                 # down from this 38 (lobby 0x00ada55c) and

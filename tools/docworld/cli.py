@@ -1226,8 +1226,9 @@ def build_parser():
                     action="store_false", default=True,
                     help="2026-09-24: do NOT hold the battle start for the "
                          "table's Briefing Time (wire+111 minutes). By default "
-                         "a table with one starts when the countdown the "
-                         "players see reaches 0; this restores the old start "
+                         "a table with one and two or more seated players "
+                         "starts when the countdown the players see reaches "
+                         "0 (a solo table never waits for it); this restores the old start "
                          "(ready + --gs-real-dist-settle, solo "
                          "--gs-battle-after-join after the first team step).")
     ap.add_argument("--gs-no-rebalance", dest="gs_rebalance",
