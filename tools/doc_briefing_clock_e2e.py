@@ -10,9 +10,12 @@ briefing shortened by --gs-briefing-minute=6 (so the countdown is 6 s):
 
   1. two players on opposite teams at once -> kind 20 NOT before 6 s, then yes
   2. TWIN, --gs-no-briefing-clock          -> kind 20 within ~2 s (the old bug)
-  3. solo, steps on a team at once        -> kind 20 at the countdown, not the
-                                             2 s --gs-battle-after-join
-  4. solo, NEVER steps on a team          -> still starts at the countdown
+  3. solo, steps on a team at once        -> kind 20 2 s after the step
+                                             (--gs-battle-after-join): a solo
+                                             table does not wait for the
+                                             countdown (live 09-28, "stuck in
+                                             briefing" on Beginner's Course)
+  4. solo, NEVER steps on a team          -> still starts (auto-team)
   5. two players BOTH on team 0            -> rebalanced at 0, kind 20
   6. TWIN, --gs-no-rebalance               -> stuck, no kind 20 (the stall)
 
@@ -155,15 +158,17 @@ def main():
 
     print("run 3: solo, steps on a team at once")
     text, ta, _, lp = run("solo", solo=True)
-    check("solo: kind 20 at the countdown, not 2 s after the step",
-          ta is not None and BRIEF_S <= ta < BRIEF_S + 3, fmt(ta))
+    check("log: a solo Start holds no briefing countdown",
+          "briefing countdown" not in text, lp)
+    check("solo: kind 20 ~2 s after the step, well before the countdown",
+          ta is not None and ta < BRIEF_S - 2, fmt(ta))
 
     print("run 4: solo, NEVER steps on a team")
     text, ta, _, lp = run("solo_nostep", solo=True, step=False, span=13.0)
     check("log: the solo player was started without a team",
           "SOLO 0x%x never chose a team" % E.A_CID in text, lp)
-    check("solo, no step: kind 20 still arrives after the countdown",
-          ta is not None and ta >= BRIEF_S, fmt(ta))
+    check("solo, no step: kind 20 still arrives",
+          ta is not None, fmt(ta))
 
     print("run 5: two players BOTH on team 0 (a one-sided table)")
     text, ta, tb, lp = run("onesided", b_team=0)
