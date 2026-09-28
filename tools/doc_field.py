@@ -21,7 +21,7 @@ bzd files, 2026-09-26):
 doc_item_generators.json = {zone: {"sets": {i: [[item, qty, weight], ..]},
 "situations": {sit: [[x, y, z, set], ..]}}}. That table is the arenas' own
 level data, so it is not shipped here: put one read out of your own copy
-beside this module. Without it no generator places anything (the field
+beside this module (tools/doc_extract_arena.py writes it). Without it no generator places anything (the field
 still carries the players' own drops and the capsules).
 
 The field itself (slots, kind 10/11, pick-ups) is docudp's; this module only

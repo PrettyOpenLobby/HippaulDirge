@@ -42,7 +42,7 @@ def load_mission_spawns(path=None):
     from doc_mission_spawns.json: the mission controllers' spawn nodes out of
     the arena files of patch 20060124_3. That is the game's level data and is
     not shipped here; put a table read out of your own copy beside this
-    module. {} when absent (the mission NPCs then have no spawn points)."""
+    module (tools/doc_extract_arena.py writes it). {} when absent (the mission NPCs then have no spawn points)."""
     import json
     path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "doc_mission_spawns.json")
