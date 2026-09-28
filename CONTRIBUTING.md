@@ -13,6 +13,9 @@ tools/
                      over the docworld package; see below
   docworld/          the responder, one module per concern (docworld/__init__.py lists them)
   doc_*.py           the game's rules and stores, one per feature (below)
+  docdb.py           the storage door: the stores' tables in the core's PostgreSQL
+  docpg.py           the throwaway test databases the self-tests use
+  doc_migrations/    the doc_* tables, numbered 5001-5999
   doctitle.py        the title plugin: the Viewer's profile, run inside the core
   doc_run_all.py     runs every self-test
   doc_*_e2e.py       end-to-end scripts that drive a real responder on loopback
@@ -75,6 +78,22 @@ use), `doc_field` (arena item generators), `doc_npc`, `doc_npc_spawn` and
 the Beginner mark), `doc_playtime`, `doc_reward`, `doc_trade`, `doc_chat`,
 and `doc_kelcrypt` (the world-channel cipher).
 
+The per-player stores are tables in the core's PostgreSQL database, reached
+through `tools/docdb.py`, whose docstring maps each store to its tables. The
+tables come from the migrations in `tools/doc_migrations/`. CrystalDirge owns
+the numbers 5001 to 5999 and every table it creates starts with `doc_`. A
+migration that has shipped is never edited: a change to a table, or a new
+store, is a new numbered file, and a new store is also added to
+`docdb.STORES`. A server that still has the old JSON files loads each one
+into its empty store with `python docdb.py import STORE FILE`, run from
+`tools/`.
+
+`live_sessions.py`, which publishes the count of connected consoles the
+deploy gate reads (`live:doc` in the core's Valkey), is the core's module and
+comes with the core. A copy of it is never added to this repository:
+`.dockerignore` keeps one out of the image, and the Dockerfile refuses an
+image whose `live_sessions` is not the core's.
+
 Reading order for a first visit:
 
 1. `docworld/worldserver.py`, the top of `main()` down to the loop: which
@@ -121,10 +140,20 @@ python check.py                # nothing private or proprietary in the tree
 python tools/doc_run_all.py    # every self-test; -k <substring> picks a few
 ```
 
-The end-to-end scripts are run one at a time, each from any directory:
-`python tools/doc_battle_e2e.py`, `python tests/test_doc_session_nat.py`, and
-so on. Each starts `docudp.py` on a loopback port and takes from a few
-seconds to two minutes.
+The self-tests import the core's `polcore` and account code, so the OpenLobby
+checkout sits beside this repository (`../openlobby`) or `OPENLOBBY_DIR`
+names it. They need the `psycopg[binary]` and `psycopg-pool` packages and a
+PostgreSQL server for their throwaway databases: Docker, where the core's
+`tools/pgtest.py` starts one, or `POL_TEST_DATABASE_URL` naming a server you
+run. Without a server a suite that uses a store reports SKIP.
+`POL_TEST_REQUIRE_DB=1`, which CI sets, turns that into a failure.
+
+`python tools/doc_run_all.py --e2e` runs the end-to-end scripts one after
+another, and `--all` runs both groups. Each script can also be run on its
+own, from any directory: `python tools/doc_battle_e2e.py`,
+`python tests/test_doc_session_nat.py`, and so on. Each starts `docudp.py` on
+a loopback port, gives it a throwaway database when it uses a store, and
+takes from a few seconds to two minutes.
 
 A new self-test is registered by hand in `tools/doc_run_all.py`. The list is
 explicit on purpose: a suite that is not registered does not run.
