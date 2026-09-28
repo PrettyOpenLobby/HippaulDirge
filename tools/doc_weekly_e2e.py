@@ -34,7 +34,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as S                                       # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, notifies, FAILS  # noqa: E402
 
@@ -101,7 +101,7 @@ def start(tag, stats, extra=()):
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
-    time.sleep(2.5)
+    wait_listening(log, srv)
     check("[%s] docudp is up" % tag, srv.poll() is None)
     return srv, log, log_path
 

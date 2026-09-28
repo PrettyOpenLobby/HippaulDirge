@@ -32,7 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D            # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_npc as N           # noqa: E402
 import doc_npcquests as Q     # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
@@ -106,7 +106,7 @@ def main():
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("docudp is up", srv.poll() is None)
         sock = udp_socket()
         sock.bind(("127.0.0.1", 0))
@@ -205,7 +205,7 @@ def wither_run():
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("[wither] docudp is up", srv.poll() is None)
         sock = udp_socket()
         sock.bind(("127.0.0.1", 0))
@@ -227,7 +227,7 @@ def wither_run():
         srv.wait(5)
         srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
                                env=env, cwd=HERE)
-        time.sleep(2.5)
+        wait_listening(log, srv, count=2)
         ev = walk_up(sock, Q.HIREN)
         check("[wither] a new seed in the bag -> 1554 TNK_AZUKE", ev == 1554,
               "%r" % ev)

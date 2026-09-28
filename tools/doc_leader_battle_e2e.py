@@ -27,7 +27,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D           # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
 
 PORT = int(os.environ.get("DOC_LEADER_E2E_PORT", "41558"))
@@ -68,7 +68,7 @@ def main():
     got = {A_CID: [], B_CID: [], C_CID: []}
     ever = {A_CID: [], B_CID: [], C_CID: []}     # every packet, never cleared
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", PORT)
         socks = {}

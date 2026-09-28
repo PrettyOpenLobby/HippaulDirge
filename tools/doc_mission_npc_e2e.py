@@ -31,7 +31,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D            # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_gear as G          # noqa: E402,F401
 from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
 
@@ -125,7 +125,7 @@ def main():
                            cwd=HERE)
     got = []                                  # (recv time, packet)
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("docudp is up", srv.poll() is None)
         c = udp_socket()
         c.bind(("127.0.0.1", 0))

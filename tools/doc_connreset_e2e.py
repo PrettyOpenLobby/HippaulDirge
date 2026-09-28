@@ -19,7 +19,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from doc_e2e_udp import udp_socket                  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS  # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41591"))
@@ -37,7 +37,7 @@ def main():
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", PORT)
         door = bytes(80)
