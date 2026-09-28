@@ -17,7 +17,6 @@ tools/
   doc_run_all.py     runs every self-test
   doc_*_e2e.py       end-to-end scripts that drive a real responder on loopback
   facade_rebind_check.py  proves the facade forwards reads and writes
-  split/             the tool and map that generated docworld/ from the single file
 tests/               newer end-to-end suites
 Dockerfile           the responder's image (copies tools/ to /app)
 Dockerfile.title     the core image plus doctitle.py
@@ -101,25 +100,18 @@ forwarding for every name.
 
 ### How docworld/ was made
 
-`docworld/` was generated from the single-file `docudp.py` by
-`tools/split/split_docudp.py`, following `tools/split/split_docudp_map.txt`
-(which module each top-level name goes to). Every function, class and global
-moved as it was, with the comments above it; references across modules are
-qualified with the owning module's name. The tool is deterministic, so a
-change made to the single file can be carried over by running it again on
-that file:
+`docworld/` was generated once from the single-file `docudp.py`, in commit
+8777752 ("split docudp.py into the docworld package"): every function, class
+and global moved as it was, with the comments above it, and references
+across modules were qualified with the owning module's name. The single file
+is retired and `docworld/` is the source now; edit the modules directly.
 
-```
-git show <last commit before the split>:tools/docudp.py > docudp_flat.py
-# apply the change to docudp_flat.py, then
-python tools/split/split_docudp.py --src docudp_flat.py \
-    --map tools/split/split_docudp_map.txt \
-    --out tools/docworld --facade tools/docudp.py
-```
-
-A new top-level name has to be added to the map first; the tool refuses to
-write while anything is unmapped. Once work lands in `docworld/` directly,
-this route closes.
+`tools/docudp.py` stays as the entry point the Dockerfile runs and as the
+facade described above, and `tools/facade_rebind_check.py` (run by
+`doc_run_all`) still guards it. A top-level name added to a `docworld`
+module is not reachable as `docudp.<name>` until it is added to the
+facade's `_OWNERS` table; the check reports every `D.<name>` a tool reads
+that the facade does not have.
 
 ## Running the checks
 
