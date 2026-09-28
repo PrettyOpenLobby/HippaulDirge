@@ -167,6 +167,7 @@ def battle(tag, map_idx, mode, base_hp, capsules=0, mission=0, touch=0,
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
     text = io.open(log_path, encoding="utf-8", errors="replace").read()
     return text, notes_of(got)

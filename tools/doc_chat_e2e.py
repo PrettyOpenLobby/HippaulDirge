@@ -255,6 +255,7 @@ def main():
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
         print("server log:", log_path)
     txt = io.open(log_path, encoding="utf-8", errors="replace").read()

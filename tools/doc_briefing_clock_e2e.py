@@ -123,6 +123,7 @@ def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1):
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
     text = io.open(log_path, encoding="utf-8", errors="replace").read()
     check("[%s] no traceback in the server log" % tag, "Traceback" not in text,

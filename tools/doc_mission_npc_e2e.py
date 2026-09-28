@@ -201,6 +201,7 @@ def main():
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
     text = io.open(log_path, encoding="utf-8", errors="replace").read()
     check("no traceback", "Traceback" not in text)
