@@ -294,9 +294,25 @@ def mission_npc_report(data):
     if data is None or len(data) < 88 or data[1] != 4:
         return None
     n = data[87]
+    if len(data) == 88 + 12 * n + 8:
+        # 2026-09-28: some reports carry one 8-byte trailer
+        # after the list ({u32 ammo item, u32 count}); they were dropped and
+        # a kill was counted a report or two late. Only NPC ids (bit 30)
+        # make one of these a report.
+        out = [struct.unpack_from("<IH", data, 88 + 12 * k) for k in range(n)]
+        return out if n and all(i & 0x40000000 for i, _h in out) else None
     if len(data) != 88 + 12 * n:
         return None
     return [struct.unpack_from("<IH", data, 88 + 12 * k) for k in range(n)]
+
+
+#: 2026-09-28: a mission NPC's kind 27 (control -> the player) goes out this
+#: long after its Add Npc (kind 15), so the two never land in one client frame.
+MISSION_CTL_GAP_S = 0.3
+#: ...and is sent again when the NPC is still missing from the player's 1 Hz
+#: report this long after, up to MISSION_CTL_TRIES sends in all.
+MISSION_CTL_CHECK_S = 3.0
+MISSION_CTL_TRIES = 4
 
 
 def gs_kill_report(inner, body):
