@@ -29,6 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D           # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_unit              # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
 
@@ -88,7 +89,7 @@ def main():
         dst = ("127.0.0.1", PORT)
         socks = {}
         for cid in (A_CID, B_CID, C_CID):
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s = udp_socket()
             s.bind(("127.0.0.1", 0))
             s.settimeout(0.5)
             socks[cid] = s

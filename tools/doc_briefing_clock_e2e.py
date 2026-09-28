@@ -29,6 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_battle_e2e as E                                  # noqa: E402
 
 FAILS = []
@@ -69,8 +70,8 @@ def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1):
         time.sleep(2.5)
         check("[%s] docudp is up" % tag, srv.poll() is None)
         dst = ("127.0.0.1", E.PORT)
-        ca = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        cb = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ca = udp_socket()
+        cb = udp_socket()
         for c in (ca, cb):
             c.bind(("127.0.0.1", 0))
             c.settimeout(0.05)

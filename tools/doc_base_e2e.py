@@ -24,7 +24,6 @@ out:
 """
 import io
 import os
-import socket
 import struct
 import subprocess
 import sys
@@ -33,6 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D   # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_stats as S   # noqa: E402
 from doc_battle_leave_e2e import (world_req, gs_req, check, FAILS, A_CID,  # noqa: E402
                                   drain, seal)
@@ -124,7 +124,7 @@ def battle(tag, map_idx, mode, base_hp, capsules=0, mission=0, touch=0,
     try:
         time.sleep(2.5)
         dst = ("127.0.0.1", PORT)
-        ca = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ca = udp_socket()
         ca.bind(("127.0.0.1", 0))
         ca.settimeout(0.5)
         rec = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,

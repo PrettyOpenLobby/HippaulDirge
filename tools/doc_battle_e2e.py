@@ -31,6 +31,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_field  # noqa: E402
 
 #: the arena item generators are the arenas' own data (doc_item_generators.json,
@@ -159,8 +160,8 @@ def run(accounts=False):
         time.sleep(2.5)
         check("docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", PORT)
-        ca = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        cb = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ca = udp_socket()
+        cb = udp_socket()
         ca.bind(("127.0.0.1", 0))
         cb.bind(("127.0.0.2" if accounts else "127.0.0.1", 0))
         ca.settimeout(0.5)

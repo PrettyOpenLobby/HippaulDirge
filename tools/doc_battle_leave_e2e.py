@@ -29,6 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41556"))
 A_CID = 0x0002A664
@@ -95,7 +96,7 @@ def run(tag, drive, extra=()):
     try:
         time.sleep(2.5)
         check("[%s] docudp is up" % tag, srv.poll() is None)
-        ca = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ca = udp_socket()
         ca.bind(("127.0.0.1", 0))
         ca.settimeout(0.5)
         listed = drive(ca, ("127.0.0.1", PORT))
@@ -248,7 +249,7 @@ def main():
         json.dump(seed, f)
 
     def drive_two(ca, dst):
-        cb = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cb = udp_socket()
         cb.bind(("127.0.0.1", 0))
         cb.settimeout(0.5)
         rec = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,
