@@ -3720,6 +3720,15 @@ def main():
         # sec 4he: the P2P BATTLE LAYER (shots, damage, entity messages) is
         # addressed to us and must be RELAYED, never parsed as a GS request.
         _p2pk = p2pbattle.p2p_battle_type(data, inner)
+        if _p2pk is None and inner is None and seen_charid[0]:
+            # 2026-09-28: the same layer from a client whose mode-4 header
+            # we cannot decrypt -- named by its body (p2p_battle_type_mode4)
+            _rm4 = battle_of(seen_charid[0])
+            _p2pk = p2pbattle.p2p_battle_type_mode4(
+                data, inner, seen_charid[0],
+                _rm4.members if _rm4 is not None else ())
+            if _p2pk is not None:
+                inner = p2pbattle.synth_p2p_inner(data, _p2pk, seen_charid[0])
         _srvk = None if _p2pk is not None else p2pbattle.p2p_server_type(data, inner)
         _srvb = bytes(inner["plain"][framing.BODY_OFF:]) if _srvk is not None else None
         if _p2pk is None and _srvk is None:
@@ -3873,6 +3882,19 @@ def main():
                     # resends an unacknowledged report, so dedupe over 5 s.
                     _kkil = struct.unpack_from("<I", _gbody, 8)[0]
                     if _kkil and _kkil not in _room30.kills and seen_charid[0]:
+                        _kr, _kdd = (_kkil, seen_charid[0]), 10.0
+                if (_kr is None and _room30 is not None
+                        and _room30.mission is None and seen_charid[0]
+                        and _gbody is not None and len(_gbody) >= 12):
+                    # 2026-09-28 (Dirge report, table 6 TBT): the same unreadable
+                    # header in PvP. The killer at body+8 is another SEATED
+                    # player and the sender is the victim; before this only
+                    # missions read it, so a PvP death was never tallied, no
+                    # kind 9 / 25 / 13 went out, and the killer watched a
+                    # corpse until the battle ended. Resends run ~8 s, past
+                    # the 4 s respawn, hence the 10 s dedupe.
+                    _kkil = struct.unpack_from("<I", _gbody, 8)[0]
+                    if _kkil in _room30.kills and _kkil != seen_charid[0]:
                         _kr, _kdd = (_kkil, seen_charid[0]), 10.0
                 if (_kr is None and not (_gbody is not None and len(_gbody) >= 12
                         and struct.unpack_from("<I", _gbody, 8)[0]

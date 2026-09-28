@@ -118,6 +118,69 @@ def p2p_server_type_mode4(data, inner):
     return None
 
 
+P2P_SHOT_LEN = framing.BODY_OFF + 56
+
+
+def p2p_battle_type_mode4(data, inner, sender, members):
+    """2026-09-28 (Dirge report, table 6 TBT): a SHOT or DAMAGE whose mode-4
+    header we cannot decrypt, named by its plaintext BODY, else None. One
+    client's headers failed the checksum under every key all evening, so its
+    41 shots were read as "GS request 12317/12318" and its 26 damage records
+    as keepalives (the body opens with the entry count, 1): it hit and nobody
+    was ever hurt. Shapes, from the same evening's readable 112/113:
+      113 = {u32 n, n x {u32 target, s32 damage, u32 attacker, u32 shot id}}
+            -- MEASURED 16-byte entries (a 44-byte datagram = one hit), not
+            the 20 of P2P_DAMAGE_STRIDE; 20 is accepted too until a
+            multi-hit record is seen. Every attacker is `sender`, every
+            target another seated member, no shot id 0 (the receiver drops
+            those).
+      112 = 56 bytes, a slot table {u8, '0', u8, '1', .. u8, '4'} first, six
+            finite floats (origin, direction) at body+24.
+    `sender` is the session's own id and `members` its room's seated ids;
+    no room, no naming."""
+    if inner is not None or len(data) < framing.BODY_OFF + 4 or data[1] != 4:
+        return None
+    if not sender or sender not in members:
+        return None
+    body = data[framing.BODY_OFF:]
+    n = struct.unpack_from("<I", body, 0)[0]
+    if 1 <= n <= 8 and len(body) in (4 + 16 * n, 4 + 20 * n):
+        stride = (len(body) - 4) // n
+        ents = [struct.unpack_from("<IiII", body, 4 + stride * i)
+                for i in range(n)]
+        if all(atk == sender and t != sender and t in members and sid
+               for t, _d, atk, sid in ents):
+            return P2P_DAMAGE
+        return None
+    if len(data) == P2P_SHOT_LEN and body[1:10:2] == b"01234":
+        vs = struct.unpack_from("<6f", body, 24)
+        if all(math.isfinite(v) and abs(v) < 100000.0 for v in vs):
+            return P2P_SHOT
+    return None
+
+
+def synth_p2p_inner(data, ptype, sender):
+    """An `inner` for a p2p_battle_type_mode4() datagram: the header the
+    readable ones decrypt to (type, flags 8, sender id at +16, target at +20
+    = -1 for a shot, the first entry's victim for a damage record), body
+    verbatim, checksum recomputed -- the synth_peer_inner() recipe, so
+    relay_p2p_battle() can send it on as mode 0."""
+    target = 0xFFFFFFFF
+    if ptype == P2P_DAMAGE:
+        target = struct.unpack_from("<I", data, framing.BODY_OFF + 4)[0]
+    pkt = bytearray(data)
+    pkt[8:24] = bytes(16)
+    pkt[8] = ptype
+    pkt[9] = worldpose.PEER_RELAY_FLAG
+    struct.pack_into("<II", pkt, 16, sender, target)
+    ck = framing.cksum(pkt)
+    pkt[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = struct.pack("<H", ck)
+    return {"type": ptype, "flags": worldpose.PEER_RELAY_FLAG, "cksum": ck,
+            "ack_seq": 0, "seq": 0, "u32_16": sender, "u32_20": target,
+            "is_data": False, "is_ack": False, "plain": bytes(pkt),
+            "synth": True}
+
+
 def p2p_record(plain):
     """(type, flags, sender, target, payload) of a decrypted P2P datagram."""
     b = plain[framing.BODY_OFF:]

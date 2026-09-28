@@ -284,8 +284,35 @@ def run(accounts=False):
               not any(len(p) >= D.BODY_OFF + 2
                       and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 46
                       for p in rb))
-        # 6. B dies: request 30 from B, victim = B (wire+20), killer = A (body+8)
-        cb.sendto(gs_req(B_CID, 30, arg=A_CID, hdr_arg=B_CID, session=1), dst)
+        # 5e. 2026-09-28 (Dirge report): A's client headers are unreadable, as
+        #     one live client's were all evening. Its SHOT and DAMAGE on B must
+        #     still reach B, not be read as GS request 12318 / a keepalive.
+        drain(ca), drain(cb)
+        _shot = (bytes([0x1e, 0x30, 8, 0x31, 6, 0x32, 1, 0x33, 10, 0x34, 2, 0x30,
+                        0x21, 0x43, 0, 0, 0x43, 3, 0xff, 0x3f, 0x27, 0, 0, 0])
+                 + struct.pack("<6f", 107.5, -12.3, 12.3, 92.6, -14.9, 13.9)
+                 + struct.pack("<II", 0, B_CID))
+        ca.sendto(field_req_mode4(_shot), dst)
+        ca.sendto(field_req_mode4(struct.pack("<IIiII", 1, B_CID, 10, A_CID, 0x27)), dst)
+        time.sleep(0.4)
+        _rb = drain(cb)
+        _got = {p[8]: p for p in _rb if len(p) > D.BODY_OFF and p[1] == 0
+                and p[8] in (112, 113) and p[9] & 8}
+        check("A's MODE-4 SHOT + DAMAGE were RELAYED to B (mode 0, types 112 + 113)",
+              set(_got) == {112, 113}, "%s" % sorted(_got))
+        if 113 in _got:
+            check("the relayed 113 names sender A (+16) and victim B (+20), body verbatim",
+                  struct.unpack_from("<II", _got[113], 16) == (A_CID, B_CID)
+                  and _got[113][D.BODY_OFF:] == struct.pack("<IIiII", 1, B_CID, 10,
+                                                            A_CID, 0x27))
+        check("TWIN: ... and A got no keepalive answer for its damage record",
+              not any(len(p) >= D.BODY_OFF + 2
+                      and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 1
+                      for p in drain(ca)))
+        # 6. B dies: request 30 from B, killer = A (body+8). LIVE SHAPE: mode 4,
+        #    header unreadable, so the victim is the SENDER (2026-09-28: PvP
+        #    used to drop this; only missions read the plaintext killer)
+        cb.sendto(field_req_mode4(struct.pack("<HHII", 30, 1, 0, A_CID)), dst)
         time.sleep(0.5)
         k9a = [p for p in drain(ca) if len(p) >= D.BODY_OFF + 40
                and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
