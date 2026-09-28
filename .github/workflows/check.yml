@@ -19,7 +19,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # the OpenLobby core: polcore (the database layer), the account code and
+      # tools/pgtest.py, which gives the store suites a throwaway PostgreSQL
+      # in Docker (on the runner)
+      - uses: actions/checkout@v4
+        with:
+          repository: PrettyOpenLobby/OpenLobby
+          path: openlobby
+      - run: pip install "psycopg[binary]" psycopg-pool valkey
       - run: python tools/doc_run_all.py
+        env:
+          OPENLOBBY_DIR: ${{ github.workspace }}/openlobby
+          POL_TEST_REQUIRE_DB: "1"
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -27,7 +38,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # the responder each script starts keeps its stores in a throwaway
+      # PostgreSQL database (docpg.py), so this job needs the core and the
+      # drivers too
+      - uses: actions/checkout@v4
+        with:
+          repository: PrettyOpenLobby/OpenLobby
+          path: openlobby
+      - run: pip install "psycopg[binary]" psycopg-pool valkey
       - name: loopback end-to-end scripts
         run: python tools/doc_run_all.py --e2e
         env:
           TEMP: ${{ runner.temp }}
+          OPENLOBBY_DIR: ${{ github.workspace }}/openlobby
+          POL_TEST_REQUIRE_DB: "1"
