@@ -227,16 +227,15 @@ class Units:
     def group_name(self, uid):
         """The POL group's name for a unit id, or None. Best effort: the id's
         low 32 bits as a `friend` row of kind GROUP in the core's account
-        database (read-only). No accounts function reads a friend row by its
-        id alone, so the one query is here."""
+        database (read-only, accounts.friend_row_by_id)."""
         if not self.groups:
             return None
         try:
             import docdb
-            conn = docdb.accounts().connect()
+            acc = docdb.accounts()
+            conn = acc.connect()
             try:
-                row = conn.execute("SELECT peer_name, kind FROM friend WHERE id = %s",
-                                   (uid & 0xFFFFFFFF,)).fetchone()
+                row = acc.friend_row_by_id(conn, uid & 0xFFFFFFFF)
             finally:
                 conn.close()
         except Exception as e:                  # noqa: BLE001 -- best effort
