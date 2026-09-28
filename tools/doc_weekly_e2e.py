@@ -23,7 +23,6 @@ are not battle medals: they reach the client in the world door's medal mask
     python doc_weekly_e2e.py        # ~2 min; DOC_E2E_PORT picks the port
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -36,6 +35,8 @@ sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as S                                       # noqa: E402
+import docdb                                                # noqa: E402
+import docpg                                                # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, notifies, FAILS  # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41581"))
@@ -97,8 +98,9 @@ def start(tag, stats, extra=()):
             "--gs-battle-length=120", "--gs-battle-go-after=1",
             "--gs-real-dist-settle=1", "--gs-battle-reset-after=1",
             "--gs-battle-after-join=30", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats] + list(extra)
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+            "--stats", "on"] + list(extra)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1",
+               POL_DATABASE_URL=stats)
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     wait_listening(log, srv)
@@ -118,11 +120,12 @@ def stop(srv, log, log_path):
 
 
 def fresh(path):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-    return path
+    """A fresh database for one run, in place of the removed store file
+    `path` named: its URL, which start() hands the server."""
+    url = docpg.new_database()
+    if url is None:
+        sys.exit(docpg.skip_or_fail("doc_weekly_e2e"))
+    return url
 
 
 def run_rollover():
@@ -178,7 +181,7 @@ def run_rollover():
         ma = door_mask(so[A_CID], A_CID)
         check("[rollover] TWIN: A's door BEFORE the boundary has no weekly bit",
               weekly_bits(ma) == [], "mask %r" % ma)
-        wk = json.load(open(stats, encoding="utf-8")).get("weekly", {})
+        wk = docpg.read("stats", stats).get("weekly", {})
         ta = wk.get(str(boundary - S.WEEK_SECS), {}).get(key(A_CID))
         check("[rollover] A's week tally: rank points, 1 kill, 1 team win",
               ta is not None and ta["rp"] > 0 and ta["kills"] == 1
@@ -214,11 +217,13 @@ def run_rollover():
 
 def seed_catchup(path):
     """A stats file whose only week (9 days back) has ENDED: C won a BT (1 kill)."""
-    st = S.Stats(fresh(path))
+    url = fresh(path)
+    docpg.use(url)
+    st = S.Stats(docdb.store("stats"))
     st.clock = lambda: time.time() - 9 * 86400
     st.record_battle("BT", [{"key": key(C_CID), "id": C_CID, "team": 1, "kills": 1},
                             {"key": key(D_CID), "id": D_CID, "team": 2}], 1, 120)
-    return path
+    return url
 
 
 def run_catchup():
@@ -239,7 +244,7 @@ def run_catchup():
     # IDEMPOTENT: a restart closes nothing and pays nothing more
     srv, log, lp = start("catchup2", stats)
     text = stop(srv, log, lp)
-    c = json.load(open(stats, encoding="utf-8"))["chars"][key(C_CID)]
+    c = docpg.read("stats", stats)["chars"][key(C_CID)]
     check("[catchup] a restart closes nothing again; C's counts stay 1",
           "WEEK CLOSED" not in text
           and all(c["medals"].get(str(i)) == 1 for i in (35, 36, 38)),

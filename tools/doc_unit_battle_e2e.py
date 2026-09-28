@@ -18,7 +18,6 @@ datagrams (the shapes doc_battle_e2e.py already uses):
                                              # seats C, so the refusal checks FAIL
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -32,6 +31,7 @@ import docudp as D           # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_unit              # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
+import docpg                # noqa: E402
 
 PORT = int(os.environ.get("DOC_UNIT_E2E_PORT", "41557"))
 A_CID, B_CID, C_CID = 0x0002A664, 0x00041018, 0x00041020
@@ -52,8 +52,7 @@ def seed_units(path):
     data = {"units": units,
             "enlist": {key(A_CID): doc_unit.hexid(U1), key(B_CID): doc_unit.hexid(U2),
                        key(C_CID): doc_unit.hexid(U3)}}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+    docpg.seed(path, data)
 
 
 def sel(p):
@@ -64,13 +63,10 @@ def main():
     open_mode = "--open" in sys.argv
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_unit_battle_e2e.log")
-    units_path = os.path.join(tmp, "doc_unit_battle_e2e_units.json")
-    stats_path = os.path.join(tmp, "doc_unit_battle_e2e_stats.json")
+    # the unit and career stores: a fresh database, the units seeded
+    docpg.e2e_database("doc_unit_battle_e2e")
+    units_path = "units"
     seed_units(units_path)
-    try:
-        os.remove(stats_path)
-    except OSError:
-        pass
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
@@ -79,7 +75,7 @@ def main():
             "--gs-battle-length=31", "--gs-battle-go-after=1",
             "--gs-real-dist-settle=1", "--gs-battle-reset-after=1",
             "--gs-battle-after-join=30", "--session-idle-drop=0", "--intro=off",
-            "--units", units_path, "--stats", stats_path,
+            "--units", "on", "--stats", "on",
             "--unit-tables=%s" % ("open" if open_mode else "enforce")]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=HERE)
@@ -189,8 +185,7 @@ def main():
     check("log: sides seated by unit", has("is a UNIT table: sides by unit"))
     check("log: ROOM OPENED", has("ROOM OPENED for table 1"))
     check("log: the unit battle SETTLED", has("[units] UNIT BATTLE table 1 settled:"))
-    with open(units_path, encoding="utf-8") as f:
-        units = json.load(f)["units"]
+    units = docpg.read(units_path)["units"]
     u1, u2, u3 = (units[doc_unit.hexid(u)] for u in (U1, U2, U3))
     row = doc_unit.UNIT_BATTLE_ROW
     # A's WIN with 1 kill pays RP_WIN + RP_PER_KILL; U1 gets exactly that

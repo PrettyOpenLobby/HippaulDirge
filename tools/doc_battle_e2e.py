@@ -22,7 +22,6 @@ doc_udp_test.py.
 import io
 import os
 import socket
-import sqlite3
 import struct
 import subprocess
 import sys
@@ -33,6 +32,7 @@ sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
 from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_field  # noqa: E402
+import docpg  # noqa: E402
 
 #: the arena item generators are the arenas' own data (doc_item_generators.json,
 #: not shipped; README.md): without it the generator checks are skipped
@@ -116,7 +116,7 @@ def notifies(pkts, kind):
 
 
 def run(accounts=False):
-    """accounts=True (2026-09-26): a deployment's shape -- --accounts-db with an empty
+    """accounts=True (2026-09-26): a deployment's shape -- --pol-members with an empty
     session table, so each client resolves to its own addr:<ip> account key,
     and B on its own address. Every other run bound both clients to one IP and
     ONE key, which hid the result-tally miss (live tables 30-32: every member
@@ -134,26 +134,16 @@ def run(accounts=False):
             "--gs-battle-after-join=30", "--session-idle-drop=0",
             # sec 4hc: one kill graduates, so A's kill drives the broadcast
             "--novice-kills=1", "--intro=off",
-            "--stats", os.path.join(tmp, tag + "_stats.json")]
-    try:
-        os.remove(argv[-1])
-    except OSError:
-        pass
+            "--stats", "on"]
+    # a fresh database per run: empty careers and, for the accounts run, the
+    # core's own (empty) session table
+    db_url = docpg.new_database()
+    if db_url is None:
+        sys.exit(docpg.skip_or_fail("doc_battle_e2e"))
     if accounts:
-        adb = os.path.join(tmp, tag + "_accounts.db")
-        cst = os.path.join(tmp, tag + "_chara.json")
-        for p in (adb, cst, os.path.join(tmp, "doc-ip-members.json")):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-        db = sqlite3.connect(adb)
-        db.execute("CREATE TABLE session (member_id INTEGER, nick TEXT, "
-                   "created_at TEXT, peer_ip TEXT)")
-        db.commit()
-        db.close()
-        argv += ["--accounts-db", adb, "--chara-store", cst]
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+        argv += ["--pol-members", "on", "--chara-store", "on"]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1",
+               POL_DATABASE_URL=db_url)
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     try:
@@ -408,7 +398,7 @@ def run(accounts=False):
 
 def main():
     for accounts in (False, True):
-        print("run: %s" % ("--accounts-db, two addresses (a deployment's shape)"
+        print("run: %s" % ("--pol-members, two addresses (a deployment's shape)"
                            if accounts else "one address, no accounts db"))
         run(accounts)
     print("%d check(s) failed" % len(FAILS) if FAILS else "ALL PASS")

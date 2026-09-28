@@ -60,17 +60,15 @@ def door_req(cid):
 def main():
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_novice_e2e.log")
-    stats = os.path.join(tmp, "doc_novice_e2e_stats.json")
-    try:
-        os.remove(stats)
-    except OSError:
-        pass
+    # the career store: a fresh database for this server
+    import docpg
+    docpg.e2e_database("doc_novice_e2e")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
             "--bt-no-onfly-reserve", "--session-idle-drop=0",
             "--gs-connect", "--gs-connect-id=65535", "--gs-connect-ip=127.0.0.1",
-            "--intro=on", "--intro-delay=0.5", "--stats", stats]
+            "--intro=on", "--intro-delay=0.5", "--stats", "on"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=HERE)
     try:

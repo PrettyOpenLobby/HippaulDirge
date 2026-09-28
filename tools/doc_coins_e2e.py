@@ -19,7 +19,6 @@ what kind 21 does to the client's bag is static RE (docudp end_battle note).
     python doc_coins_e2e.py            # ~40 s
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -32,6 +31,7 @@ sys.path.insert(0, HERE)
 import docudp as D                                                 # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as DS                                             # noqa: E402
+import docpg                                                       # noqa: E402
 from doc_battle_e2e import (world_req, gs_req, field_req, notifies,  # noqa: E402
                             check, FAILS)
 
@@ -49,13 +49,8 @@ def run(twin):
     tag = "doc_coins_e2e" + ("_twin" if twin else "")
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, tag + ".log")
-    stats = os.path.join(tmp, tag + "_stats.json")
-    shop = os.path.join(tmp, tag + "_shop.json")
-    for p in (stats, shop):
-        try:
-            os.remove(p)
-        except OSError:
-            pass
+    # the career and wallet stores: a fresh database for this run
+    docpg.e2e_database(tag)
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
@@ -64,7 +59,7 @@ def run(twin):
             "--gs-battle-length=12", "--gs-battle-go-after=1",
             "--gs-real-dist-settle=1", "--gs-battle-reset-after=1",
             "--gs-battle-after-join=30", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats, "--shop", shop, "--shop-start-gil", str(START)]
+            "--stats", "on", "--shop", "on", "--shop-start-gil", str(START)]
     if twin:
         argv.append("--chocobo-coins=off")
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -162,8 +157,7 @@ def run(twin):
                       (result_gil(res_a[0]), result_gil(res_b[0]))
                       == (START + 1300, START + 300 + 3000),
                       "A %d, B %d" % (result_gil(res_a[0]), result_gil(res_b[0])))
-            with open(shop, encoding="utf-8") as f:
-                w = json.load(f)
+            w = docpg.read("shop")
             gb = [v["gil"] for k, v in w.items() if k.endswith("/0x%08x" % B_CID)]
             check("B's wallet persisted the same total, and no coin in its bag",
                   gb == [START + 3300] and not any(

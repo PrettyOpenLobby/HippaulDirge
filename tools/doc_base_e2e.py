@@ -321,13 +321,11 @@ def main():
             time.sleep(D.CAPSULE_HOLD_S + 2.0)
             got += drain(ca)
         return drive
-    _st = os.path.join(os.environ.get("TEMP", HERE), "doc_base_e2e_stats.json")
-    try:
-        os.remove(_st)
-    except OSError:
-        pass
+    # the career store: a fresh database both battles below share
+    import docpg
+    docpg.e2e_database("doc_base_e2e")
     text, notes = battle("caplast", 2, 4, 0, capsules=2, drive=_hold(2),
-                         extra=("--stats", _st))
+                         extra=("--stats", "on"))
     k4 = [p for k, p in notes if k == 4]
     check("[caplast] both held for 10 s -> END, kind 4",
           "holds all 2" in text and k4 and "[battle] END" in text)
@@ -336,7 +334,7 @@ def main():
           and k4[0][D.BODY_OFF + 20 + 30 + 8] == 0,
           k4[0][D.BODY_OFF + 50:D.BODY_OFF + 65].hex() if k4 else "no kind 4")
     text, notes = battle("caplast_twin", 2, 4, 0, capsules=2, drive=_hold(1),
-                         extra=("--stats", _st))
+                         extra=("--stats", "on"))
     check("[caplast_twin] TWIN: 1 of 2 held -> no hold, no END, no Last Capsule",
           "holds all" not in text and not any(k == 4 for k, _ in notes)
           and "Last Capsule Medal" not in text)

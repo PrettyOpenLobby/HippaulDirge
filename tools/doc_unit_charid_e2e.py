@@ -40,15 +40,13 @@ def check(name, cond, detail=""):
 def run(world_door):
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_unit_charid_e2e_%d.log" % world_door)
-    units = os.path.join(tmp, "doc_unit_charid_e2e_units.json")
-    try:
-        os.remove(units)
-    except OSError:
-        pass
+    # the unit store: a fresh database for this server
+    import docpg
+    docpg.e2e_database("doc_unit_charid_e2e")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(E.PORT),
-            "--session-idle-drop=0", "--intro=off", "--units=" + units]
+            "--session-idle-drop=0", "--intro=off", "--units=on"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)

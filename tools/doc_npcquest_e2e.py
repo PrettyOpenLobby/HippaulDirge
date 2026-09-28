@@ -21,7 +21,6 @@ command 27 "scene done" reports the retail scenes send:
     python doc_npcquest_e2e.py        # ~50 s
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -36,6 +35,7 @@ from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_npc as N           # noqa: E402
 import doc_npcquests as Q     # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
+import docpg                 # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41559"))
 CID = 0x0002A664
@@ -82,24 +82,23 @@ def done(sock, event):
 
 
 def bag(shop_path):
-    w = json.load(open(shop_path, encoding="utf-8")).get(KEY, {})
+    w = docpg.read(shop_path).get(KEY, {})
     return {int(k, 16): v for k, v in (w.get("bag") or {}).items()}
 
 
 def main():
-    stats = os.path.join(TMP, "doc_npcquest_e2e_stats.json")
-    shop = os.path.join(TMP, "doc_npcquest_e2e_shop.json")
-    with open(stats, "w", encoding="utf-8") as f:
-        json.dump({"chars": {KEY: {"tbt": {"w": 35, "l": 0, "d": 0}}}}, f)
-    with open(shop, "w", encoding="utf-8") as f:
-        json.dump({KEY: {"gil": 1000, "kit": 1, "kit2": 1, "bag": {
-            "0x%08x" % Q.DANDELION: 1, "0x%08x" % Q.FUZZY_SEED: 1}}}, f)
+    # the career and wallet stores: a fresh database, seeded as the files were
+    docpg.e2e_database("doc_npcquest_e2e")
+    stats, shop = "stats", "shop"
+    docpg.seed(stats, {"chars": {KEY: {"tbt": {"w": 35, "l": 0, "d": 0}}}})
+    docpg.seed(shop, {KEY: {"gil": 1000, "kit": 1, "kit2": 1, "bag": {
+        "0x%08x" % Q.DANDELION: 1, "0x%08x" % Q.FUZZY_SEED: 1}}})
     log_path = os.path.join(TMP, "doc_npcquest_e2e.log")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
             "--bt-no-onfly-reserve", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats, "--shop", shop, "--mission-ledger", "on",
+            "--stats", "on", "--shop", "on", "--mission-ledger", "on",
             "--npc-este-accept", "1", "--npc-quest-day", "3",
             "--npc-hiren-wither", "0"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -186,21 +185,19 @@ def main():
 def wither_run():
     """Hiren's seed WITHERS (January blog: look in on it about once a real
     day), through docudp's default --npc-hiren-wither (1 day; 3 s here)."""
-    stats = os.path.join(TMP, "doc_npcquest_e2e_w_stats.json")
-    shop = os.path.join(TMP, "doc_npcquest_e2e_w_shop.json")
+    docpg.e2e_database("doc_npcquest_e2e")
+    stats, shop = "stats", "shop"
     now = time.time()
-    with open(stats, "w", encoding="utf-8") as f:
-        json.dump({"chars": {KEY: {Q.KEY: {str(Q.HIREN): {
-            "met": 1, "seed_at": now - 7.0, "seen_at": now - 6.5,
-            "stage": 0}}}}}, f)
-    with open(shop, "w", encoding="utf-8") as f:
-        json.dump({KEY: {"gil": 1000, "kit": 1, "kit2": 1, "bag": {}}}, f)
+    docpg.seed(stats, {"chars": {KEY: {Q.KEY: {str(Q.HIREN): {
+        "met": 1, "seed_at": now - 7.0, "seen_at": now - 6.5,
+        "stage": 0}}}}})
+    docpg.seed(shop, {KEY: {"gil": 1000, "kit": 1, "kit2": 1, "bag": {}}})
     log_path = os.path.join(TMP, "doc_npcquest_e2e_w.log")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
             "--bt-no-onfly-reserve", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats, "--shop", shop, "--mission-ledger", "on",
+            "--stats", "on", "--shop", "on", "--mission-ledger", "on",
             "--npc-quest-day", "3"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
@@ -216,14 +213,13 @@ def wither_run():
               ev == 1535, "%r" % ev)
         ev = walk_up(sock, Q.HIREN)
         check("[wither] then, no seed -> 1555 TNK_NASHI", ev == 1555, "%r" % ev)
-        c = json.load(open(stats, encoding="utf-8"))["chars"][KEY]
+        c = docpg.read(stats)["chars"][KEY]
         check("[wither] the career holds no growing seed any more",
               c[Q.KEY][str(Q.HIREN)].get("seed_at") is None
               and c[Q.KEY][str(Q.HIREN)].get("kare") == 1, "%r" % c[Q.KEY])
-        w = json.load(open(shop, encoding="utf-8"))
+        w = docpg.read(shop)
         w[KEY]["bag"]["0x%08x" % Q.FUZZY_SEED] = 1
-        with open(shop, "w", encoding="utf-8") as f:
-            json.dump(w, f)
+        docpg.seed(shop, w)
         srv.terminate()
         srv.wait(5)
         srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,

@@ -59,11 +59,9 @@ def holders_of(pkt):
 def run(tag, mode, capsules=0, carrier=True):
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_medals_e2e_%s.log" % tag)
-    stats = os.path.join(tmp, "doc_medals_e2e_%s_stats.json" % tag)
-    try:
-        os.remove(stats)
-    except OSError:
-        pass
+    # the career store: a fresh database for this server
+    import docpg
+    docpg.e2e_database("doc_medals_e2e")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
@@ -72,7 +70,7 @@ def run(tag, mode, capsules=0, carrier=True):
             "--gs-battle-length=10", "--gs-battle-go-after=1",
             "--gs-real-dist-settle=1", "--gs-battle-reset-after=1",
             "--gs-battle-after-join=30", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats]
+            "--stats", "on"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)

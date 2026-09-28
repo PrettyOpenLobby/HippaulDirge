@@ -221,16 +221,16 @@ def main():
 
     # run 3 (2026-09-24): leaving a RUNNING battle costs rank points -- the
     # client's own warning 0x5c0d. Seed 100 rp; --leave-rp-penalty 25.
-    import json
-    sp = os.path.join(os.environ.get("TEMP", HERE), "doc_battle_leave_e2e_stats.json")
+    # the career store: a fresh database the two runs below seed in turn
+    import docpg
+    docpg.e2e_database("doc_battle_leave_e2e")
     key = "anon/0x%08x" % A_CID
     seed = {"chars": {key: {"rp": 100}}}
-    with open(sp, "w", encoding="utf-8") as f:
-        json.dump(seed, f)
+    docpg.seed("stats", seed)
     text, _ = run("penalty", drive_leave,
-                  extra=("--stats", sp, "--leave-rp-penalty", "25"))
+                  extra=("--stats", "on", "--leave-rp-penalty", "25"))
     lines = text.splitlines()
-    c = json.load(open(sp, encoding="utf-8"))["chars"].get(key, {})
+    c = docpg.read("stats")["chars"].get(key, {})
     hist = c.get("history") or [{}]
     check("[penalty] no traceback", "Traceback" not in text)
     check("[penalty] the leave was logged with its cost",
@@ -246,8 +246,7 @@ def main():
     # (past the 30 s void rule) -- the tally must not score A a second time
     # (A paid the leave penalty) while B is scored as usual, unpenalized.
     B_CID = 0x00041018
-    with open(sp, "w", encoding="utf-8") as f:
-        json.dump(seed, f)
+    docpg.seed("stats", seed)
 
     def drive_two(ca, dst):
         cb = udp_socket()
@@ -280,10 +279,10 @@ def main():
         return None
 
     text, _ = run("penalty2", drive_two,
-                  extra=("--stats", sp, "--leave-rp-penalty", "25",
+                  extra=("--stats", "on", "--leave-rp-penalty", "25",
                          "--gs-battle-length", "40"))
     lines = text.splitlines()
-    chars = json.load(open(sp, encoding="utf-8"))["chars"]
+    chars = docpg.read("stats")["chars"]
     ca_, cb_ = chars.get(key, {}), chars.get("anon/0x%08x" % B_CID, {})
     check("[penalty2] no traceback", "Traceback" not in text)
     check("[penalty2] the room ENDED on its clock", any("[battle] END table 1" in ln
