@@ -5,7 +5,7 @@
     python doc_import_test.py
 
 Checked on a throwaway database (docpg.py): a dry run on a database that has
-never seen CrystalDirge's migrations writes nothing, not even them; an import
+never seen HippaulDirge's migrations writes nothing, not even them; an import
 into an empty store; the store read back and exported as the file held it,
 keys in the file's order; a second run that prints "Nothing to import" and
 exits 0; a file with other contents refused (exit 2) and nothing written;
@@ -103,7 +103,7 @@ def _main(docdb, db, base):
         json.dump(STATS, fh, indent=1, sort_keys=True)
     before = digest(base)
 
-    print("--dry-run on a database that never saw CrystalDirge's migrations")
+    print("--dry-run on a database that never saw HippaulDirge's migrations")
     code, out = run("shop", shop, "--dry-run")
     check("exit 0", code == 0, out)
     check("says so", "Dry run: nothing was written." in out, out)

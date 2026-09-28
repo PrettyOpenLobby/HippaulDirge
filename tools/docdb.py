@@ -1,4 +1,4 @@
-"""docdb.py -- where CrystalDirge reaches OpenLobby's storage layer.
+"""docdb.py -- where HippaulDirge reaches OpenLobby's storage layer.
 
 The world responder keeps its durable player data (the rosters, the wallets,
 the gear, the play time, the careers, the rankings and the units) in the
@@ -49,11 +49,11 @@ and friend tables through it.
 Migrations are tools/doc_migrations/NNNN_name.sql, applied with
 `polcore.db.migrate(directory=...)`. They share OpenLobby's schema_migrations
 table, which is keyed by the version number alone, so each repository owns a
-range: CrystalDirge numbers its files 5001..5999, and every table it creates
+range: HippaulDirge numbers its files 5001..5999, and every table it creates
 starts with `doc_`.
 
     python docdb.py migrate               apply what is pending
-    python docdb.py status                CrystalDirge's migrations and their state
+    python docdb.py status                HippaulDirge's migrations and their state
     python docdb.py export STORE          print a store as its old JSON file
     python docdb.py import STORE FILE [--merge] [--dry-run]
                                           load an old JSON file into the store
@@ -79,7 +79,7 @@ import threading
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: CrystalDirge's migration files. Versions 5001..5999 are this repository's.
+#: HippaulDirge's migration files. Versions 5001..5999 are this repository's.
 MIGRATIONS_DIR = os.path.join(_HERE, "doc_migrations")
 
 #: store -> table (a flat store) or {section: table} (one table per section)
@@ -144,7 +144,7 @@ def errors():
 
 
 def ensure_schema(log=None):
-    """Apply CrystalDirge's pending migrations, once per process and database.
+    """Apply HippaulDirge's pending migrations, once per process and database.
 
     Cheap after the first call. Raises what `polcore.db.migrate` raises when
     the database cannot be reached, and remembers nothing then, so the next
@@ -174,7 +174,7 @@ def migrate_at_start(who):
         ensure_schema(log=lambda msg: print("[%s] %s" % (who, msg), flush=True))
         return True
     except errors() as exc:
-        print("[%s] database not ready (%s); CrystalDirge's tables are "
+        print("[%s] database not ready (%s); HippaulDirge's tables are "
               "created on first use" % (who, exc), flush=True)
         return False
 
@@ -232,7 +232,7 @@ class Table:
 
     def __init__(self, name):
         if not _TABLE_NAME.match(name):
-            raise ValueError("not a CrystalDirge table name: %r" % name)
+            raise ValueError("not a HippaulDirge table name: %r" % name)
         self.name = name
         self._saved = {}
 
@@ -417,7 +417,7 @@ def import_file(name, path, merge=False, dry_run=False, out=print):
     plans = []
     status = None
     try:
-        with db.transaction(lock="crystaldirge.import") as conn:
+        with db.transaction(lock="hippauldirge.import") as conn:
             for table, items in rows.items():
                 exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
                                       (table,)).fetchone()["ok"]

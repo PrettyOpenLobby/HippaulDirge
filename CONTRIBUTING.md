@@ -1,6 +1,6 @@
-# Contributing to CrystalDirge
+# Contributing to HippaulDirge
 
-CrystalDirge is the Dirge of Cerberus world responder for the OpenLobby core:
+HippaulDirge is the Dirge of Cerberus world responder for the OpenLobby core:
 one UDP service on port 55040, plus a small title plugin that runs inside the
 core. This page says where things are, how to run the checks, and what a pull
 request needs.
@@ -80,7 +80,7 @@ and `doc_kelcrypt` (the world-channel cipher).
 
 The per-player stores are tables in the core's PostgreSQL database, reached
 through `tools/docdb.py`, whose docstring maps each store to its tables. The
-tables come from the migrations in `tools/doc_migrations/`. CrystalDirge owns
+tables come from the migrations in `tools/doc_migrations/`. HippaulDirge owns
 the numbers 5001 to 5999 and every table it creates starts with `doc_`. A
 migration that has shipped is never edited: a change to a table, or a new
 store, is a new numbered file, and a new store is also added to

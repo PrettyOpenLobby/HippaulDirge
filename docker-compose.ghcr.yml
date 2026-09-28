@@ -10,6 +10,6 @@
 
 services:
   doc:
-    image: ghcr.io/prettyopenlobby/crystaldirge:${CRYSTALDIRGE_TAG:-latest}
+    image: ghcr.io/prettyopenlobby/hippauldirge:${HIPPAULDIRGE_TAG:-${CRYSTALDIRGE_TAG:-latest}}
     pull_policy: missing
     build: !reset null
