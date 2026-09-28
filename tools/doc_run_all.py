@@ -4,11 +4,19 @@
     python tools/doc_run_all.py              # everything
     python tools/doc_run_all.py -k shop      # only suites whose name contains
     python tools/doc_run_all.py -v           # stream each suite's own output
+    python tools/doc_run_all.py --e2e        # the loopback end-to-end scripts
+    python tools/doc_run_all.py --all        # both groups
 
 The list is explicit, not globbed: a suite that is not registered here does
 not exist. Nothing here opens a socket or needs the core beside it; every
 suite builds the datagrams the responder sends and reads the fields back at
 the offsets the client reads them from.
+
+The end-to-end group (--e2e) is separate and does not run by default: each
+script starts a real docudp.py on a loopback port and drives it with
+synthetic client datagrams, which takes a few minutes. A script that needs
+data you have not generated (README.md, "Arena data") prints a line
+starting with "SKIP " and exits 0; it is counted as skipped.
 """
 import argparse
 import os
@@ -71,26 +79,121 @@ SUITES = [
 ]
 
 
+#: (name, argv)  -- the loopback end-to-end group, run with --e2e (cwd = tools/)
+E2E = [
+    # the client socket the scripts use: a send to a closed port, then a receive
+    ("doc_e2e_udp",            [PY, "doc_e2e_udp.py"]),
+    # a client that closes its socket does not stop the server
+    ("doc_connreset_e2e",      [PY, "doc_connreset_e2e.py"]),
+    # a battle from table to result screen (and the accounts twin)
+    ("doc_battle_e2e",         [PY, "doc_battle_e2e.py"]),
+    # leaving and dissolving a table, the leave penalty
+    ("doc_battle_leave_e2e",   [PY, "doc_battle_leave_e2e.py"]),
+    # the leader's own battle flow
+    ("doc_leader_battle_e2e",  [PY, "doc_leader_battle_e2e.py"]),
+    # automatic team distribution
+    ("doc_autoteam_e2e",       [PY, "doc_autoteam_e2e.py"]),
+    # the briefing countdown, the start at 0, the one-sided rebalance
+    ("doc_briefing_clock_e2e", [PY, "doc_briefing_clock_e2e.py"]),
+    # Team Base battles (skips without doc_arena_table.json)
+    ("doc_base_e2e",           [PY, "doc_base_e2e.py"]),
+    # Chocobo Coins: drop, pick-up, the cut at the result
+    ("doc_coins_e2e",          [PY, "doc_coins_e2e.py"]),
+    # the launch medals in the result records
+    ("doc_medals_e2e",         [PY, "doc_medals_e2e.py"]),
+    # MP and healing in battle
+    ("doc_mp_heal_e2e",        [PY, "doc_mp_heal_e2e.py"]),
+    # the mission supplies
+    ("doc_supplies_e2e",       [PY, "doc_supplies_e2e.py"]),
+    # mission NPCs at their spawn nodes (skips without doc_mission_spawns.json)
+    ("doc_mission_npc_e2e",    [PY, "doc_mission_npc_e2e.py"]),
+    # the launch lobby rules: new characters, RP limits, line drops
+    ("doc_launch_e2e",         [PY, "doc_launch_e2e.py"]),
+    # the new-player intro and the novice mark
+    ("doc_novice_e2e",         [PY, "doc_novice_e2e.py"]),
+    # the lobby item quests
+    ("doc_npcquest_e2e",       [PY, "doc_npcquest_e2e.py"]),
+    # Argento's lines
+    ("doc_argento_e2e",        [PY, "doc_argento_e2e.py"]),
+    # chat scopes
+    ("doc_chat_e2e",           [PY, "doc_chat_e2e.py"]),
+    # units in battle, and unit character ids
+    ("doc_unit_battle_e2e",    [PY, "doc_unit_battle_e2e.py"]),
+    ("doc_unit_charid_e2e",    [PY, "doc_unit_charid_e2e.py"]),
+    # the weekly close
+    ("doc_weekly_e2e",         [PY, "doc_weekly_e2e.py"]),
+    # two consoles behind one address
+    ("doc_session_nat",        [PY, os.path.join("..", "tests",
+                                                 "test_doc_session_nat.py")]),
+]
+E2E_NAMES = {name for name, _argv in E2E}
+#: an end-to-end script that runs longer than this is stopped and failed
+E2E_TIMEOUT_S = 900
+
+
+def run_e2e(argv, stream):
+    """(returncode, stdout, stderr) of one end-to-end script. The output is
+    always captured, so a SKIP line can be seen; with `stream` it is printed
+    once the script ends."""
+    try:
+        r = subprocess.run(argv, cwd=HERE, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                           timeout=E2E_TIMEOUT_S)
+        rc, out, err = r.returncode, r.stdout or "", r.stderr or ""
+    except subprocess.TimeoutExpired as ex:
+        rc = -1
+        out = ex.stdout.decode("utf-8", "replace") if isinstance(ex.stdout, bytes) else (ex.stdout or "")
+        err = "stopped after %d s" % E2E_TIMEOUT_S
+    if stream:
+        sys.stdout.write(out)
+        sys.stdout.write(err)
+    return rc, out, err
+
+
+def skipped(out):
+    return any(line.startswith("SKIP ") for line in out.splitlines())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", default="", help="only suites whose name contains this")
     ap.add_argument("-v", action="store_true", help="stream each suite's output")
+    ap.add_argument("--e2e", action="store_true",
+                    help="run the loopback end-to-end scripts instead")
+    ap.add_argument("--all", action="store_true",
+                    help="run the selftests, then the end-to-end scripts")
     a = ap.parse_args()
-    chosen = [s for s in SUITES if a.k in s[0]]
+    group = E2E if a.e2e else SUITES + (E2E if a.all else [])
+    chosen = [s for s in group if a.k in s[0]]
     failed = []
+    skips = []
+    width = max([16] + [len(name) for name, _argv in chosen])
     for name, argv in chosen:
         t0 = time.time()
-        r = subprocess.run(argv, cwd=HERE, capture_output=not a.v, text=True)
+        if name in E2E_NAMES:
+            rc, out, err = run_e2e(argv, a.v)
+            r = subprocess.CompletedProcess(argv, rc, out, err)
+        else:
+            r = subprocess.run(argv, cwd=HERE, capture_output=not a.v, text=True)
         dt = time.time() - t0
         ok = r.returncode == 0
-        print("%-16s %s  (%.1fs)" % (name, "ok" if ok else "FAIL", dt), flush=True)
+        skip = ok and name in E2E_NAMES and skipped(r.stdout)
+        if skip:
+            skips.append(name)
+        print("%-*s %s  (%.1fs)" % (width, name, "skip" if skip else
+                                    "ok" if ok else "FAIL", dt), flush=True)
         if not ok:
             failed.append(name)
             if not a.v:
                 tail = (r.stdout or "").splitlines()[-25:] + (r.stderr or "").splitlines()[-25:]
                 for line in tail:
                     print("    " + line)
-    print("%d/%d suites passed" % (len(chosen) - len(failed), len(chosen)))
+    print("%d/%d suites passed" % (len(chosen) - len(failed) - len(skips),
+                                   len(chosen))
+          + (", %d skipped" % len(skips) if skips else ""))
+    if skips:
+        print("skipped: " + ", ".join(skips))
     if failed:
         print("failed: " + ", ".join(failed))
     return 1 if failed else 0
