@@ -31,7 +31,7 @@ services:
       - pol-data:/data:ro
       - pol-logs:/logs
     environment:
-      # The address handed to a client is chosen per client (docudp.py
+      # The address handed to a client is chosen per client (docworld/advertise.py
       # host_for): POL_ADVERTISE_PUBLIC for a peer with a global address,
       # POL_ADVERTISE_LAN for a private-range peer. Empty = POL_ADVERTISE.
       POL_ADVERTISE_PUBLIC: "${POL_ADVERTISE_PUBLIC:-}"

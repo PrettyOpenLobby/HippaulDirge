@@ -11,6 +11,7 @@ reads the fields back at the offsets the client reads them from.
 """
 import io
 import os
+import re
 import struct
 import sys
 
@@ -25,6 +26,17 @@ def check(name, cond, detail=""):
     print("  %s %s%s" % ("ok " if cond else "FAIL", name, ("  " + detail) if detail else ""))
     if not cond:
         FAILS.append(name)
+
+
+def responder_source():
+    """The responder's code as one text, for the checks that read the source.
+    docudp.py is a facade over tools/docworld/; this joins the package's
+    modules in import order and takes off the `<module>.` prefix the split put
+    on every name that crosses a module boundary, so each check reads the code
+    as it is written in the single-file layout."""
+    text = "\n".join(io.open(mod.__file__, encoding="utf-8").read()
+                     for mod in D._MODULES.values())
+    return re.sub(r"\b(?:%s)\.(?=[A-Za-z_])" % "|".join(D._MODULES), "", text)
 
 
 def body(pkt):
@@ -1291,7 +1303,7 @@ def main():
     # LAST, because 38's routine 0x00bc0260 zeroes [chan+204] (sec 4eb). All
     # four of these FAIL on the pre-fix file -- verified by running this suite
     # against `git show HEAD:tools/docudp.py`.
-    _src = io.open(D.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+    _src = responder_source()
 
     def _ordered(seg, *marks):
         """True iff every mark appears in `seg`, in this order."""
@@ -2024,7 +2036,7 @@ def main():
           and _db[16 + 6] == 1 and _db[16 + 7] == 3
           and struct.unpack_from("<3h", _db, 16 + 8) == (1090, -20, -516)
           and struct.unpack_from("<3h", _db, 16 + 14) == (1000, 0, 0))
-    _dsrc = open(D.__file__, encoding="utf-8").read()
+    _dsrc = responder_source()
     _d43 = _dsrc[_dsrc.index("elif _gmt == GS_REVIVE_REQ"):
                  _dsrc.index("elif _gmt == GS_ITEM_USE_REQ")]
     check("request 43 (the kind-9 ack) never sends a revive", "sendto" not in _d43)
@@ -2383,7 +2395,7 @@ def main():
           and _rs.reserve(_rk, 0x104)[0] == 0)
     check("RP limit: a member already seated is not re-checked",
           _rs.reserve(_rk, 0x103, rp=9000)[0] == 0)
-    _src26 = io.open(D.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+    _src26 = responder_source()
     check("RP limit: the JOIN arm and the RESERVE verb both pass the joiner's rp",
           _src26.count("rp=rp_of_cid(_ident or seen_charid[0] or 0)") == 3)
 

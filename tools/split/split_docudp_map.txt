@@ -1,0 +1,144 @@
+# Which module of tools/docworld/ each top-level name of the flat
+# tools/docudp.py goes to. Read by split_docudp.py.
+#
+#   [module] one-line description (listed in docworld/__init__.py)
+#   NAME ...        top-level defs, classes and globals, by name
+#   ~prefix         an unnamed statement, by the start of its first line
+#   !extract ...    a run of a function's statements that becomes its own function
+#   !doc NAME: ...  the docstring of an extracted function
+#
+# Map order is the order __init__.py lists the modules in. A name added to
+# the flat file must be listed here before the tool will write.
+
+# main() opens with 1,800 lines of argparse; they read nothing of main's, so
+# they become cli.build_parser() and main() calls it.
+!extract main -> build_parser: ap = argparse.ArgumentParser( .. a = ap.parse_args()
+!doc build_parser: The command line: every flag of the responder, with its help text.
+
+[deps] The imports every module shares, and the optional cipher (doc_kelcrypt).
+~sys.path.insert(
+
+[framing] The datagram: header offsets, the client's checksum, packet decoding for the log, the generic reply and the reliable ACK.
+PORT HDR_LEN BODY_OFF CKSUM_OFF MODE_OFF cksum now_ms hexdump describe describe_inner
+build_reply build_reliable_ack
+
+[handshake] The entrance: the subtype-3 server list and the type-129 reply that advances the lobby nest.
+build_lobby_advance build_srv_entry build_frag3
+
+[charrecords] The character roster: character ids, the 96-byte wire record and the CHARAMAKE answer.
+CHARA_REC_OFF CHARA_MAX_RECORDS PROBE_SLOTS CHARA_ID_MEMBER_OFF chara_id_for
+build_charamake_answer build_used_record build_probe_record build_chara_record
+
+[worlddoor] The world-door answer (selector 1 -> 2 and the type-0x7f bodies built on it).
+build_world_answer
+
+[worldchannel] The type-127 selector channel: selector names, request bodies, sealing an answer, the sender's ids.
+GS_READY_SELECTOR GS_ENDPOINT_SELECTORS GS_ENDPOINT_SELECTOR SELECTOR_NAMES seal_world_body
+selector_name request_body world_reply_fields packet_charid
+
+[lobbycmd] Lobby commands (selector 240/241): command ids, the clock, and the table and quest command numbers.
+LOBBY_CMD_PLAYTIME LOBBY_CMD_CLOCK lobby_clock_value LOBBY_CMD_SELECTOR_REQ
+LOBBY_CMD_SELECTOR_ANS lobby_cmd_id
+LOBBY_CMD_APPOINT LOBBY_CMD_KICK LOBBY_CMD_RETURN LOBBY_CMD_START LOBBY_CMD_QUEST
+LOBBY_CMD_QUEST_INFO
+
+[arenamaps] Maps and places: the lobby spawn descriptor and map-picker mask (selector 13), the lobby zone, and which arena zone, pieces and spawn each map uses.
+WORLD_SPAWN_SELECTOR_ANS SPAWN_OFF_X SPAWN_OFF_Y SPAWN_OFF_Z SPAWN_OFF_DIR_X
+SPAWN_OFF_DIR_Y SPAWN_OFF_DIR_Z SPAWN_OFF_INDEX LOBBY_MAP_MASK_OFF LOBBY_MAP_NAMES
+LOBBY_MAP_HOLES LOBBY_MAP_HIDDEN LOBBY_MAP_MASK_ALL LOBBY_MAP_MASK LOBBY_ZONE LOBBY_ZONE_OFF
+BT_MAP_ZONES_DEFAULT parse_map_zones ZONE_PIECES_DEFAULT ZONE_SPAWNS_DEFAULT parse_zone_pieces
+battle_bmap ARENA_OK ARENA_NO_ZONE ARENA_NO_SPAWN battle_map_arena parse_map_mask
+describe_map_mask SPAWN_Y_BIAS SPAWN_ROOM SPAWN_PRESETS
+
+[peerrecords] Other players as the client caches them: the 56-byte user record (selectors 19 and 37) and the cache-miss request.
+PEER_REC_LEN PEER_SELECTOR_REQ PEER_SELECTOR_ANS peer_miss_id PEER_NAME_OFF PEER_NAME_LEN
+PEER_RANK_OFF PEER_FLAGS_OFF PEER_ZONE_OFF PEER_IP_OFF PEER_PORT_OFF PEER_PROBE build_peer_record
+_user_rec_fields build_peer_answer
+
+[userlist] The lobby user list (selectors 10/11 and 18/19).
+USER_SELECTOR_REQ USER_SELECTOR_ANS USER_SELECTOR_REQS user_list_wanted_id
+build_user_list_answer
+
+[worldpose] Positions in the lobby: the client's own uid and pose, the type-125 world update and the relayed position broadcast.
+ENTRANCE_UID_OFF WORLD_DOOR_UID_OFF early_uid ingame_uid WORLD_UPDATE_TYPE WORLD_REC_LEN
+ingame_pose build_world_update PEER_RELAY_FLAG build_peer_relay PEER_POS_LEN peer_pos_id
+
+[tablerecords] The 120-byte battletable record: its offsets and flag bits, the browser list and the --battletable-list spec.
+BATTLETABLE_ANSWER_SEL BATTLETABLE_REC_OFF build_battletable_probe BATTLETABLE_LIST_REQ
+BATTLETABLE_LIST_ANS BT_REC_LEN BT_OFF_FLAGS BT_OFF_LEADER BT_OFF_TIME BT_OFF_UNK16
+BT_OFF_UNK22 BT_OFF_TARGET BT_OFF_BASE_HP BT_OFF_MAX_RP BT_OFF_MIN_RP BT_OFF_PW_REC
+BT_OFF_BRIEFING BT_OFF_CAPSULES BT_OFF_RESTRICT BT_OFF_PENALTY BT_OFF_KO_LIMIT BT_FLAG_PASSWORD
+BT_FLAG_FRIENDLY_FIRE BT_FLAG_CUSTOM_RESTRICT BT_FLAG_NPC BT_FLAG_HAS_RESTRICT BT_FLAG_MAX_RP
+BT_FLAG_MIN_RP BT_FLAG_ITEM_RESTRICT BT_FLAG_RANDOM_TEAMS BT_FLAG_KO_LIMIT BT_OFF_ID
+BT_OFF_MISSION BT_OFF_CUR BT_OFF_STATE BT_OFF_UNK31 BT_OFF_UNK32 BT_OFF_UNK34 BT_OFF_SITUATION
+BT_OFF_COMMENT BT_OFF_UNK108 BT_OFF_MAX BT_OFF_MODE BT_OFF_UNK111 BT_OFF_NIBBLES BT_OFF_MAP
+BT_OFF_UNK114 BT_OFF_UNK116 BT_MAPS build_battletable_record build_battletable_list
+parse_battletable_spec
+BT_FLAG_INDIVIDUAL BT_FLAG_UNIT BT_FLAG_BEGINNER BT_FLAG_SOLO BT_MODE_NAMES BT_FLAG_MISSION
+BT_FLAG_NOVICE
+
+[tableverbs] The battletable store and the console's table verbs: create, config, join, reserve, cancel, dissolve, invite.
+BT_REQ_CREATE BT_REQ_CONFIG BT_REQ_UPDATE BT_REQ_PREPARE BT_REQ_JOIN BT_REQ_JOIN_PW
+BT_REQ_RESERVE BT_REQ_RESERVE_PW BT_REQ_CANCEL BT_REQ_DISSOLVE BT_RESERVATION_CLEAR_SEL
+BT_REQ_INVITE BT_VERB_REQS BT_JOIN_REQS BT_OFF_GS_IP BT_OFF_GS_PORT
+BT_REQ_REC_OFF BT_MEMBERS_OFF BT_MAX_MEMBERS BT_PASSWORD_OFF
+BattletableStore build_battletable_verb_answer build_reserve_echo battletable_verb
+
+[questlist] The Solo quest list (selector 160), the mission list (selector 148) and the quest detail's map field.
+QUEST_LIST_REQ QUEST_DETAIL_MAP_OFF
+parse_id_ranges build_quest_list_body LIST148_REQ LIST148_ANS MISSION_ROW_OPEN
+build_list148_body parse_list148_spec
+
+[advertise] The address a client is handed, chosen per client (POL_ADVERTISE_PUBLIC / _LAN), and the table record stamped with it.
+_RFC1918_NETS _ip_or_none _is_rfc1918 host_for rec_for
+
+[gamemsg] The game-server channel (inner type 130): the request/answer ladder, the notify kinds and their builders.
+build_gs_stats GS_INNER_TYPE GS_MSG_MAX GS_ARM_MSG GS_ARM_MIN_BODY GS_KEEPALIVE_MSG
+GS_REVIVE_REQ GS_ITEM_USE_REQ GS_MAGIC_REQ GS_MAGIC_ANS GS_REQ_ANSWERS GS_REQ_NAMES
+GS_NOTIFY_MSG GS_NOTIFY_NAMES GS_SETUP_LEN GS_LEAVE_BRIEFING GS_READY_ROSTER_OFF
+GS_READY_ROSTER_STRIDE GS_READY_SESSION_OFF GS_READY_COUNT_OFF GS_READY_KIND_OFF
+gs_request_type build_gs_notify build_gs_team_list GS_SPAWN_MAP_OFF GS_SPAWN_ZONE_OFF
+GS_TEAM_NONE build_gs_spawn GS_DOWN_KIND GS_REVIVE_KIND build_gs_down GS_KILL_EVENT GS_KILL_REQ
+GS_RESPAWN_KIND GS_RESTART_POS_KIND GS_DAMAGE_GATE_KIND GS_PLAYER_LEFT_KIND GS_TEAM_SLOTS
+build_gs_kill_event mission_npc_report gs_kill_report build_gs_team_set build_gs_team_leave
+build_gs_add_chara build_gs_distribution build_magic_answer build_item_use_answer GS_MP_KIND
+build_gs_mp_push build_gs_message
+
+[battleroom] One battle: the rules its table record asks for (BattleRules), the running room (BattleRoom), rank point and unit gates.
+BattleRules LEADER_TAG BattleRoom battle_rules_from_record BT_REFUSE_RP rp_allowed
+record_password unit_teams
+
+[teamdist] The player distribution (notify kind 20): when a table is ready, the automatic teams, the Solo briefing.
+gs_real_ready gs_dist_due gs_auto_teams gs_real_distribution bt_start_targets
+gs_solo_distribution
+
+[briefingroom] The briefing room (selector 38's ready roster, a Solo quest as a mission) and the burst that starts a battle.
+GS_BATTLE_START_DEFAULT GS_NOTIFY_KIND_LIMIT GS_BATTLE_GO_DEFAULT GS_DAMAGE_GATE_KINDS
+GS_BATTLE_OVER_SELECTOR gs_battle_sequence gs_ready_roster quest_mission_record
+
+[arenadata] Arena data read from the user's own files: mission spawns, NPC controllers, team bases and starts, base reports and occupation.
+~BASE_GIMMICKS.update(
+load_mission_spawns MISSION_SPAWNS npc_controller_payload CONTROLLER_NPCS BASE_GIMMICKS
+BASE_GIMMICKS_DEFAULT BASE_POSITIONS TEAM_STARTS ARENA_TABLE_PATH load_arena_table
+TEAM_START_STEP team_start BASE_TYPE_TEAM base_gimmicks
+base_objects_payload BASE_REPORT_COUNT_OFF BASE_REPORT_OFF BASE_REPORT_LEN base_report
+base_hp_payload BASE_OCCUPY_RADIUS BASE_OCCUPY_S
+BASE_POSE_FRESH_S base_spots base_occupy_tick
+
+[p2pbattle] The battle layer between consoles (P2P types): decoding shots, damage and pick-ups the server has to see.
+P2P_DROP P2P_PICKUP P2P_MP_POINT P2P_SERVER_TYPES P2P_BATTLE_TYPES P2P_SHOT P2P_DAMAGE
+P2P_SENDER_OFF P2P_TARGET_OFF P2P_PAYLOAD_LEN_OFF P2P_PAYLOAD_OFF P2P_DAMAGE_STRIDE P2P_NAMES
+p2p_battle_type p2p_server_type p2p_server_type_mode4 p2p_record p2p_damage_entries
+synth_peer_inner
+
+[fielditems] Items on the battlefield: field item notices, capsules (pick-up, drop, hold, scoreboard) and dropped items.
+MAKO_CAPSULE CAPSULE_HOLD_S CAPSULE_RING CAPSULE_HOLDERS CARRIER_DROP_S FIELD_QUIET
+field_item_payload capsule_ring capsule_scoreboard_payload p2p_pickup_slot p2p_drop FIELD_SLOTS
+capsule_pickup capsule_drop capsule_hold capsule_count capsule_mission_check capsule_hold_done
+
+[cli] The command line (--help): the tool's usage text and every flag.
+~"""Talk back to Dirge of Cerberus
+_week_start_arg build_parser
+
+[worldserver] main(): the socket, the per-session state and the event loop that answers every datagram, and the --sweep table.
+BURST_GAP SWEEP main

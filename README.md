@@ -51,7 +51,7 @@ asks for is missing from the US build entirely and from the JP build past
 what the lobby needs. Player trade is relayed but the client-side flow has
 only been seen from one side. Several replies carry values that were found
 to work on the private deployment before their meaning was decoded;
-`docker-compose.yml` and the comments in `tools/docudp.py` say which.
+`docker-compose.yml` and the comments in `tools/docworld/` say which.
 
 ## How it fits the core
 
