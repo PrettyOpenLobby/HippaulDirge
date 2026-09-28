@@ -3169,6 +3169,10 @@ def main():
                       "0x%08x.. -> 0x%08x (the player)"
                       % (_nmis, doc_npc_spawn.ARENA_ID_BASE, _me),
                       flush=True)
+                if sess in _mnpc:
+                    _mnpc[sess]["ctl"] = {
+                        doc_npc_spawn.ARENA_ID_BASE + _i:
+                        [now + gamemsg.MISSION_CTL_CHECK_S, 1] for _i in range(_nmis)}
         # 2026-09-23: REPLACE dead mission NPCs. The situation's resource set
         # loads a fixed number of each model (bzd table 20: 3001 = e030 x1, w010,
         # w003, e102 x2) -- a third soldier draws nothing (live: six requested,
@@ -3176,7 +3180,8 @@ def main():
         # same type on the next spawn node a few seconds after each death, until
         # the objective ends the room.
         _mn = _mnpc.get(sess)
-        if _mn and _mn["due"] and sess.gs_join_src[0] is not None:
+        if (_mn and (_mn["due"] or _mn.get("ctl"))
+                and sess.gs_join_src[0] is not None):
             _room_r = battle_of(sess.seen_charid[0])
             if _room_r is None or _room_r.over:
                 _mnpc.pop(sess, None)
@@ -3194,11 +3199,50 @@ def main():
                             _nid, _typ, tuple(_pos), (0.0, 0.0, 1.0),
                             a.npc_spawn_hp),
                         seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
+                    # 2026-09-28: a kind 27 sent straight
+                    # after its Add Npc reached the client in the SAME frame
+                    # and was handled FIRST (acks 235 before 234, 243 before
+                    # 242), before the NPC existed. The soldier spawned
+                    # uncontrolled, never entered the 1 Hz report, and its
+                    # death was never counted (a mission stuck at 3 of 5).
+                    # So the 27 goes out MISSION_CTL_GAP_S later, below.
+                    _mn.setdefault("ctl", {})[_nid] = [now + gamemsg.MISSION_CTL_GAP_S, 0]
+                    print("  [missions] REPLACEMENT NPC 0x%x type %d at %s -> "
+                          "control 0x%x in %.1f s" % (_nid, _typ, _pos, _me,
+                                                      gamemsg.MISSION_CTL_GAP_S),
+                          flush=True)
+                # Hand control (kind 27) to the player and check it TOOK: a
+                # controlled NPC is listed in the player's 1 Hz report
+                # (mission_npc_report), so one missing from it after
+                # MISSION_CTL_CHECK_S gets its 27 again, up to
+                # MISSION_CTL_TRIES sends in all.
+                _seen = _mn.get("seen", ())
+                for _nid, _st in list(_mn.get("ctl", {}).items()):
+                    if _nid in _seen:
+                        _mn["ctl"].pop(_nid, None)
+                        if _st[1] > 1:
+                            print("  [missions] NPC 0x%x is in the 1 Hz report "
+                                  "now (control took on send %d)"
+                                  % (_nid, _st[1]), flush=True)
+                        continue
+                    if now < _st[0]:
+                        continue
+                    if _st[1] >= gamemsg.MISSION_CTL_TRIES:
+                        _mn["ctl"].pop(_nid, None)
+                        print("  [missions] NPC 0x%x STILL not in the 1 Hz "
+                              "report after %d kind-27 sends -- its death "
+                              "cannot be counted" % (_nid, _st[1]), flush=True)
+                        continue
+                    _me = sess.seen_charid[0]
                     s.sendto(gamemsg.build_gs_notify(
                         27, struct.pack("<III", _nid, _me, 0),
                         seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
-                    print("  [missions] REPLACEMENT NPC 0x%x type %d at %s -> "
-                          "control 0x%x" % (_nid, _typ, _pos, _me), flush=True)
+                    _st[1] += 1
+                    _st[0] = now + gamemsg.MISSION_CTL_CHECK_S
+                    if _st[1] > 1:
+                        print("  [missions] NPC 0x%x not in the 1 Hz report -- "
+                              "RE-SENT notify kind 27 (send %d)"
+                              % (_nid, _st[1]), flush=True)
         # sec 4fy: the battle END. Kind 4 is the RESULT (its arm 0x00bc1760
         # sets facade 0x40, which ends ev2045's battle loop -> act_win/lose ->
         # the result windows), and selector 39's arm 0x00bcbd70 is the full
@@ -3363,6 +3407,9 @@ def main():
                     due.append(_bt)            # sec 4fy: result / selector 39
             if _npc_arena_due.get(sess):
                 due.append(_npc_arena_due[sess])   # sec 4gs addendum 4
+            if _mnpc.get(sess):                    # mission NPC replace / kind 27
+                due.extend(d[0] for d in _mnpc[sess]["due"])
+                due.extend(c[0] for c in _mnpc[sess].get("ctl", {}).values())
             if _intro_due.get(sess.key):
                 due.append(_intro_due[sess.key])   # sec 4hc: the intro push
             if a.gs_real_dist and sess.seen_charid[0]:
@@ -3745,6 +3792,8 @@ def main():
             # clear even when the header is not readable (mission_npc_report).
             _npcs = gamemsg.mission_npc_report(data)
             if _npcs:
+                if _mnpc.get(sess) is not None:
+                    _mnpc[sess]["seen"] = {_n for _n, _hp in _npcs}
                 _rmn = battle_of(seen_charid[0])
                 if _rmn is not None and _rmn.mission is not None:
                     _me24 = seen_charid[0] or (_rmn.members[0] if _rmn.members else 0)
