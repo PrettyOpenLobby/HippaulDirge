@@ -3,18 +3,20 @@
 The world responder (docudp.py) runs as its own service. This module is the
 part of Dirge of Cerberus that lives INSIDE the core's login process: the
 content profile the Viewer shows for a Dirge Content ID (prof_010.pfb), built
-from the two files the responder keeps on the shared logs volume:
+from two of the tables the responder keeps in the stack's PostgreSQL database
+(docdb.py; they were doc-characters.json and doc-stats.json on the logs
+volume):
 
-    doc-characters.json   {"member:<id>": [ {slot, name, ...}, ... ]}
-    doc-stats.json        {"chars": {"member:<id>/<n>": {name, rank, rp, ...}}}
+    doc_character   key member:<id>    -> [ {slot, name, ...}, ... ]
+    doc_career      key member:<id>/<n> -> {name, rank, rp, ...}
 
-Loaded with POL_TITLES=doctitle in the core's login and authsess services;
-see docker-compose.title.yml.
+The core's login already has POL_DATABASE_URL, so nothing names a database
+here. Loaded with POL_TITLES=doctitle in the core's login and authsess
+services; see docker-compose.title.yml.
 """
-import json
-import os
-
 import titles
+
+import docdb
 
 #: the N of prof_010.pfb
 CONTENT_CODE = 10
@@ -22,40 +24,28 @@ CONTENT_CODE = 10
 #: the profile's slots: Name, Rank (the career ladder, 1..16), Ranking Points
 SLOT_NAME, SLOT_RANK, SLOT_RANKPOINT = 4, 6, 8
 
-
-def _log_dir():
-    return os.environ.get("POL_LOG_DIR", "/logs")
-
-
-def chara_store():
-    return os.environ.get("POL_DOC_CHARA_STORE", os.path.join(_log_dir(), "doc-characters.json"))
-
-
-def stats_store():
-    return os.environ.get("POL_DOC_STATS", os.path.join(_log_dir(), "doc-stats.json"))
-
-
-def _load(path, default):
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh) or default
-    except FileNotFoundError:
-        return default
+#: the tables this plugin reads
+CHARACTERS, CAREERS = "doc_character", "doc_career"
 
 
 def profile_for(member_id):
     """`{slot: value}` for a member: the lowest-slot named character and, when
-    the stats file has a career for it, its rank and ranking points."""
-    roster = _load(chara_store(), {}).get(f"member:{member_id}") or []
-    first = min((c for c in roster if c.get("name")),
-                key=lambda c: int(c.get("slot", 0)), default=None)
-    if not first:
+    the career store has a career for it, its rank and ranking points. {} when
+    the database cannot be read: a profile is never a guess."""
+    try:
+        roster = docdb.Table(CHARACTERS).get(f"member:{member_id}") or []
+        first = min((c for c in roster if c.get("name")),
+                    key=lambda c: int(c.get("slot", 0)), default=None)
+        if not first:
+            return {}
+        out = {SLOT_NAME: first["name"]}
+        careers = docdb.Table(CAREERS).with_prefix(f"member:{member_id}/")
+    except docdb.errors() as exc:
+        print(f"[doctitle] profile for member {member_id} not read: {exc}",
+              flush=True)
         return {}
-    out = {SLOT_NAME: first["name"]}
-    careers = _load(stats_store(), {}).get("chars") or {}
-    pre = f"member:{member_id}/"
     mine = sorted(k for k, c in careers.items()
-                  if k.startswith(pre) and (c or {}).get("name") == first["name"])
+                  if (c or {}).get("name") == first["name"])
     if mine:
         c = careers[mine[0]]
         out[SLOT_RANK] = min(max(int(c.get("rank") or 1), 1), 16)
@@ -68,7 +58,7 @@ class DirgeOfCerberus(titles.Title):
     content_code = CONTENT_CODE
 
     def describe(self):
-        return f"Dirge of Cerberus characters {chara_store()}"
+        return f"Dirge of Cerberus characters ({CHARACTERS}, {docdb.where()})"
 
     def profile_fields(self, cid, member_id):
         if member_id is None:
@@ -77,4 +67,6 @@ class DirgeOfCerberus(titles.Title):
 
 
 def register():
+    # the responder's tables, so a profile can be read before it first ran
+    docdb.migrate_at_start("doctitle")
     return titles.register(DirgeOfCerberus())
