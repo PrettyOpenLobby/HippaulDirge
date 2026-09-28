@@ -17,6 +17,13 @@ script starts a real docudp.py on a loopback port and drives it with
 synthetic client datagrams, which takes a few minutes. A script that needs
 data you have not generated (README.md, "Arena data") prints a line
 starting with "SKIP " and exits 0; it is counted as skipped.
+
+The exception is storage. The stores are tables in the OpenLobby core's
+PostgreSQL database (docdb.py), so every suite imports the core's polcore
+(found beside this repository, or through OPENLOBBY_SERVICES / OPENLOBBY_DIR),
+and a suite that uses a store makes a throwaway database on a PostgreSQL
+server (docpg.py: Docker, or POL_TEST_DATABASE_URL). With no server such a
+suite reports SKIP, or FAIL when POL_TEST_REQUIRE_DB=1.
 """
 import argparse
 import os
@@ -168,6 +175,16 @@ def main():
     a = ap.parse_args()
     group = E2E if a.e2e else SUITES + (E2E if a.all else [])
     chosen = [s for s in group if a.k in s[0]]
+    # The stores are PostgreSQL tables: every suite that uses one makes its own
+    # empty database (docpg.py). One server serves them all, handed on as
+    # POL_TEST_DATABASE_URL, so the run starts at most one container. A
+    # POL_DATABASE_URL from this environment never reaches a suite.
+    os.environ.pop("POL_DATABASE_URL", None)
+    os.environ.pop("DOC_TEST_DATABASE", None)
+    sys.path.insert(0, HERE)
+    import docpg
+    if docpg.server_available():
+        os.environ["POL_TEST_DATABASE_URL"] = docpg.pgtest.server_url()
     failed = []
     skips = []
     width = max([16] + [len(name) for name, _argv in chosen])
