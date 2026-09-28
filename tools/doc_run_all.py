@@ -85,6 +85,8 @@ SUITES = [
     ("doc_chat",       [PY, "doc_chat.py"]),
     # the arena data reader, on a made-up arena file (no game files needed)
     ("doc_extract_arena", [PY, "doc_extract_arena.py", "--selftest"]),
+    # docdb.py import: the old JSON store files into their tables
+    ("doc_import",     [PY, "doc_import_test.py"]),
 ]
 
 
