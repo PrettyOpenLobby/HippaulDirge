@@ -430,8 +430,13 @@ def run(accounts=False):
               "placed items for both members",
               has("[field] table 1: zone 201 situation 1100 ->")
               and has("[field] table 1: SENT notify kind 10 x"))
+        # Which generator filled slot 1 depends on whether A's drop reached
+        # the table before the GO placed the generators' items: after it,
+        # the drop holds slot 0 and generator 0 fills slot 1. Either order
+        # is right, so any generator index passes.
         check("log: the picked generator is emptied and rolls again later",
-              has("[field] table 1: generator 1 emptied"))
+              any(ln.startswith("  [field] table 1: generator ")
+                  and " emptied -- rolls again in " in ln for ln in lines))
     else:
         print("  SKIP the generator log checks: no doc_item_generators.json")
     check("log: no RESULT tally FAILED (each member found its own tally row)",
