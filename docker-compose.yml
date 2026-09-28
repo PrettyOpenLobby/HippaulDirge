@@ -26,9 +26,9 @@
 
 services:
   doc:
-    image: crystaldirge:latest
+    image: hippauldirge:latest
     build:
-      context: ../crystaldirge
+      context: ../hippauldirge
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
     pull_policy: build
@@ -44,7 +44,7 @@ services:
         condition: service_healthy
     environment:
       # OpenLobby's PostgreSQL (its docs/database.md). The responder's tables
-      # are CrystalDirge's own migrations (doc_*), applied at start.
+      # are HippaulDirge's own migrations (doc_*), applied at start.
       POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
       # OpenLobby's Valkey: the deploy gate's count of connected consoles
       # (live_sessions.py, live:doc)

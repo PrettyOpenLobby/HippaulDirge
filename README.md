@@ -1,4 +1,4 @@
-# CrystalDirge
+# HippaulDirge
 
 A server for the online mode of Dirge of Cerberus: Final Fantasy VII, the
 2006 PlayStation 2 release whose multiplayer ran through PlayOnline in Japan.
@@ -125,6 +125,9 @@ one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
 
 ## Prerequisites
 
+- This repository checked out as `hippauldirge`, which is where the compose files
+  look for it (`git clone https://github.com/PrettyOpenLobby/HippaulDirge.git hippauldirge`).
+  A checkout from before the rename, still named `crystaldirge`, needs renaming.
 - The core lobby stack (OpenLobby) checked out beside this repository, its
   image built (`openlobby:latest`), and its stack running on the same Docker
   host
@@ -151,7 +154,7 @@ healthy. The image is built on the core image (`OPENLOBBY_IMAGE`, default
 `openlobby:latest`).
 
 Without building, from the image published to
-`ghcr.io/prettyopenlobby/crystaldirge` on every push:
+`ghcr.io/prettyopenlobby/hippauldirge` on every push:
 
 ```
 docker compose --project-directory ../openlobby \

@@ -21,9 +21,9 @@
 
 services:
   login:
-    image: crystaldirge-title:latest
+    image: hippauldirge-title:latest
     build:
-      context: ../crystaldirge
+      context: ../hippauldirge
       dockerfile: Dockerfile.title
       args:
         OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
@@ -32,7 +32,7 @@ services:
       POL_TITLES: "${POL_TITLES:-doctitle}"
 
   authsess:
-    image: crystaldirge-title:latest
+    image: hippauldirge-title:latest
     pull_policy: never
     environment:
       POL_TITLES: "${POL_TITLES:-doctitle}"
