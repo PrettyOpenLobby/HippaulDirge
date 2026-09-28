@@ -140,6 +140,7 @@ def run(tag, mode, capsules=0, carrier=True):
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
     text = io.open(log_path, encoding="utf-8", errors="replace").read()
     res = {c: notifies(got[c], 4) for c in got}

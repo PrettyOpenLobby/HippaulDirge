@@ -60,6 +60,7 @@ def stop(srv):
         srv.wait(5)
     except Exception:
         srv.kill()
+        srv.wait()          # until it has exited it still holds the port
 
 
 def ask(sock, b):
