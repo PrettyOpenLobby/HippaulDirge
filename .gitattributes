@@ -1,3 +1,5 @@
 * text=auto
 *.png binary
 *.bin binary
+*.sh text eol=lf
+Dockerfile* text eol=lf
