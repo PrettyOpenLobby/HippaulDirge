@@ -23,13 +23,17 @@ def gs_dist_due(g, settle):
     settle), or None if it is not ready or has already gone out.  Checked on
     the server's clock as well as on request 31: the briefing room sends 31
     only when a player clicks a team, so a settle that ends after the last
-    click was never re-checked (live 09-13, table 4)."""
+    click was never re-checked (live 09-13, table 4).
+    2026-09-24: never before the briefing countdown the players are shown
+    (brief_end = Start + the record's Briefing Time).  The client's countdown
+    is display only and it waits for us, so starting at "ready + settle" cut
+    a 5:00 briefing off at 0:35."""
     if g.get("dist"):
         return None
     if g.get("ready_at") is None:
         # 2026-09-23: not ready yet -- wake for the auto-team deadline
         return g.get("auto_at")
-    return g["ready_at"] + settle
+    return max(g["ready_at"] + settle, g.get("brief_end") or 0.0)
 
 
 def gs_auto_teams(teams, members):

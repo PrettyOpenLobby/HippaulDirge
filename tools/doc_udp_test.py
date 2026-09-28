@@ -804,6 +804,19 @@ def main():
     check("dist due: auto-team deadline ignored once the dist went out",
           D.gs_dist_due({"ready_at": None, "dist": True, "auto_at": 50.0},
                         5.0) is None)
+    # 2026-09-24: never before the briefing countdown the players see
+    check("dist due: READY early -> held to the briefing end (a 5:00 "
+          "briefing used to start at 0:35)",
+          D.gs_dist_due({"ready_at": 100.0, "dist": False, "brief_end": 400.0},
+                        5.0) == 400.0)
+    check("dist due: READY after the briefing end -> ready_at + settle",
+          D.gs_dist_due({"ready_at": 398.0, "dist": False, "brief_end": 400.0},
+                        5.0) == 403.0)
+    check("dist due: Briefing Time None (brief_end None) -> ready_at + settle",
+          D.gs_dist_due({"ready_at": 100.0, "dist": False, "brief_end": None},
+                        5.0) == 105.0)
+    check("dist due TWIN: without brief_end the early case fires at 105 (the bug)",
+          D.gs_dist_due({"ready_at": 100.0, "dist": False}, 5.0) == 105.0)
     _at, _as = D.gs_auto_teams({_A: 1}, [_A, _B])
     check("auto-team: the live case (leader on 1, joiner never sent 31) "
           "-> joiner on team 0, and the table is READY",

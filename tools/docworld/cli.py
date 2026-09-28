@@ -1172,6 +1172,17 @@ def build_parser():
                          "is put on the smaller side, so the distribution still "
                          "goes out. The table record's Briefing Time (wire+111, "
                          "minutes) wins when set. Negative = never.")
+    ap.add_argument("--gs-no-briefing-clock", dest="gs_briefing_clock",
+                    action="store_false", default=True,
+                    help="2026-09-24: do NOT hold the battle start for the "
+                         "table's Briefing Time (wire+111 minutes). By default "
+                         "a table with one starts when the countdown the "
+                         "players see reaches 0; this restores the old start "
+                         "(ready + --gs-real-dist-settle, solo "
+                         "--gs-battle-after-join after the first team step).")
+    ap.add_argument("--gs-briefing-minute", type=float, default=60.0,
+                    help="seconds per Briefing Time minute (60; the e2e tests "
+                         "shorten it)")
     ap.add_argument("--gs-no-solo-distribution", dest="gs_solo_dist",
                     action="store_false", default=True,
                     help="sec 4fv: do NOT push the kind-20 distribution "
