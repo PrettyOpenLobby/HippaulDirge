@@ -17,7 +17,7 @@
     advertise.py     The address a client is handed, chosen per client (POL_ADVERTISE_PUBLIC / _LAN), and the table record stamped with it.
     gamemsg.py       The game-server channel (inner type 130): the request/answer ladder, the notify kinds and their builders.
     battleroom.py    One battle: the rules its table record asks for (BattleRules), the running room (BattleRoom), rank point and unit gates.
-    teamdist.py      The player distribution (notify kind 20): when a table is ready, the automatic teams, the Solo briefing.
+    teamdist.py      The player distribution (notify kind 20): when a table is ready, the automatic teams, rebalancing a one-sided table, the Solo briefing.
     briefingroom.py  The briefing room (selector 38's ready roster, a Solo quest as a mission) and the burst that starts a battle.
     arenadata.py     Arena data read from the user's own files: mission spawns, NPC controllers, team bases and starts, base reports and occupation.
     p2pbattle.py     The battle layer between consoles (P2P types): decoding shots, damage and pick-ups the server has to see.

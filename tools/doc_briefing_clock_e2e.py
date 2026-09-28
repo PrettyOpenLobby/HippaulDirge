@@ -13,6 +13,8 @@ briefing shortened by --gs-briefing-minute=6 (so the countdown is 6 s):
   3. solo, steps on a team at once        -> kind 20 at the countdown, not the
                                              2 s --gs-battle-after-join
   4. solo, NEVER steps on a team          -> still starts at the countdown
+  5. two players BOTH on team 0            -> rebalanced at 0, kind 20
+  6. TWIN, --gs-no-rebalance               -> stuck, no kind 20 (the stall)
 
     python doc_briefing_clock_e2e.py
 """
@@ -46,7 +48,7 @@ def is_kind20(p):
             and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 20)
 
 
-def run(tag, extra=(), solo=False, step=True, span=11.0):
+def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1):
     """-> (log text, seconds after START of the first kind 20 to A, to B)."""
     log_path = os.path.join(os.environ.get("TEMP", HERE),
                             "doc_briefing_clock_e2e_%s.log" % tag)
@@ -103,7 +105,7 @@ def run(tag, extra=(), solo=False, step=True, span=11.0):
         if step:
             ca.sendto(E.gs_req(E.A_CID, 31, arg=0, session=1), dst)
             if not solo:
-                cb.sendto(E.gs_req(E.B_CID, 31, arg=1, session=1), dst)
+                cb.sendto(E.gs_req(E.B_CID, 31, arg=b_team, session=1), dst)
         while time.time() - t0 < span:
             ca.sendto(E.gs_req(E.A_CID, 1, session=1), dst)
             if not solo:
@@ -160,6 +162,21 @@ def main():
           "SOLO 0x%x never chose a team" % E.A_CID in text, lp)
     check("solo, no step: kind 20 still arrives after the countdown",
           ta is not None and ta >= BRIEF_S, fmt(ta))
+
+    print("run 5: two players BOTH on team 0 (a one-sided table)")
+    text, ta, tb, lp = run("onesided", b_team=0)
+    check("log: REBALANCED B onto team 1 at the end of the briefing",
+          ("REBALANCED 0x%x -> team 1" % E.B_CID) in text, lp)
+    check("one-sided: kind 20 to both, at the countdown (not stuck)",
+          ta is not None and tb is not None and BRIEF_S <= ta < BRIEF_S + 3,
+          "A %s, B %s" % (fmt(ta), fmt(tb)))
+
+    print("run 6: TWIN -- both on team 0 with --gs-no-rebalance")
+    text, ta, tb, lp = run("onesided_twin", b_team=0,
+                           extra=("--gs-no-rebalance",))
+    check("TWIN: no rebalance, no kind 20 -- the stall",
+          "REBALANCED" not in text and ta is None and tb is None,
+          "A %s, B %s" % (fmt(ta), fmt(tb)))
 
     print()
     if FAILS:
