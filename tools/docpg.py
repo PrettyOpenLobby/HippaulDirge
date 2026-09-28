@@ -46,6 +46,16 @@ try:
 except ImportError:                                          # no core beside us
     pgtest = None
 
+# The core's account code keeps a key file beside its data
+# (<POL_DATA_DIR, default /data>/login-pw.key) and writes it the first time a
+# suite makes a member. A suite, and every server it starts, gets a temporary
+# directory for both instead, so a test never writes to a real data directory.
+if not os.environ.get("POL_LOGIN_PW_KEY") and not os.environ.get("POL_LOGIN_PW_KEYFILE"):
+    import tempfile
+    _scratch = tempfile.mkdtemp(prefix="docpg-")
+    os.environ["POL_LOGIN_PW_KEYFILE"] = os.path.join(_scratch, "login-pw.key")
+    os.environ.setdefault("POL_DATA_DIR", _scratch)
+
 
 def require_db():
     return os.environ.get("POL_TEST_REQUIRE_DB", "") == "1"
