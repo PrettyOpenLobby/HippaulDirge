@@ -3478,7 +3478,14 @@ def main():
                 for _sess in list(sessions.values()):
                     fire_keepalives(_sess, _t)
                 continue
-        data, src = s.recvfrom(65535)
+        try:
+            data, src = s.recvfrom(65535)
+        except ConnectionResetError:
+            # Windows only: a datagram we sent to a client that has since
+            # closed its socket comes back as an ICMP port-unreachable, and
+            # Winsock reports it here on the next receive. Nothing was
+            # received, so there is nothing to answer.
+            continue
         # The addresses THIS sender can reach (host_for): every reply below that
         # carries one uses these, not a.lobby_ip / _gs_endpoint directly.
         _lip = advertise.host_for(a.lobby_ip, src[0])
