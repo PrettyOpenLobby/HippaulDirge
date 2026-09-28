@@ -1186,6 +1186,14 @@ def main():
                           "AUTO-TEAMED %s (they never sent request 31)"
                           % (key, ", ".join("0x%x -> team %d" % (m, _auto[m])
                                             for m in _assigned)), flush=True)
+                if len(members) >= 2 and a.gs_rebalance:
+                    _rb, _moved = teamdist.gs_rebalance_teams(g["teams"], members)
+                    if _moved:
+                        g["teams"].update(_rb)
+                        print("  [roster] table %d: briefing time is up and "
+                              "everyone is on ONE side -- REBALANCED %s"
+                              % (key, ", ".join("0x%x -> team %d" % (m, _rb[m])
+                                                for m in _moved)), flush=True)
         for obs, ms in live.items():
             shown = g["shown"].setdefault(obs, {})
             # 2026-09-23: someone stepped off a space (request 33) -> kind 1,
@@ -5984,11 +5992,14 @@ def main():
                                           % (_sk, _rsec), flush=True)
                                 if a.gs_auto_team_after >= 0:
                                     gs_table_state(_sk)["auto_at"] = (
-                                        time.time() + _bsec + 2.0)
+                                        gs_table_state(_sk)["brief_end"]
+                                        or time.time() + _bsec + 2.0)
                                     print("  [start-all] table %d: anyone "
-                                          "without a team is auto-teamed in "
+                                          "without a team is auto-teamed (and "
+                                          "a one-sided table rebalanced) in "
                                           "%.0f s (end of the briefing)"
-                                          % (_sk, _bsec + 2.0), flush=True)
+                                          % (_sk, gs_table_state(_sk)["auto_at"]
+                                             - time.time()), flush=True)
                                 print("  [start-all] leader 0x%08x START at table "
                                       "%d -> other seated: %s"
                                       % (_lead, _sk, ["0x%x" % m for m in _others]),

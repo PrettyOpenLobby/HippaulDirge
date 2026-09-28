@@ -1,4 +1,4 @@
-"""The player distribution (notify kind 20): when a table is ready, the automatic teams, the Solo briefing."""
+"""The player distribution (notify kind 20): when a table is ready, the automatic teams, rebalancing a one-sided table, the Solo briefing."""
 
 
 
@@ -33,7 +33,10 @@ def gs_dist_due(g, settle):
     if g.get("ready_at") is None:
         # 2026-09-23: not ready yet -- wake for the auto-team deadline
         return g.get("auto_at")
-    return max(g["ready_at"] + settle, g.get("brief_end") or 0.0)
+    _be = g.get("brief_end")
+    if _be and g["ready_at"] >= _be:
+        return g["ready_at"]     # the countdown is over: no one can still move
+    return max(g["ready_at"] + settle, _be or 0.0)
 
 
 def gs_auto_teams(teams, members):
@@ -56,6 +59,24 @@ def gs_auto_teams(teams, members):
             count[t] += 1
             assigned.append(m)
     return out, assigned
+
+
+def gs_rebalance_teams(teams, members):
+    """2026-09-24: a stuck briefing only frustrates players, so return
+    (teams, moved) when the briefing time is up and every seated member is on
+    ONE side -- the table can never be ready, so move the LAST floor(n/2) in
+    seat order (the leader stays) to the other side.  A lopsided but playable
+    split (3 v 1) is the players' choice and is left alone.  Pure."""
+    members = [m for m in members if m]
+    out = dict(teams)
+    sides = {out[m] for m in members if m in out}
+    if len(members) < 2 or len(sides) != 1 or any(m not in out for m in members):
+        return out, []
+    other = 0 if sides.pop() else 1
+    moved = members[len(members) - len(members) // 2:]
+    for m in moved:
+        out[m] = other
+    return out, moved
 
 
 def gs_real_distribution(teams, members):

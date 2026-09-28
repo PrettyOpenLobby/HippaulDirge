@@ -108,8 +108,8 @@ build_gs_mp_push build_gs_message
 BattleRules LEADER_TAG BattleRoom battle_rules_from_record BT_REFUSE_RP rp_allowed
 record_password unit_teams
 
-[teamdist] The player distribution (notify kind 20): when a table is ready, the automatic teams, the Solo briefing.
-gs_real_ready gs_dist_due gs_auto_teams gs_real_distribution bt_start_targets
+[teamdist] The player distribution (notify kind 20): when a table is ready, the automatic teams, rebalancing a one-sided table, the Solo briefing.
+gs_real_ready gs_dist_due gs_auto_teams gs_rebalance_teams gs_real_distribution bt_start_targets
 gs_solo_distribution
 
 [briefingroom] The briefing room (selector 38's ready roster, a Solo quest as a mission) and the burst that starts a battle.

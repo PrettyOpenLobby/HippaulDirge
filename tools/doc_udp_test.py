@@ -812,6 +812,25 @@ def main():
     check("dist due: READY after the briefing end -> ready_at + settle",
           D.gs_dist_due({"ready_at": 398.0, "dist": False, "brief_end": 400.0},
                         5.0) == 403.0)
+    check("dist due: READY once the countdown is over -> at once, no settle",
+          D.gs_dist_due({"ready_at": 402.0, "dist": False, "brief_end": 400.0},
+                        5.0) == 402.0)
+    # 2026-09-24: a one-sided table at zero is REBALANCED
+    _C = _B + 1
+    _rb, _mv = D.gs_rebalance_teams({_A: 0, _B: 0}, [_A, _B])
+    check("rebalance: 2 on team 0 -> the joiner moves to 1, the table is READY",
+          _rb == {_A: 0, _B: 1} and _mv == [_B]
+          and D.gs_real_ready(_rb, [_A, _B])[0], "%r %r" % (_rb, _mv))
+    _rb, _mv = D.gs_rebalance_teams({_A: 1, _B: 1, _C: 1}, [_A, _B, _C])
+    check("rebalance: 3 on team 1 -> the LAST one moves (leader stays), 2 v 1",
+          _rb == {_A: 1, _B: 1, _C: 0} and _mv == [_C], "%r %r" % (_rb, _mv))
+    _rb, _mv = D.gs_rebalance_teams({_A: 0, _B: 0, _C: 1}, [_A, _B, _C])
+    check("rebalance: a playable 2 v 1 is left alone",
+          _mv == [] and _rb == {_A: 0, _B: 0, _C: 1})
+    _rb, _mv = D.gs_rebalance_teams({_A: 0}, [_A])
+    check("rebalance: solo is left alone", _mv == [] and _rb == {_A: 0})
+    check("rebalance TWIN: without it, 2 on team 0 is NOT ready (the stall)",
+          not D.gs_real_ready({_A: 0, _B: 0}, [_A, _B])[0])
     check("dist due: Briefing Time None (brief_end None) -> ready_at + settle",
           D.gs_dist_due({"ready_at": 100.0, "dist": False, "brief_end": None},
                         5.0) == 105.0)

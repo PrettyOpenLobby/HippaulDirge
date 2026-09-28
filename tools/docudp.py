@@ -375,6 +375,7 @@ _OWNERS = {
     'gs_ready_roster': 'briefingroom',
     'gs_real_distribution': 'teamdist',
     'gs_real_ready': 'teamdist',
+    'gs_rebalance_teams': 'teamdist',
     'gs_request_type': 'gamemsg',
     'gs_solo_distribution': 'teamdist',
     'hexdump': 'framing',

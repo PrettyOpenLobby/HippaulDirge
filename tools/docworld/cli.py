@@ -1180,6 +1180,12 @@ def build_parser():
                          "players see reaches 0; this restores the old start "
                          "(ready + --gs-real-dist-settle, solo "
                          "--gs-battle-after-join after the first team step).")
+    ap.add_argument("--gs-no-rebalance", dest="gs_rebalance",
+                    action="store_false", default=True,
+                    help="2026-09-24: do NOT move players when the briefing "
+                         "time is up and everyone stands on ONE side (by "
+                         "default the last half in seat order is moved to the "
+                         "other side so the battle can start).")
     ap.add_argument("--gs-briefing-minute", type=float, default=60.0,
                     help="seconds per Briefing Time minute (60; the e2e tests "
                          "shorten it)")
