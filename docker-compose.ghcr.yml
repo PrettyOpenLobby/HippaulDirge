@@ -1,12 +1,12 @@
-# Run the published images instead of building. Apply ON TOP of
-# docker-compose.yml:
+# Run the published image instead of building. Apply ON TOP of
+# docker-compose.yml, in OpenLobby's project like it (from this directory):
 #
-#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
-#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#   docker compose --project-directory ../openlobby \
+#       --env-file ../openlobby/.env --env-file .env \
+#       -f ../openlobby/docker-compose.yml -f docker-compose.yml \
+#       -f docker-compose.ghcr.yml up -d doc
 #
-# (or COMPOSE_FILE=docker-compose.yml:docker-compose.ghcr.yml in .env, then
-# plain `docker compose up -d`). Needs Docker Compose 2.24 or newer (the
-# `!reset` that drops the build step).
+# Needs Docker Compose 2.24 or newer (the `!reset` that drops the build step).
 
 services:
   doc:
