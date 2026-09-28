@@ -34,6 +34,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_stats as S                                       # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, notifies, FAILS  # noqa: E402
 
@@ -60,7 +61,7 @@ def drain(sock):
 
 
 def sock():
-    c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    c = udp_socket()
     c.bind(("127.0.0.1", 0))
     c.settimeout(0.4)
     return c

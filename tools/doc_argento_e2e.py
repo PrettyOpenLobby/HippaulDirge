@@ -27,6 +27,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D           # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_npc as N          # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
 
@@ -108,7 +109,7 @@ def main():
     except OSError:
         pass
     log = io.open(log_path, "w", encoding="utf-8")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = udp_socket()
     sock.bind(("127.0.0.1", 0))
     sock.settimeout(0.4)
     try:

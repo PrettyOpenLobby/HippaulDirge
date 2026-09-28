@@ -32,6 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D            # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_npc as N           # noqa: E402
 import doc_npcquests as Q     # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
@@ -107,7 +108,7 @@ def main():
     try:
         time.sleep(2.5)
         check("docudp is up", srv.poll() is None)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = udp_socket()
         sock.bind(("127.0.0.1", 0))
         sock.settimeout(0.4)
 
@@ -206,7 +207,7 @@ def wither_run():
     try:
         time.sleep(2.5)
         check("[wither] docudp is up", srv.poll() is None)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = udp_socket()
         sock.bind(("127.0.0.1", 0))
         sock.settimeout(0.4)
         ev = walk_up(sock, Q.HIREN)

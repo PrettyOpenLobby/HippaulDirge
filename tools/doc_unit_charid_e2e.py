@@ -14,7 +14,6 @@ Runs the real docudp on loopback:
 """
 import io
 import os
-import socket
 import struct
 import subprocess
 import sys
@@ -23,6 +22,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
+from doc_e2e_udp import udp_socket  # noqa: E402
 import doc_battle_e2e as E                                  # noqa: E402
 import doc_unit                                             # noqa: E402
 
@@ -56,7 +56,7 @@ def run(world_door):
         time.sleep(2.5)
         check("docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", E.PORT)
-        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c = udp_socket()
         c.bind(("127.0.0.1", 0))
         if world_door:
             tail = bytearray(80)
