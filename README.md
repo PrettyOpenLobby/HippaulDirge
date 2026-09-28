@@ -121,7 +121,9 @@ data, so they do not ship: `--npc-spawn` stays off until you put a
 `tools/doc_npc_table.json` beside the code, shaped
 `{"npcs": [[number, record, type, x, y, z, dir_x, dir_z, "motion"], ...]}`,
 one row per standing NPC of the lobby zone's character table. No tool to
-read that table out of your own copy is provided yet.
+read that table out of your own copy is provided yet. The rows come from the
+character section of the lobby zone's level file, and only part of that
+record layout is known.
 
 ## Arena data
 
@@ -141,6 +143,29 @@ is optional; the server runs without it.
   [[x, y, z], [x, y, z]]}}`. Without it both teams use the arena spawn and
   Team Base occupation has no spots to stand on.
 
+`tools/doc_extract_arena.py` builds the first two from your own copy of the
+game:
+
+```
+python tools/doc_extract_arena.py /path/to/your/game
+```
+
+The path is the game's installed data as copied off the PlayStation 2 hard
+disk (the folder that holds `data/zone/`), or an unpacked patch tree laid out
+the same way. Each arena has a folder `data/zone/zNNN/` with its level file
+`bzd.bin`. The server was written against the arena files of retail patch
+20060124_3, which start with the version tag `bzd048`; the tool reads those,
+skips any other with a message, and writes `doc_mission_spawns.json` and
+`doc_item_generators.json` beside `docudp.py` (`--out` picks another folder,
+`--only spawns` or `--only generators` writes one of them). An install that
+was never patched still has the disc's older arena files and gives no table.
+`python tools/doc_extract_arena.py --selftest` checks the reader on a
+made-up arena file and needs no game files.
+
+There is no tool yet for `tools/doc_arena_table.json`. The team start points
+and the base positions are in the same level files (start nodes and base
+gimmicks), but no reader for them has been written.
+
 ## Selftests
 
 ```
@@ -151,7 +176,8 @@ runs every suite: the cipher (the published Twofish known-answer test, then
 packets of every mode and length round-tripped), every measured wire offset
 the responder ships, the character store, careers, play time, NPCs, the
 shop, rankings, units, gear, trade, missions, the novice mark, the lobby item
-quests, rewards, magic, items, the field and chat. Nothing opens a socket.
+quests, rewards, magic, items, the field, chat and the arena data reader.
+Nothing opens a socket.
 
 The `tools/doc_*_e2e.py` scripts and `tests/test_doc_session_nat.py` go one
 step further: each starts a real `docudp.py` on a loopback port and drives it
