@@ -23,7 +23,6 @@ the real docudp main() with --stats / --shop:
     python doc_launch_e2e.py            # ~75 s
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -37,6 +36,7 @@ import docudp as D            # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_gear as G          # noqa: E402
 import doc_shop as S          # noqa: E402
+import docpg                  # noqa: E402
 from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41573"))
@@ -82,16 +82,13 @@ def door_bag(b):
 
 
 def start(tag, extra=(), stats_seed=None, shop_seed=None):
-    stats = os.path.join(TMP, "doc_launch_e2e_%s_stats.json" % tag)
-    shop = os.path.join(TMP, "doc_launch_e2e_%s_shop.json" % tag)
+    # the career and wallet stores: a fresh database per server, seeded as
+    # the store files were; `stats` and `shop` name the stores for docpg.read
+    stats, shop = "stats", "shop"
+    docpg.e2e_database("doc_launch_e2e")
     for p, seed in ((stats, stats_seed), (shop, shop_seed)):
-        try:
-            os.remove(p)
-        except OSError:
-            pass
         if seed is not None:
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(seed, f)
+            docpg.seed(p, seed)
     log_path = os.path.join(TMP, "doc_launch_e2e_%s.log" % tag)
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
@@ -101,7 +98,7 @@ def start(tag, extra=(), stats_seed=None, shop_seed=None):
             "--gs-battle-go-after=1", "--gs-real-dist-settle=1",
             "--gs-battle-reset-after=1", "--gs-battle-after-join=2",
             "--session-idle-drop=0", "--intro=off",
-            "--stats", stats, "--shop", shop] + list(extra)
+            "--stats", "on", "--shop", "on"] + list(extra)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
@@ -155,7 +152,7 @@ def run_door():
         b = door(c, L_CID)
         check("[door] L (before the rule) keeps the DG Soldier Mask at body[76]",
               b is not None and struct.unpack_from("<I", b, 76)[0] == G.MASK_DG_M)
-        w = json.load(open(shop, encoding="utf-8"))
+        w = docpg.read(shop)
         check("[door] L: the mask is now in its PERSISTED bag, gil untouched",
               w[key(L_CID)]["bag"].get("0x%08x" % G.MASK_DG_M) == 1
               and w[key(L_CID)]["gil"] == 777, "%r" % w[key(L_CID)])
@@ -182,14 +179,14 @@ def run_door():
             time.sleep(0.15)
         time.sleep(3.0)
         drain(c)
-        w = json.load(open(shop, encoding="utf-8"))
+        w = docpg.read(shop)
         check("[door] the exam clear OWES N the mask (wallet smask_due)",
               w[key(N_CID)].get(G.MASK_DUE) == 1, "%r" % {
                   k: v for k, v in w[key(N_CID)].items() if k != "bag"})
         b = door(c, N_CID)
         check("[door] N's next world door wears it: body[76] = DG Soldier Mask M",
               b is not None and struct.unpack_from("<I", b, 76)[0] == G.MASK_DG_M)
-        w = json.load(open(shop, encoding="utf-8"))
+        w = docpg.read(shop)
         check("[door] ...and it is in N's persisted bag, the debt settled",
               w[key(N_CID)]["bag"].get("0x%08x" % G.MASK_DG_M) == 1
               and G.MASK_DUE not in w[key(N_CID)])
@@ -266,7 +263,7 @@ def run_drop():
         drain(ca)
     finally:
         text = stop(srv, log, lp)
-    chars = json.load(open(stats, encoding="utf-8"))["chars"]
+    chars = docpg.read(stats)["chars"]
     ca_, cb_ = chars.get(key(A_CID), {}), chars.get(key(B_CID), {})
     lines = text.splitlines()
     check("[drop] no traceback", "Traceback" not in text)

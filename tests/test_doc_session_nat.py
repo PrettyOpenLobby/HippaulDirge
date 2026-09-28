@@ -273,15 +273,17 @@ def case_portmove(script, tools, port, label, extra=(), expect_adopt=True):
 def case_store(script, tools, port, label):
     """A port move with REAL per-account state behind it: a chara store, so the
     session has a loaded roster (roster_uid + chara_ids, a dict) to lose."""
-    import json
-    store = os.path.join(LOGDIR, "store-%d.json" % port)
-    with open(store, "w", encoding="utf-8") as f:
-        json.dump({"0x%08x" % UA: [{"slot": 0, "name": "Lex", "gender": 0,
-                                    "app92": 0x12, "app93": 0x10, "voice": 0}]},
-                  f)
+    # the store is the doc_character table: a fresh database, seeded
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import docpg
+    docpg.e2e_database("test_doc_session_nat")
+    docpg.seed("characters",
+               {"0x%08x" % UA: [{"slot": 0, "name": "Lex", "gender": 0,
+                                 "app92": 0x12, "app93": 0x10, "voice": 0}]})
     print("[%s] store: roster loaded on 41030, then the same charid on 41031"
           % label, flush=True)
-    srv = Server(script, tools, port, extra=("--chara-store=" + store,))
+    srv = Server(script, tools, port, extra=("--chara-store=on",))
     a = Client(41030)
     try:
         a.send(pose(CA, UA), srv)         # -> refresh_roster(uid): roster_uid + chara_ids

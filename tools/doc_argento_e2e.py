@@ -16,7 +16,6 @@ command 26 (checkQuestEvent) of the shape quest_scr003.ev_n04 sends:
     python doc_argento_e2e.py            # ~15 s
 """
 import io
-import json
 import os
 import socket
 import struct
@@ -30,6 +29,7 @@ import docudp as D           # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening, LISTENING  # noqa: E402
 import doc_npc as N          # noqa: E402
 from doc_battle_e2e import world_req, check, FAILS   # noqa: E402
+import docpg                # noqa: E402
 
 PORT = int(os.environ.get("DOC_ARGENTO_E2E_PORT", "41557"))
 CID = 0x0002A664
@@ -39,11 +39,11 @@ def sel_of(p):
     return p[D.BODY_OFF + 1] if len(p) > D.BODY_OFF + 1 else None
 
 
-def run(stats, log, extra=()):
+def run(log, extra=()):
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
             "--bt-no-onfly-reserve", "--session-idle-drop=0",
-            "--stats", stats] + list(extra)
+            "--stats", "on"] + list(extra)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     # every run writes to the same log: wait for THIS start's listening line
     with io.open(log.name, encoding="utf-8", errors="replace") as f:
@@ -107,17 +107,14 @@ def mission_list(sock):
 def main():
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_argento_e2e.log")
-    stats = os.path.join(tmp, "doc_argento_e2e_stats.json")
-    try:
-        os.remove(stats)
-    except OSError:
-        pass
+    # the career store: a fresh database the servers below share
+    docpg.e2e_database("doc_argento_e2e")
     log = io.open(log_path, "w", encoding="utf-8")
     sock = udp_socket()
     sock.bind(("127.0.0.1", 0))
     sock.settimeout(0.4)
     try:
-        srv = run(stats, log)
+        srv = run(log)
         try:
             ml = mission_list(sock) or []
             ids = [q for q, _ in ml]
@@ -132,8 +129,7 @@ def main():
             check("walk-up after the accept -> 305", ask(sock, 0) == 305)
         finally:
             stop(srv)
-        with open(stats, encoding="utf-8") as f:
-            data = json.load(f)
+        data = docpg.read("stats")
         keys = [k for k, c in data["chars"].items() if "argento" in c]
         check("the store holds one Argento state", len(keys) == 1, str(keys))
         if keys:
@@ -142,9 +138,8 @@ def main():
                   c["argento"] == {"met": 1, "rank": c.get("rank", 1)}, str(c["argento"]))
             c["rank"] = c["argento"]["rank"] + 1
             c.setdefault("quests", {}).update({"16": 1, "18": 1, "22": 1})
-            with open(stats, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        srv = run(stats, log)
+            docpg.seed("stats", data)
+        srv = run(log)
         try:
             check("rank raised + 16/18/22 cleared -> 300 (chain complete)",
                   ask(sock, 0) == 300)
@@ -152,14 +147,12 @@ def main():
             check("Drone 3rd -> 2nd: still no Scout tab on the wire", 5 not in ml and 16 in ml)
         finally:
             stop(srv)
-        with open(stats, encoding="utf-8") as f:
-            data = json.load(f)
+        data = docpg.read("stats")
         for c in data["chars"].values():
             if "argento" in c:
                 c["rank"] = 4
-        with open(stats, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        srv = run(stats, log)
+        docpg.seed("stats", data)
+        srv = run(log)
         try:
             ml = dict(mission_list(sock) or [])
             check("Scout 3rd: Scout tab (rank byte 3) added, Drone kept, Trooper hidden",
@@ -167,7 +160,7 @@ def main():
                   and 30 not in ml, str(ml))
         finally:
             stop(srv)
-        srv = run(stats, log, ["--npc-events", "4:2:303"])
+        srv = run(log, ["--npc-events", "4:2:303"])
         try:
             check("--npc-events 4:2:303 wins over the ledger", ask(sock, 2) == 303)
         finally:

@@ -49,11 +49,9 @@ def main():
     twin = "--twin" in sys.argv
     tmp = os.environ.get("TEMP", HERE)
     log_path = os.path.join(tmp, "doc_leader_battle_e2e.log")
-    stats = os.path.join(tmp, "doc_leader_battle_e2e_stats.json")
-    try:
-        os.remove(stats)
-    except OSError:
-        pass
+    # the career store: a fresh database for this server
+    import docpg
+    docpg.e2e_database("doc_leader_battle_e2e")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
             "--bind", "127.0.0.1", "--port", str(PORT),
@@ -62,7 +60,7 @@ def main():
             "--gs-battle-length=6", "--gs-battle-go-after=1",
             "--gs-real-dist-settle=1", "--gs-battle-reset-after=1",
             "--gs-battle-after-join=30", "--session-idle-drop=0", "--intro=off",
-            "--stats", stats, "--leader-tag=%s" % ("off" if twin else "on")]
+            "--stats", "on", "--leader-tag=%s" % ("off" if twin else "on")]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=HERE)
     got = {A_CID: [], B_CID: [], C_CID: []}

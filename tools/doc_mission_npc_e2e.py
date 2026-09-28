@@ -105,11 +105,9 @@ def main():
               "run needs your own enemy spawn nodes (the unit checks ran: %s)"
               % ("ALL PASS" if not FAILS else "%d FAIL(S)" % len(FAILS)))
         return 1 if FAILS else 0
-    stats =os.path.join(TMP, "doc_mission_npc_e2e_stats.json")
-    try:
-        os.remove(stats)
-    except OSError:
-        pass
+    # the career store: a fresh database for this server
+    import docpg
+    docpg.e2e_database("doc_mission_npc_e2e")
     log_path = os.path.join(TMP, "doc_mission_npc_e2e.log")
     log = io.open(log_path, "w", encoding="utf-8")
     argv = [sys.executable, os.path.join(HERE, "docudp.py"),
@@ -119,7 +117,7 @@ def main():
             "--gs-battle-go-after=1", "--gs-real-dist-settle=1",
             "--gs-battle-reset-after=1", "--gs-battle-after-join=2",
             "--session-idle-drop=0", "--intro=off", "--npc-arena-after=1",
-            "--mission-ledger=off", "--stats", stats]
+            "--mission-ledger=off", "--stats", "on"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
