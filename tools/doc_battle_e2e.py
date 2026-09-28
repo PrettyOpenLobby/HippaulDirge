@@ -30,7 +30,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D  # noqa: E402
-from doc_e2e_udp import udp_socket  # noqa: E402
+from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_field  # noqa: E402
 import docpg  # noqa: E402
 
@@ -147,7 +147,7 @@ def run(accounts=False):
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     try:
-        time.sleep(2.5)
+        wait_listening(log, srv)
         check("docudp is up", srv.poll() is None)
         dst = ("127.0.0.1", PORT)
         ca = udp_socket()
@@ -352,6 +352,7 @@ def run(accounts=False):
             srv.wait(5)
         except Exception:
             srv.kill()
+            srv.wait()          # until it has exited it still holds the port
         log.close()
     text = io.open(log_path, encoding="utf-8", errors="replace").read()
     lines = text.splitlines()
