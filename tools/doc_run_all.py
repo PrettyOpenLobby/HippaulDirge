@@ -32,6 +32,8 @@ SUITES = [
     ("doc_charastore", [PY, "doc_charastore.py"]),
     # career stats: the battle tally, the medal rules, the exam ladder
     ("doc_stats",      [PY, "doc_stats.py"]),
+    # the title plugin: the Viewer's profile out of the character and stats files
+    ("doc_title",      [PY, "doc_title_test.py"]),
     # play time (lobby command 20) accrual and the player search
     ("doc_playtime",   [PY, "doc_playtime.py"]),
     # lobby NPC conversations: the quest-event tables and the 26/27/39 answers

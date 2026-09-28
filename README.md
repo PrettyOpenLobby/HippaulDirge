@@ -59,9 +59,26 @@ The core (OpenLobby) does the login, the DNS and the member profile; this
 repository is one UDP service, `docudp.py`, on port 55040. It joins the core's
 data volume read-only, to learn which PlayOnline member is signed in at each
 console's address, and the core's logs volume, where it keeps its stores
-(characters, careers, shop, units, rankings) as JSON files. The core's lobby
-reads two of those files to fill the game's content profile (character name,
-rank, ranking points) in the PlayOnline Viewer.
+(characters, careers, shop, units, rankings) as JSON files. The title plugin
+below reads two of those files to fill the game's content profile (character
+name, rank, ranking points) in the PlayOnline Viewer.
+
+## The title plugin (the Viewer's profile)
+
+The core builds the profile the Viewer shows for a Dirge of Cerberus Content ID from
+data only this title holds, so a small plugin runs inside the core's `login`
+and `authsess` processes (OpenLobby's `services/titles.py`, `POL_TITLES`).
+`Dockerfile.title` layers it on the core image and `docker-compose.title.yml`
+swaps that image into those two services. From this directory, with the core
+checked out beside it:
+
+```
+docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.title.yml     up -d --build login authsess
+```
+
+Without it the game plays the same; only the Viewer's profile screen for a Dirge Content ID stays empty. The plugin reads the character and stats files the responder keeps on the core's logs volume. To run several titles, build each title image on the previous
+one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
+`.env`, for example `POL_TITLES=tmtitle,doctitle`.
 
 ## Prerequisites
 
