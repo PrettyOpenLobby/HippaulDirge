@@ -40,10 +40,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      valkey:
+        condition: service_healthy
     environment:
       # OpenLobby's PostgreSQL (its docs/database.md). The responder's tables
       # are CrystalDirge's own migrations (doc_*), applied at start.
       POL_DATABASE_URL: "postgresql://openlobby:${POL_DB_PASSWORD:-openlobby}@postgres:5432/openlobby"
+      # OpenLobby's Valkey: the deploy gate's count of connected consoles
+      # (live_sessions.py, live:doc)
+      POL_VALKEY_URL: "valkey://valkey:6379/0"
       # The address handed to a client is chosen per client (docworld/advertise.py
       # host_for): POL_ADVERTISE_PUBLIC for a peer with a global address,
       # POL_ADVERTISE_LAN for a private-range peer. Empty = POL_ADVERTISE.

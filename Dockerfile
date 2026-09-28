@@ -19,6 +19,12 @@ if not os.path.isdir("doc_migrations"):
     sys.exit("tools/doc_migrations/ is missing from the build context")
 EOF
 
+# tools/ lands on top of the core's modules, so refuse an image in which a
+# stray copy has replaced the core's live_sessions.py, which publishes the
+# deploy gate's count of connected consoles (.dockerignore keeps one out of
+# the build context)
+RUN python -c "import sys, live_sessions; hasattr(live_sessions, 'marker_key') or sys.exit('live_sessions.py is not the one from the OpenLobby image')"
+
 ENV PYTHONUNBUFFERED=1
 EXPOSE 55040/udp
 ENTRYPOINT ["python", "docudp.py"]
