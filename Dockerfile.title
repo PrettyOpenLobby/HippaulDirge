@@ -1,0 +1,15 @@
+# The Dirge of Cerberus title plugin, layered on the OpenLobby core image.
+#
+# The world responder builds from Dockerfile. This image is the core plus
+# tools/doctitle.py, the part of the title that runs INSIDE the core's login
+# and authsess processes: the Viewer's profile for a Dirge Content ID, read
+# from the files the responder keeps on the shared logs volume.
+# docker-compose.title.yml swaps it in for those two services. Build the core
+# first, or point OPENLOBBY_IMAGE at the image you use (a title image, to
+# stack titles).
+ARG OPENLOBBY_IMAGE=openlobby:latest
+FROM ${OPENLOBBY_IMAGE}
+
+COPY tools/doctitle.py /app/doctitle.py
+
+ENV POL_TITLES=doctitle

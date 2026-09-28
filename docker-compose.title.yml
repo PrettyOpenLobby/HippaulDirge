@@ -1,0 +1,41 @@
+# The Dirge of Cerberus title plugin for the OpenLobby core. This file is an
+# OVERRIDE of OpenLobby's compose file, not a stack of its own: the plugin
+# runs inside the core's login and authsess processes, so it is applied on
+# top of OpenLobby's compose file, in OpenLobby's project. The world
+# responder stays in this repository's own docker-compose.yml.
+#
+# With both repositories checked out side by side, from this directory:
+#
+#   docker compose --project-directory ../openlobby \
+#       -f ../openlobby/docker-compose.yml -f docker-compose.title.yml \
+#       up -d --build login authsess
+#
+# Without it the game plays the same; only the Viewer's profile screen for a
+# Dirge Content ID stays empty. The responder writes its character and stats
+# files to the core's logs volume, which the login service already mounts.
+#
+# Stacking titles: every title image is the core image plus one plugin, so
+# to run several, build each on the previous one (OPENLOBBY_IMAGE) and list
+# them all in POL_TITLES, e.g. POL_TITLES=tmtitle,doctitle in .env.
+
+services:
+  login:
+    image: crystaldirge-title:latest
+    build:
+      context: ../crystaldirge
+      dockerfile: Dockerfile.title
+      args:
+        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
+    pull_policy: build
+    environment:
+      POL_TITLES: "${POL_TITLES:-doctitle}"
+      POL_DOC_CHARA_STORE: "${POL_DOC_CHARA_STORE:-/logs/doc-characters.json}"
+      POL_DOC_STATS: "${POL_DOC_STATS:-/logs/doc-stats.json}"
+
+  authsess:
+    image: crystaldirge-title:latest
+    pull_policy: never
+    environment:
+      POL_TITLES: "${POL_TITLES:-doctitle}"
+      POL_DOC_CHARA_STORE: "${POL_DOC_CHARA_STORE:-/logs/doc-characters.json}"
+      POL_DOC_STATS: "${POL_DOC_STATS:-/logs/doc-stats.json}"
