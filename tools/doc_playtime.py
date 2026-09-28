@@ -47,9 +47,13 @@ players, which the user list lists first.
 
     python doc_playtime.py        # self-test
 """
-import json
 import os
-import tempfile
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import docdb  # noqa: E402
 
 GAP_CAP = 45.0      # s of silence still counted as play: PCSX2 drops an idle
                     # guest port at ~48 s, so a longer gap is a dead session
@@ -60,43 +64,31 @@ U32_MAX = 0xFFFFFFFF
 class PlayTime:
     """Seconds played per character, keyed like the shop wallet
     (`member:N/0xCHARID`). Accrues from the gaps between one client's datagrams,
-    so it counts time in the lobby and in battle, from world entry on."""
+    so it counts time in the lobby and in battle, from world entry on.
 
-    def __init__(self, path=""):
-        self.path = path
+    `store` is docdb.store("playtime") (the doc_playtime table, whole seconds
+    per key), or None to keep the time in memory only."""
+
+    def __init__(self, store=None):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('playtime') or None")
+        self.store = store
         self.data = {}
         self._mark = {}         # client ip -> (key, time of its last datagram)
         self._dirty_at = None
         self.load()
 
     def load(self):
-        if not self.path:
+        if self.store is None:
             return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = {k: float(v) for k, v in json.load(f).items()}
-        except (OSError, ValueError, AttributeError):
-            self.data = {}
+        self.data = {k: float(v) for k, v in self.store.load().items()}
 
     def save(self):
         self._dirty_at = None
-        if not self.path:
+        if self.store is None:
             return
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".playtime-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump({k: int(v) for k, v in self.data.items()}, f,
-                          indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        self.store.save({k: int(v) for k, v in self.data.items()})
 
     def seconds(self, key):
         return int(self.data.get(key, 0))
@@ -146,38 +138,46 @@ def _selftest():
         if not cond:
             fails.append(name)
 
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "doc-playtime.json")
-        p = PlayTime(path)
-        k = "member:15/0x0004103c"
-        check("new character answers 1, never 0", p.answer(k) == 1)
-        p.touch("192.0.2.1", k, 1000.0)
-        p.touch("192.0.2.1", k, 1010.0)
-        p.touch("192.0.2.1", k, 1040.0)
-        check("gaps within the cap accrue (10 + 30 s)", p.seconds(k) == 40)
-        p.touch("192.0.2.1", k, 1100.0)
-        check("a 60 s silence is not play", p.seconds(k) == 40)
-        p.touch("192.0.2.1", k, 1105.0)
-        check("accrual resumes after the silence", p.seconds(k) == 45)
-        p.touch("192.0.2.1", "member:15/0x0004103d", 1110.0)
-        check("switching character credits neither", p.seconds(k) == 45
-              and p.seconds("member:15/0x0004103d") == 0)
-        p.touch("192.0.2.2", k, 1111.0)
-        p.touch("192.0.2.2", k, 1121.0)
-        check("each client ip has its own clock", p.seconds(k) == 55)
-        p.touch("192.0.2.1", "", 1112.0)
-        check("no key = no accrual", len(p.data) == 1)
-        check("answer = the whole seconds", p.answer(k) == 55)
-        check("answer persisted it", PlayTime(path).seconds(k) == 55)
-        p.touch("192.0.2.2", k, 1130.0)
-        p.touch("192.0.2.2", k, 1175.0)
-        p.touch("192.0.2.2", k, 1190.0)
-        check("throttled save after SAVE_EVERY of accrual",
-              PlayTime(path).seconds(k) == p.seconds(k) == 124)
-        big = PlayTime("")
-        big.data[k] = 5e9
-        check("answer clamps to u32", big.answer(k) == U32_MAX)
-        check("no path = in memory only", big.path == "" and big.answer(k))
+    import docpg
+    docpg.need_database("doc_playtime")
+    docdb.store("playtime").clear()
+    p = PlayTime(docdb.store("playtime"))
+    k = "member:15/0x0004103c"
+    check("new character answers 1, never 0", p.answer(k) == 1)
+    p.touch("192.0.2.1", k, 1000.0)
+    p.touch("192.0.2.1", k, 1010.0)
+    p.touch("192.0.2.1", k, 1040.0)
+    check("gaps within the cap accrue (10 + 30 s)", p.seconds(k) == 40)
+    p.touch("192.0.2.1", k, 1100.0)
+    check("a 60 s silence is not play", p.seconds(k) == 40)
+    p.touch("192.0.2.1", k, 1105.0)
+    check("accrual resumes after the silence", p.seconds(k) == 45)
+    p.touch("192.0.2.1", "member:15/0x0004103d", 1110.0)
+    check("switching character credits neither", p.seconds(k) == 45
+          and p.seconds("member:15/0x0004103d") == 0)
+    p.touch("192.0.2.2", k, 1111.0)
+    p.touch("192.0.2.2", k, 1121.0)
+    check("each client ip has its own clock", p.seconds(k) == 55)
+    p.touch("192.0.2.1", "", 1112.0)
+    check("no key = no accrual", len(p.data) == 1)
+    check("answer = the whole seconds", p.answer(k) == 55)
+    check("answer persisted it",
+          PlayTime(docdb.store("playtime")).seconds(k) == 55)
+    p.touch("192.0.2.2", k, 1130.0)
+    p.touch("192.0.2.2", k, 1175.0)
+    p.touch("192.0.2.2", k, 1190.0)
+    check("throttled save after SAVE_EVERY of accrual",
+          PlayTime(docdb.store("playtime")).seconds(k) == p.seconds(k) == 124)
+    big = PlayTime(None)
+    big.data[k] = 5e9
+    check("answer clamps to u32", big.answer(k) == U32_MAX)
+    check("no store = in memory only", big.store is None and big.answer(k))
+    try:
+        PlayTime("doc-playtime.json")
+        check("a file path is refused", False)
+    except TypeError:
+        check("a file path is refused", True)
+    docdb.store("playtime").clear()
 
     ids = peer_push_ids(0x4103c, {0x41018: {}, 0x4103c: {}},
                         [0xa455a599, 0x4103c, 0x41018] + list(range(1, 33)),

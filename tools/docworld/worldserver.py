@@ -5,6 +5,7 @@ import select
 import socket
 import struct
 import time
+import docdb
 import doc_charastore
 import doc_playtime
 import doc_npc
@@ -108,32 +109,43 @@ def main():
               % (n, ("0x%02x" % a.lobby_chara_allow) if a.lobby_chara_allow >= 0
                  else "(token byte, untouched)"), flush=True)
 
-    # sec 4dq: PERSISTENT per-account characters. When --chara-store is set,
+    # The stores live in the stack's PostgreSQL database (docdb.py): each flag
+    # below is on or off, and a flag still given the path of its old JSON file
+    # is on, with that file left unread (cli.store_on says how to import it).
+    _chara_on = cli.store_on(a.chara_store, "--chara-store", "characters")
+    _shop_on = cli.store_on(a.shop, "--shop", "shop")
+    _units_on = cli.store_on(a.units, "--units", "units")
+    _rank_on = cli.store_on(a.rankings, "--rankings", "rankings")
+    _stats_on = cli.store_on(a.stats, "--stats", "stats")
+    _members = cli.members_on(a)
+    if (_chara_on or _shop_on or _units_on or _rank_on or _stats_on
+            or _members):
+        print("[docudp] database %s" % docdb.where(), flush=True)
+        docdb.migrate_at_start("docudp")
+
+    # sec 4dq: PERSISTENT per-account characters. When --chara-store is on,
     # the seeded chara_kw above is replaced, per peer, by that account's own
     # stored roster: four slots, each a real created character or an empty slot
     # (so CREATE CHARACTER still appears). refresh_roster() rebuilds chara_kw in
     # place, so every existing code-8 send site picks it up unchanged.
-    # sec 4ft: with --accounts-db the key is resolved PER CLIENT (_skey below),
+    # sec 4ft: with --pol-members the key is resolved PER CLIENT (_skey below),
     # so the store carries no fixed account -- and must not auto-adopt one.
     _store = (doc_charastore.CharaStore(
-                  a.chara_store, account=(None if a.accounts_db else a.account))
-              if a.chara_store else None)
-    _resolver = (doc_charastore.AccountResolver(
-                     a.accounts_db,
-                     os.path.join(os.path.dirname(os.path.abspath(a.chara_store)),
-                                  "doc-ip-members.json"), _store)
-                 if (_store is not None and a.accounts_db) else None)
+                  docdb.store("characters"),
+                  account=(None if _members else a.account))
+              if _chara_on else None)
+    _resolver = (doc_charastore.AccountResolver(docdb.store("ip_members"), _store)
+                 if (_store is not None and _members) else None)
     if _store is not None:
-        print("[docudp] chara store %s keyed by %s" % (
-            a.chara_store,
-            ("the POL MEMBER signed in at each client's address (%s, read-only; "
-             "sec 4ft)" % a.accounts_db) if _resolver is not None
+        print("[docudp] chara store (doc_character) keyed by %s" % (
+            ("the POL MEMBER signed in at each client's address (the core's "
+             "session table, read-only; sec 4ft)") if _resolver is not None
             else ("ACCOUNT %r" % _store.account) if _store.account
             else "the entrance uid (per SESSION -- rosters split when it "
                  "rotates; set --account)"), flush=True)
 
     def _skey(uid, sess=None):
-        """sec 4ft: the store key for the client in hand. With --accounts-db it
+        """sec 4ft: the store key for the client in hand. With --pol-members it
         is that client's POL member, resolved once per entrance and cached on
         its Session; without it, the uid, which CharaStore keys by --account or
         by itself exactly as before. `sess` names another client's session
@@ -155,12 +167,12 @@ def main():
     _roster_uid = [0]
 
     # sec 4gk: the shop -- stock, prices, and a wallet + bag per CHARACTER.
-    _shop = (doc_shop.Shop(a.shop, stock_path=a.shop_stock,
-                           start_gil=a.shop_start_gil) if a.shop else None)
+    _shop = (doc_shop.Shop(docdb.store("shop"), stock_path=a.shop_stock,
+                           start_gil=a.shop_start_gil) if _shop_on else None)
     if _shop is not None:
-        print("[docudp] SHOP ON: %s, %d stocked (PLACEHOLDER prices%s), start gil "
+        print("[docudp] SHOP ON: %d wallet(s), %d stocked (PLACEHOLDER prices%s), start gil "
               "%d -- answers 64/66 buy/68 sell/141/143/145, gil+bag on the world door (sec 4gk)"
-              % (a.shop, len(_shop.stock),
+              % (len(_shop.data), len(_shop.stock),
                  "" if not a.shop_stock else ", from %s" % a.shop_stock,
                  _shop.start_gil), flush=True)
     # sec 4go: bullets issued into every world-door bag (the magazine fills
@@ -171,27 +183,23 @@ def main():
                                    or "OFF"), flush=True)
 
     # 2026-09-13: Unit Management (doc_unit.py), keyed like the shop wallet.
-    _units = (doc_unit.Units(a.units, fee=a.unit_fee, shop=_shop,
-                             accounts_db=a.accounts_db) if a.units else None)
+    _units = (doc_unit.Units(docdb.store("units"), fee=a.unit_fee, shop=_shop,
+                             groups=_members) if _units_on else None)
     if _units is not None:
-        print("[docudp] UNITS ON: %s, %d unit(s), fee %d gil -- lobby commands "
+        print("[docudp] UNITS ON: %d unit(s), fee %d gil -- lobby commands "
               "24/13/25/8/12/9/10/11, enlisted unit at world-door body[60]"
-              % (a.units, len(_units.data["units"]), _units.fee), flush=True)
+              % (len(_units.data["units"]), _units.fee), flush=True)
 
     # 2026-09-13: CHANGE MASK / ARMOR (doc_gear.py), keyed like the shop wallet.
-    # 'auto' puts doc-gear.json next to the shop file, so a deployment needs no compose
-    # edit; without --shop there is no per-character identity to key it on.
-    _gear_path = a.gear_store
-    if _gear_path == "auto":
-        _gear_path = (os.path.join(os.path.dirname(os.path.abspath(a.shop)),
-                                   "doc-gear.json") if a.shop else "")
-    elif _gear_path == "off":
-        _gear_path = ""
-    _gearstore = doc_gear.GearStore(_gear_path) if _gear_path else None
+    # 'auto' is on whenever --shop is, so a deployment needs no compose edit;
+    # without --shop there is no per-character identity to key it on.
+    _gear_on = (_shop_on if a.gear_store == "auto"
+                else cli.store_on(a.gear_store, "--gear-store", "gear"))
+    _gearstore = doc_gear.GearStore(docdb.store("gear")) if _gear_on else None
     print("[docudp] GEAR %s" % (
-        ("ON: %s, %d character(s) -- lobby commands 17 equip / 18 unequip answered "
+        ("ON: %d character(s) -- lobby commands 17 equip / 18 unequip answered "
          "with the new costume at 241 body[6], served back on the world door"
-         % (_gear_path, len(_gearstore.data))) if _gearstore is not None else
+         % len(_gearstore.data)) if _gearstore is not None else
         "OFF -- mask/armor changes answered generically (costume reset), not stored"),
           flush=True)
 
@@ -237,22 +245,23 @@ def main():
 
     # 2026-09-13: PLAY TIME (lobby command 20), per character, keyed like the
     # shop wallet. Accrues from each client's datagram gaps (doc_playtime.py).
-    _pt_path = (a.play_time if a.play_time is not None
-                else os.path.join(os.path.dirname(os.path.abspath(a.chara_store)),
-                                  "doc-playtime.json") if a.chara_store else "")
-    _playtime = doc_playtime.PlayTime("" if _pt_path == "off" else _pt_path)
+    # Stored with --chara-store unless --play-time says otherwise.
+    _pt_on = (_chara_on if a.play_time is None
+              else cli.store_on(a.play_time, "--play-time", "playtime"))
+    _playtime = doc_playtime.PlayTime(docdb.store("playtime") if _pt_on else None)
     _pt_key = {}             # (client ip, charid) -> wallet key, resolved once
     if a.lobby_clock == "play":
         print("[docudp] PLAY TIME ON: %s, %d character(s) -- command 20 answers "
               "the selected character's seconds at body[16]"
-              % (_playtime.path or "(memory only)", len(_playtime.data)),
+              % ("doc_playtime" if _playtime.store is not None else "(memory only)",
+                 len(_playtime.data)),
               flush=True)
 
     def _rank_characters():
         """Every character in the chara store under a `member:N` key, as
         (wallet key, name, character id) -- the same key _wallet_key builds for
         the asker, so VIEW YOUR RANKING finds its own row. uid-keyed rosters
-        (pre --accounts-db) and archived keys are left out."""
+        (pre --pol-members) and archived keys are left out."""
         if _store is None:
             return []
         out = []
@@ -266,26 +275,26 @@ def main():
                                 c.get("name", ""), cid))
         return out
 
-    _rank = (doc_rank.Rankings(a.rankings, characters=_rank_characters,
+    _rank = (doc_rank.Rankings(docdb.store("rankings"), characters=_rank_characters,
                                show_zero=not a.rankings_hide_zero,
                                units=(_units.ranking_units if _units else None))
-             if a.rankings else None)
+             if _rank_on else None)
     if _rank is not None:
-        print("[docudp] RANKINGS ON: %s, %d character(s) in the chara store -- "
+        print("[docudp] RANKINGS ON: %d character(s) in the chara store -- "
               "answers 137 -> 138 (Individual) and 149 -> 150 (Unit)"
-              % (a.rankings, len(_rank_characters())), flush=True)
+              % len(_rank_characters()), flush=True)
 
     # 2026-09-13: CAREERS (doc_stats.py). The Status screen, the battle result,
     # the Ranking menu's values and the Viewer profile all read this one store.
-    _stats = doc_stats.Stats(a.stats) if a.stats else None
+    _stats = doc_stats.Stats(docdb.store("stats")) if _stats_on else None
     _novice = (doc_novice.Novice(_stats, a.novice_kills)
                if (a.novice == "on" or a.intro == "on") else None)
     if _stats is not None:
         if _rank is not None:
             _stats.push_rankings(_rank)
-        print("[docudp] STATS ON: %s, %d career(s) -- world door body[56]/[68]/"
+        print("[docudp] STATS ON: %d career(s) -- world door body[56]/[68]/"
               "[131], 139 -> 140 career record, kind-4 result totals"
-              % (a.stats, len(_stats.data["chars"])), flush=True)
+              % len(_stats.data["chars"]), flush=True)
         # 2026-09-26: the WEEKLY medals (doc_stats.WEEKLY_MEDALS). The career
         # clock stamps every battle / leave into its week's tallies; a week
         # that ENDED while the server was down is closed right here.
@@ -338,7 +347,7 @@ def main():
 
     def _wallet_key(uid, charid, sess=None):
         """The shop wallet key: the chara store's account key (per POL member
-        with --accounts-db) plus the character id, so each character has its
+        with --pol-members) plus the character id, so each character has its
         own gil and bag. `sess` = another client's session (a trade partner)."""
         acct = _skey(uid, sess) if (_resolver is not None or uid) else None
         if not isinstance(acct, str):
@@ -416,8 +425,8 @@ def main():
                         chara_records=[bytes(96)] * doc_charastore.MAX_SLOTS,
                         chara_allow=(a.lobby_chara_allow
                                      if a.lobby_chara_allow >= 0 else None))
-        print("[docudp] CHARA STORE ON: %s -- created characters persist per "
-              "account (sec 4dq)" % a.chara_store, flush=True)
+        print("[docudp] CHARA STORE ON: doc_character -- created characters "
+              "persist per account (sec 4dq)", flush=True)
 
     # sec 4fq: each Session copies this default so two accounts never mix rosters
     default_chara_kw = dict(chara_kw)
@@ -568,8 +577,10 @@ def main():
     # A thread ticks whether or not anyone sends a packet, which is the whole
     # point of a liveness marker.
     # WARNING: /logs, NOT POL_DATA_DIR: /data is mounted READ-ONLY in this container,
-    # so the write failed silently there. /logs is the writable mount, where
-    # the rankings and chara store already live.
+    # so the write failed silently there. /logs is the writable mount.
+    # This marker is the live_sessions.py contract ({count, stamp} per
+    # service, read by the deploy gate), so it stays a file until that
+    # contract moves; the player stores are in PostgreSQL (docdb.py).
     def _publish_live_sessions():
         import time as _t
         while True:
@@ -2426,7 +2437,7 @@ def main():
         cid = sess.seen_charid[0]
         # 2026-09-26: THIS client's account. Without `sess` the key came from
         # current[0] -- whoever sent the last packet -- and end_battle runs off
-        # the room clock or another member's request 30, so with --accounts-db
+        # the room clock or another member's request 30, so with --pol-members
         # every other member missed its tally row and got the all-zero record:
         # a LOSS, 0 rank points, 0 gil on screen (live tables 30-32, 09-26).
         key = _wallet_key(sess.seen_uid[0], cid, sess)

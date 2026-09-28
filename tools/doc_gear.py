@@ -97,10 +97,8 @@ selector 240 -> 241:
   Refusal CODE: SE's number for "cannot equip" is not located; REFUSE = 1 only
   has to be nonzero so the arm bails.
 """
-import json
 import os
 import struct
-import tempfile
 
 import doc_unit
 
@@ -287,32 +285,21 @@ class GearStore:
     rewritten whole on change (doc_shop's shape). The key is docudp's wallet
     key `member:N/0x<charid>`, so gear follows the same character as its bag."""
 
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, store):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('gear') or None")
+        self.store = store
         self.load()
 
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read the store. A database that cannot be reached raises
+        (docdb.py): the responder does not run on an empty store."""
+        self.data = self.store.load() if self.store is not None else {}
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".gear-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     def get(self, key):
         """The stored record for `key`, or None."""

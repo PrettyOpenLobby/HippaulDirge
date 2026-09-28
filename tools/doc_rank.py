@@ -64,10 +64,8 @@ NOT DONE: nothing tallies the values yet -- they come from the rankings JSON
 entry ranks with 0. Units do not exist server-side, so Unit Ranking is an
 honest empty list unless the JSON names some.
 """
-import json
 import os
 import struct
-import tempfile
 import time
 
 IND_REQ, IND_ANS = 137, 138
@@ -202,8 +200,11 @@ class Rankings:
     character the server knows (the chara store), so a character with no stats
     still ranks, with 0."""
 
-    def __init__(self, path, characters=None, show_zero=True, units=None):
-        self.path = path
+    def __init__(self, store, characters=None, show_zero=True, units=None):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('rankings') or None")
+        self.store = store
         self.characters = characters or (lambda: [])
         self.show_zero = show_zero
         # 2026-09-13: registered units (doc_unit.Units.ranking_units), merged
@@ -213,29 +214,15 @@ class Rankings:
         self.load()
 
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read the store. A database that cannot be reached raises
+        (docdb.py): the responder does not run on an empty store."""
+        self.data = self.store.load() if self.store is not None else {}
         self.data.setdefault("chars", {})
         self.data.setdefault("units", {})
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".rank-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     def note_character(self, key, name, rid):
         """Remember a character that entered the world (name + id), so it is
@@ -304,15 +291,15 @@ class Rankings:
 
 if __name__ == "__main__":
     import sys
-    p = os.path.join(tempfile.gettempdir(), "doc_rank_selftest.json")
-    try:
-        os.remove(p)
-    except OSError:
-        pass
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import docdb
+    import docpg
+    docpg.need_database("doc_rank")
+    docdb.store("rankings").clear()
     chars = [("member:3/0x0004103c", "Ace", 0x4103C),
              ("member:6/0x00041058", "Deck", 0x41058),
              ("member:15/0x0004107c", "Quarry", 0x4107C)]
-    rk = Rankings(p, characters=lambda: chars)
+    rk = Rankings(docdb.store("rankings"), characters=lambda: chars)
     rk.data["chars"]["member:3/0x0004103c"] = {"ind": {"0": 250, "2": 0.5}}
     rk.data["chars"]["member:6/0x00041058"] = {"ind": {"0": 250}}
     rk.save()
@@ -364,6 +351,6 @@ if __name__ == "__main__":
     # the page clamp the client applies
     assert page_of(standings([("k%d" % i, i, "n", i) for i in range(80)]),
                    1, 99, 0)[1].__len__() == PAGE_MAX
-    os.remove(p)
+    docdb.store("rankings").clear()
     print("doc_rank self-test PASS")
     sys.exit(0)

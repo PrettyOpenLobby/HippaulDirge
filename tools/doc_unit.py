@@ -83,11 +83,8 @@ members earned in a unit battle and tallies {wins, draws, losses} in stat row
 UNIT_BATTLE_ROW (which of the nine rows SE used per mode is not read).
 join_allowed() is SE's 28:197 reservation rule: only the first two units.
 """
-import json
 import os
-import sqlite3
 import struct
-import tempfile
 import time
 
 CMD_REQ, CMD_ANS = 240, 241
@@ -197,60 +194,54 @@ def standings(units):
 
 class Units:
     """The unit store: {"units": {hexid: {name, emblem, cls, area, pts, stats,
-    registrant, members, created}}, "enlist": {key: hexid}} in one JSON file,
-    rewritten whole on change (doc_shop's shape). A key is docudp's wallet key
-    `member:N/0x<charid>`, the same one the shop and the rankings use, so a
-    character's gil, rank and unit are one identity."""
+    registrant, members, created}}, "enlist": {key: hexid}}, the doc_unit and
+    doc_unit_enlist tables (docdb.store("units"); it was one JSON file). A key
+    is docudp's wallet key `member:N/0x<charid>`, the same one the shop and the
+    rankings use, so a character's gil, rank and unit are one identity.
+    `groups` = look a new unit's name up among the core's POL groups."""
 
-    def __init__(self, path, fee=0, shop=None, accounts_db=None):
-        self.path = path
+    def __init__(self, store, fee=0, shop=None, groups=False):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('units') or None")
+        self.store = store
         self.fee = max(0, min(int(fee or 0), 0xFFFF))
         self.shop = shop
-        self.accounts_db = accounts_db
+        self.groups = bool(groups)
         self.data = {}
         self.load()
 
     # -- persistence -------------------------------------------------------
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read the store. A database that cannot be reached raises
+        (docdb.py): the responder does not run on an empty store."""
+        self.data = self.store.load() if self.store is not None else {}
         self.data.setdefault("units", {})
         self.data.setdefault("enlist", {})
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".unit-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     # -- lookups -----------------------------------------------------------
     def group_name(self, uid):
         """The POL group's name for a unit id, or None. Best effort: the id's
-        low 32 bits as a `friend` row of kind GROUP (read-only)."""
-        if not self.accounts_db:
+        low 32 bits as a `friend` row of kind GROUP in the core's account
+        database (read-only). No accounts function reads a friend row by its
+        id alone, so the one query is here."""
+        if not self.groups:
             return None
         try:
-            uri = "file:%s?mode=ro" % os.path.abspath(self.accounts_db)
-            db = sqlite3.connect(uri, uri=True, timeout=2)
+            import docdb
+            conn = docdb.accounts().connect()
             try:
-                row = db.execute("SELECT peer_name, kind FROM friend WHERE id = ?",
-                                 (uid & 0xFFFFFFFF,)).fetchone()
+                row = conn.execute("SELECT peer_name, kind FROM friend WHERE id = %s",
+                                   (uid & 0xFFFFFFFF,)).fetchone()
             finally:
-                db.close()
-        except sqlite3.Error:
+                conn.close()
+        except Exception as e:                  # noqa: BLE001 -- best effort
+            print("[unit] WARN POL group lookup for %#x failed (%r)" % (uid, e),
+                  flush=True)
             return None
         if row and (int(row[1] or 0) & KIND_GROUP):
             return row[0]
@@ -524,13 +515,19 @@ def apply_login(body, unit_id):
 
 if __name__ == "__main__":
     import sys
-    p = os.path.join(tempfile.gettempdir(), "doc_unit_selftest.json")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import docdb
+    import docpg
+    docpg.need_database("doc_unit")
+    for _s in ("units", "shop"):
+        docdb.store(_s).clear()
     try:
-        os.remove(p)
-    except OSError:
+        Units("doc-units.json")
+        raise AssertionError("a file path must be refused")
+    except TypeError:
         pass
     k1, k2 = "member:3/0x0004103c", "member:6/0x00041058"
-    us = Units(p)
+    us = Units(docdb.store("units"))
     G = 0x0000000700000029               # an arbitrary group u64
 
     def req(cmd, uid=0, emblem=None, cls=0, area=0):
@@ -560,8 +557,8 @@ if __name__ == "__main__":
     # enlist -> body[16] = the id; login field follows
     b, _ = us.body_for(CMD_ENLIST, req(CMD_ENLIST, G), k1)
     assert struct.unpack_from("<Q", b, ENLIST_ID)[0] == G
-    assert Units(p).enlisted(k1) == G, "persisted"
-    lb = apply_login(bytearray(56), Units(p).enlisted(k1))
+    assert Units(docdb.store("units")).enlisted(k1) == G, "persisted"
+    lb = apply_login(bytearray(56), Units(docdb.store("units")).enlisted(k1))
     assert struct.unpack_from("<Q", lb, LOGIN_UNIT_OFF)[0] == G
     # my units + info
     b, _ = us.body_for(CMD_MINE, req(CMD_MINE), k1)
@@ -590,9 +587,8 @@ if __name__ == "__main__":
     assert us.ranking_units()[hexid(G)]["name"] == "Unit 29"
     # the fee rides body[6] and is charged to a --shop wallet
     import doc_shop
-    sp = p + ".shop"
-    shop = doc_shop.Shop(sp, start_gil=500)
-    uf = Units(p, fee=300, shop=shop)
+    shop = doc_shop.Shop(docdb.store("shop"), start_gil=500)
+    uf = Units(docdb.store("units"), fee=300, shop=shop)
     b, note = uf.body_for(CMD_REGISTER, req(CMD_REGISTER, 0x42, em, 0, 0), k1)
     assert hdr(b) == (0, 300) and shop.wallet(k1)["gil"] == 200, note
     b, note = uf.body_for(CMD_REGISTER, req(CMD_REGISTER, 0x43, em, 0, 0), k1)
@@ -601,8 +597,9 @@ if __name__ == "__main__":
     b, _ = us.body_for(CMD_DELETE, req(CMD_DELETE, G), k1)
     us.load()
     assert hdr(b) == (0, 0) and us.enlisted(k1) == 0 and hexid(G) not in us.data["units"]
-    for f in (p, sp):
-        os.remove(f)
+    for _s in ("units", "shop"):
+        docdb.store(_s).clear()
+    us = Units(docdb.store("units"))
     # 2026-09-24: unit battles -- the first two units own the table
     U1, U2, U3 = 0x101, 0x202, 0x303
     of = {1: U1, 2: U1, 3: U2, 4: U3, 5: 0}.get
@@ -625,7 +622,8 @@ if __name__ == "__main__":
     assert r2[hexid(G1)][2] == ug["pts"]
     assert us.unit(G2)["stats"][UNIT_BATTLE_ROW] == [0, 0, 1]
     assert struct.unpack_from("<III", us.info_body(G1), INFO_STATS) == (1, 1, 0)
-    assert Units(p).unit(G1)["stats"][UNIT_BATTLE_ROW] == [1, 1, 0]   # persisted
+    assert (Units(docdb.store("units")).unit(G1)["stats"][UNIT_BATTLE_ROW]
+            == [1, 1, 0])                                   # persisted
     # command 34: two units -> the client's gate count (nonzero ids) is 2
     vb = versus_body(7, [(G1, "Alpha", 2), (G2, "Bravo", 1)])
     assert vb[1] == CMD_ANS and struct.unpack_from("<H", vb, ANS_CMD)[0] == 34
@@ -637,5 +635,24 @@ if __name__ == "__main__":
     assert gate(vb) == 2
     assert gate(versus_body(7, [(G1, "Alpha", 1)])) == 1      # one unit: Start refused
     assert gate(versus_body(7, [])) == 0
+    # the unit's name comes from the core's POL group with that friend row id
+    acc = docdb.accounts()
+    conn = acc.connect()
+    acc.create_polid(conn, "DOCUNIT01", "pw-docunit")
+    mid = acc.add_member(conn, "DOCUNIT01", "docunit-owner", "pw-docunit")
+    hid = acc.set_handle(conn, mid, "DocUnitOwner")
+    gid = acc.add_friend(conn, hid, "Deepground", kind=acc.KIND_GROUP)
+    fid = acc.add_friend(conn, hid, "JustAFriend", kind=acc.KIND_FRIEND)
+    conn.close()
+    assert KIND_GROUP == acc.KIND_GROUP
+    assert Units(None, groups=True).group_name(gid) == "Deepground"
+    assert Units(None, groups=True).group_name((7 << 32) | gid) == "Deepground"
+    assert Units(None, groups=True).group_name(fid) is None, "a friend is no group"
+    assert Units(None, groups=False).group_name(gid) is None, "off: not asked"
+    ug = Units(docdb.store("units"), groups=True)
+    b, note = ug.body_for(CMD_REGISTER, req(CMD_REGISTER, gid, 0x12, 0, 0), k2)
+    assert hdr(b) == (0, 0) and ug.unit(gid)["name"] == "Deepground", note
+    for _s in ("units", "shop"):
+        docdb.store(_s).clear()
     print("doc_unit self-test PASS")
     sys.exit(0)

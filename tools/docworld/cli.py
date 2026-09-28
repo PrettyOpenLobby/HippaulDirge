@@ -80,6 +80,40 @@ def _week_start_arg(spec):
     return spec
 
 
+#: what a store flag says when it is off; "on" (or anything else) turns it on
+_STORE_OFF = ("", "off", "0", "no")
+
+
+def store_on(value, flag, store):
+    """True when a store flag (--chara-store, --shop, --stats, ...) turns its
+    store on. The stores are PostgreSQL tables now (docdb.py), so the flag is
+    on or off. A value that is neither is the path of the store's old JSON
+    file: that still turns the store on, and the file is NOT read -- this says
+    so once, with the command that imports it."""
+    v = (value or "").strip()
+    if v.lower() in _STORE_OFF:
+        return False
+    if v.lower() not in ("on", "1", "yes"):
+        print("[docudp] %s %s: the %s store is in PostgreSQL now (docdb.py) and "
+              "this file is not read. Import it once, into an empty store, with "
+              "`python docdb.py import %s %s`." % (flag, v, store, store, v),
+              flush=True)
+    return True
+
+
+def members_on(a):
+    """--pol-members, or the old --accounts-db given any value (its path is
+    not read: the core's accounts are in PostgreSQL)."""
+    if a.pol_members == "on":
+        return True
+    if (a.accounts_db or "").strip():
+        print("[docudp] --accounts-db %s: the core's accounts are in PostgreSQL "
+              "now; this path is not read. Treated as --pol-members on."
+              % a.accounts_db, flush=True)
+        return True
+    return False
+
+
 def build_parser():
     """The command line: every flag of the responder, with its help text."""
     ap = argparse.ArgumentParser(description=__doc__,
@@ -297,12 +331,15 @@ def build_parser():
     ap.add_argument("--frag3-parts", type=int, default=1,
                     help="body[4..5], the TOTAL part count of the subtype-3 response.")
     ap.add_argument("--chara-store", default="",
-                    help="path to a JSON per-account character store (sec 4dq). "
-                         "When set, REGISTER and DELETE PERSIST -- created "
+                    help="on = the per-account character store (sec 4dq), the "
+                         "doc_character table in PostgreSQL (POL_DATABASE_URL, "
+                         "docdb.py). When on, REGISTER and DELETE PERSIST -- created "
                          "characters stick across reconnects, deletes take, and "
                          "each account (keyed by its entrance uid) sees its OWN "
                          "roster instead of the seeded --lobby-chara-* Quarrys. "
-                         "Empty = the old fixed seeding.")
+                         "Empty or off = the old fixed seeding. The path of the "
+                         "old doc-characters.json also means on (the file is not "
+                         "read; `python docdb.py import characters FILE`).")
     ap.add_argument("--account", default="",
                     help="key the --chara-store by THIS account (e.g. member:3) "
                          "instead of the entrance uid. The uid is PER SESSION -- "
@@ -311,17 +348,22 @@ def build_parser():
                          "their characters vanished between sessions. Also the key "
                          "the lobby reads for the DoC content profile. Empty = the "
                          "old uid keying (the emulator, dev).")
-    ap.add_argument("--accounts-db", default="",
-                    help="sec 4ft: key the --chara-store PER CLIENT by the POL "
+    ap.add_argument("--pol-members", default="off", choices=("on", "off"),
+                    help="sec 4ft: on = key the --chara-store PER CLIENT by the POL "
                          "member signed in at that client's address -- the login "
-                         "service's `session` table in accounts.db, opened "
-                         "READ-ONLY. Supersedes --account, which is ONE key for "
-                         "every client: with two machines in --peer it filed both "
-                         "players' characters into one roster (2026-09-13: the "
-                         "Deck's delete removed the PC's). Fallbacks: the member "
-                         "last resolved at that address (doc-ip-members.json "
-                         "beside the store), then an addr:<ip> key -- never a "
-                         "shared bucket. Empty = --account, as before.")
+                         "service's `session` table in the core's PostgreSQL "
+                         "database, read only. Supersedes --account, which is ONE "
+                         "key for every client: with two machines in --peer it "
+                         "filed both players' characters into one roster "
+                         "(2026-09-13: the Deck's delete removed the PC's). "
+                         "Fallbacks: the member last resolved at that address "
+                         "(the doc_ip_member table), then an addr:<ip> key -- "
+                         "never a shared bucket. Also names a new --units unit "
+                         "after its POL group. off = --account, as before.")
+    ap.add_argument("--accounts-db", default="",
+                    help="the old spelling of --pol-members on: any value turns "
+                         "it on. The path is not read (the core's accounts are "
+                         "in PostgreSQL).")
     ap.add_argument("--chara-id-base", type=lambda x: int(x, 0), default=0x1000,
                     help="sec 4dv: the base for the CHARACTER ID written at "
                          "wire+0 of each roster record. That u32 becomes "
@@ -378,8 +420,10 @@ def build_parser():
                          "Soldier 270, Toughness 340; bgd.bin block +0x3fc). "
                          "off = --self-hp for everyone.")
     ap.add_argument("--shop", default="",
-                    help="sec 4gk: path to the per-character wallet + bag JSON. "
-                         "When set, the lobby's shop lists (64 stock, 141 recipes, "
+                    help="sec 4gk: on = the per-character wallet + bag store (the "
+                         "doc_wallet table; the path of the old doc-shop.json "
+                         "also means on and is not read). "
+                         "When on, the lobby's shop lists (64 stock, 141 recipes, "
                          "143 prices) are served, a 145 item transaction gets a "
                          "real 146 verdict (check gil, apply, persist), and the "
                          "world-door answer carries the character's gil (body[52]) "
@@ -422,11 +466,13 @@ def build_parser():
                          "17 equip / 18 unequip, doc_gear.py) persisted per "
                          "character: answered with the new costume code at 241 "
                          "body[6] (the generic zero answer reset the look) and "
-                         "served back on the world door. 'auto' = doc-gear.json "
-                         "next to the --shop file (off without --shop), a path, "
-                         "or 'off'.")
+                         "served back on the world door, in the doc_gear table. "
+                         "'auto' = on with --shop (off without it), 'on', or "
+                         "'off'.")
     ap.add_argument("--rankings", default="",
-                    help="2026-09-13: path to the rankings JSON. When set, the "
+                    help="2026-09-13: on = the rankings store (the doc_rank_char "
+                         "and doc_rank_unit tables; the path of the old "
+                         "doc-rankings.json also means on). When on, the "
                          "lobby's Ranking menu (137 Individual -> 138, 149 Unit "
                          "-> 150) is answered with real rows: every character "
                          "in the chara store, ranked on the file's values (0 "
@@ -666,8 +712,10 @@ def build_parser():
                          "that carry them; the Base Attack medal (base "
                          "damage per attacker) still needs one. Empty = off.")
     ap.add_argument("--stats", default="",
-                    help="2026-09-13: path to the CAREER store JSON "
-                         "(tools/doc_stats.py). When set: the world door carries "
+                    help="2026-09-13: on = the CAREER store (tools/doc_stats.py; "
+                         "the doc_career, doc_week and doc_week_closed tables; the "
+                         "path of the old doc-stats.json also means on). When on: "
+                         "the world door carries "
                          "the medal mask / rank points / rank (body[56]/[68]/"
                          "[131]), the Status window's 139 is answered with the "
                          "140 career record (W-L, per-mode results, medal "
@@ -677,7 +725,9 @@ def build_parser():
                          "tallied into the store, the --rankings values and the "
                          "Viewer profile. Empty = the old behaviour.")
     ap.add_argument("--units", default="",
-                    help="2026-09-13: path to the units JSON. When set, Unit "
+                    help="2026-09-13: on = the units store (the doc_unit and "
+                         "doc_unit_enlist tables; the path of the old "
+                         "doc-units.json also means on). When on, Unit "
                          "Management is answered for real: lobby commands 24 "
                          "(unit info), 13 (areas), 25 (my units), 8 (register), "
                          "12 (modify), 9 (delete), 10 (enlist), 11 (leave), and "
@@ -1458,9 +1508,9 @@ def build_parser():
                          "'off' echoes the request's stale bytes. The client asks "
                          "only while its slot is empty.")
     ap.add_argument("--play-time", default=None,
-                    help="per-character play-time JSON for --lobby-clock play. "
-                         "Default: doc-playtime.json next to --chara-store (memory "
-                         "only without one); 'off' = memory only.")
+                    help="per-character play time for --lobby-clock play, in the "
+                         "doc_playtime table. Default: on with --chara-store "
+                         "(memory only without it); 'on'; 'off' = memory only.")
     ap.add_argument("--lobby-cmd", default="echo",
                     help="selector 241 (Command Result) body[12]: 'echo' takes "
                          "the command id out of the client's own selector-240 "

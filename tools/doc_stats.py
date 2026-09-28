@@ -53,10 +53,8 @@ the same sense as doc_shop's prices, and each is a module constant):
     to kind 4) is decoded, a battle records only who played, which side won and
     how long it lasted.
 """
-import json
 import os
 import struct
-import tempfile
 import time
 
 RANK_MIN, RANK_MAX = 1, 16
@@ -670,8 +668,11 @@ class Stats:
     and the rankings' key), in one JSON file rewritten whole on change -- the
     doc_shop / doc_rank shape."""
 
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, store):
+        if isinstance(store, str):
+            raise TypeError("a file path is not a store any more: pass "
+                            "docdb.store('stats') or None")
+        self.store = store
         self.data = {}
         # the clock a battle / leave is stamped with and a week is judged by,
         # and the week's phase (parse_week_start); docudp sets both
@@ -680,28 +681,14 @@ class Stats:
         self.load()
 
     def load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-        except (OSError, ValueError):
-            self.data = {}
+        """Read the store. A database that cannot be reached raises
+        (docdb.py): the responder does not run on an empty store."""
+        self.data = self.store.load() if self.store is not None else {}
         self.data.setdefault("chars", {})
 
     def save(self):
-        d = os.path.dirname(os.path.abspath(self.path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".stats-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=1, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except OSError:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        if self.store is not None:
+            self.store.save(self.data)
 
     def career(self, key, name=None, rid=None):
         c = self.data["chars"].get(key)
@@ -984,12 +971,18 @@ class Stats:
 
 if __name__ == "__main__":
     import sys
-    p = os.path.join(tempfile.gettempdir(), "doc_stats_selftest.json")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import docdb
+    import docpg
+    docpg.need_database("doc_stats")
+    # a file path is not a store any more: refused, not silently ignored
     try:
-        os.remove(p)
-    except OSError:
+        Stats("doc-stats.json")
+        raise AssertionError("a path must be refused")
+    except TypeError:
         pass
-    st = Stats(p)
+    docdb.store("stats").clear()
+    st = Stats(docdb.store("stats"))
     A, B, C = "member:3/0x0002aa68", "member:6/0x00041018", "member:15/0x0004107c"
     # a TBT win for team 0 (A, C) over team 1 (B); A tops kills, B tops KOs
     res = st.record_battle("TBT", [
@@ -1108,7 +1101,7 @@ if __name__ == "__main__":
     for _k in (PA, PB):
         del st.data["chars"][_k]
     # persistence + the surfaces
-    st2 = Stats(p)
+    st2 = Stats(docdb.store("stats"))
     assert st2.viewer_fields(C) == (4, st.career(C)["rp"])
     assert st2.viewer_fields("member:99/0x1") is None
     v = st2.ranking_values(A)
@@ -1174,21 +1167,17 @@ if __name__ == "__main__":
     assert st2.peek("member:77/0x1")["rank"] == 1 and "member:77/0x1" not in st2.data["chars"]
     assert st2.key_for_charid(0xC002aa68) == A
     import doc_rank
-    rp = os.path.join(tempfile.gettempdir(), "doc_stats_rank_selftest.json")
-    try:
-        os.remove(rp)
-    except OSError:
-        pass
-    rk = doc_rank.Rankings(rp)
+    docdb.store("rankings").clear()
+    rk = doc_rank.Rankings(docdb.store("rankings"))
     st2.push_rankings(rk)
-    rk2 = doc_rank.Rankings(rp)
+    rk2 = doc_rank.Rankings(docdb.store("rankings"))
     assert rk2.data["chars"][A]["name"] == "Fox"
     assert rk2.data["chars"][A]["ind"]["0"] == st2.career(A)["rp"]
     tab = rk2.table(False, 0)
     assert tab[0][4] in ("Fox", "Deck", "Quarry") and len(tab) == 3, tab
     print(st2.summary_line(A))
-    os.remove(p)
-    os.remove(rp)
+    docdb.store("stats").clear()
+    docdb.store("rankings").clear()
     # THE WEEKLY MEDALS. Week = Monday 00:00 JST: Mon 2026-09-28 00:00 JST is
     # Sun 2026-09-27 15:00 UTC = 1790521200.
     ph = parse_week_start(WEEK_START)
@@ -1205,12 +1194,7 @@ if __name__ == "__main__":
             raise AssertionError(bad)
         except ValueError:
             pass
-    wp = os.path.join(tempfile.gettempdir(), "doc_stats_weekly_selftest.json")
-    try:
-        os.remove(wp)
-    except OSError:
-        pass
-    ws = Stats(wp)
+    ws = Stats(docdb.store("stats"))
     ws.clock = lambda: W + 3600                # Monday 01:00 JST, week W
     P, Q, R = "member:1/0x11", "member:2/0x22", "member:3/0x33"
     # week W: P wins a BT (1 kill), Q wins a TBT with 2 kills, R clears a
@@ -1248,8 +1232,8 @@ if __name__ == "__main__":
                               168 + 4 * (38 - MEDAL_BASE))[0] == 1
     # IDEMPOTENT: a second close (and a restart) pays nothing more
     assert ws.close_week(W, now=W + WEEK_SECS) is None
-    assert Stats(wp).close_week(W) is None
-    assert medal_count(Stats(wp).career(P), 35) == 1
+    assert Stats(docdb.store("stats")).close_week(W) is None
+    assert medal_count(Stats(docdb.store("stats")).career(P), 35) == 1
     # CATCH-UP: the server was down over the older week's end -- close_due
     # closes it (R's lone solo win, R's kill) on the first look
     got = ws.close_due(now=W + 3 * WEEK_SECS)
@@ -1269,6 +1253,6 @@ if __name__ == "__main__":
     # lives only in `history` closes to no award
     ws.data["weekly"], ws.data["weeks_closed"] = {}, {}
     assert ws.close_due(now=W + 9 * WEEK_SECS) == []
-    os.remove(wp)
+    docdb.store("stats").clear()
     print("doc_stats self-test PASS")
     sys.exit(0)
