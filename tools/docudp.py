@@ -13307,7 +13307,7 @@ def main():
             # even here.  See --nest-quiet-after-frag3.
             reply = None
             print("  (nest QUIET after %d frag3 -- not answering, so [nest+8] can "
-                  "reach 0 for phase 110)" % frag3_sent, flush=True)
+                  "reach 0 for phase 110)" % sess.frag3_sent, flush=True)
         elif a.lobby_probe != "off" and is_lobby(data):
             # The lobby (type-129) sub-connection ignores the type-128 redirect;
             # answer it on its own terms.
