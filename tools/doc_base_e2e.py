@@ -329,6 +329,14 @@ def main():
     k4 = [p for k, p in notes if k == 4]
     check("[caplast] both held for 10 s -> END, kind 4",
           "holds all 2" in text and k4 and "[battle] END" in text)
+    # 2026-09-28 (Dirge report): the held capsules stayed in the bag after
+    # the match -- kind 21 (ident = A, the client's "cut") must take both out
+    # BEFORE the result
+    _k = [k for k, _ in notes]
+    _cut = [c for c in k10_items(notes, 21) if c[0] == D.MAKO_CAPSULE]
+    check("[caplast] the 2 held capsules are CUT from A's bag (kind 21) before kind 4",
+          _cut and _cut[0][1] == 2 and 21 in _k and 4 in _k
+          and _k.index(21) < _k.index(4), "%r" % _cut)
     check("[caplast] Last Capsule Medal: A's RESULT names it, holder 8 = A",
           "'Last Capsule Medal'" in text and k4
           and k4[0][D.BODY_OFF + 20 + 30 + 8] == 0,

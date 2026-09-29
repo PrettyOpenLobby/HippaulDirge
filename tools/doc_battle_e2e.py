@@ -20,6 +20,7 @@ doc_udp_test.py.
     python doc_battle_e2e.py            # ~15 s
 """
 import io
+import re
 import os
 import socket
 import struct
@@ -184,6 +185,11 @@ def run(accounts=False):
         check("JOIN answered (21)",
               any(len(p) > D.BODY_OFF + 1 and p[D.BODY_OFF + 1] == 21 for p in ans_b),
               "%d packet(s)" % len(ans_b))
+        # 2026-09-28 (Dirge report): the joiner must hold its reservation, or
+        # its Reserve option stays open -- the 152 echo AFTER the 21
+        _sels = [p[D.BODY_OFF + 1] for p in ans_b if len(p) > D.BODY_OFF + 1]
+        check("JOIN is followed by the RESERVATION ECHO (152) after its 21",
+              21 in _sels and 152 in _sels[_sels.index(21):], "%s" % _sels)
         # 3. A starts: lobby command 3
         ca.sendto(world_req(A_CID, D.LOBBY_CMD_SELECTOR_REQ,
                             struct.pack("<II", D.LOBBY_CMD_START, 0)), dst)
@@ -398,6 +404,17 @@ def run(accounts=False):
     check("log: ROOM OPENED", has("ROOM OPENED for table 1"))
     check("log: the clock started once, the second player ARRIVED",
           count("clock STARTED") == 1 and has("ARRIVED in table 1's room"))
+    # 2026-09-28 (Dirge report): two players on ONE start point -> the
+    # out-of-bounds spawns. Each spawn is logged; A's and B's must differ.
+    _spn = {}
+    for ln in lines:
+        _m = re.search(r"\[arena\] 0x([0-9a-f]{8}) spawns at (?:team \d's start )?"
+                       r"\(([^)]*)\)", ln)
+        if _m:      # the battle's own spawn = the FIRST (a roomless re-join follows)
+            _spn.setdefault(int(_m.group(1), 16), _m.group(2))
+    check("log: A and B were given DIFFERENT spawn points",
+          A_CID in _spn and B_CID in _spn and _spn[A_CID] != _spn[B_CID],
+          "%s" % {"0x%x" % k: v for k, v in _spn.items()})
     check("log: KILL REPORT tallied", has("KILL REPORT) 0x%x killed 0x%x -> SENT notify 9 to 2"
                                           % (A_CID, B_CID)))
     check("log: the room END fired once", count("[battle] END table 1") == 1)
