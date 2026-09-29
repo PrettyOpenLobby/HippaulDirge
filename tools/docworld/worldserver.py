@@ -1,5 +1,6 @@
 """main(): the socket, the per-session state and the event loop that answers every datagram, and the --sweep table."""
 import datetime
+import math
 import os
 import select
 import socket
@@ -41,6 +42,8 @@ from . import advertise, arenadata, arenamaps, battleroom, briefingroom, charrec
 # Ordered deliberately: the known-good baseline FIRST, so if it does not
 # reproduce CER-48103 the run is untrustworthy and everything after it is noise.
 BURST_GAP = 8.0
+# 2026-09-28: the spawn ring radius per seat (world units, ~10 cm each)
+SEAT_SPREAD = 15.0
 SWEEP = [
     (128, 4, "baseline -- known to reach CER-48103 (lobby phase)"),
     (128, 3, "same type, the OTHER ENT subtype"),
@@ -1567,6 +1570,18 @@ def main():
                 print("  [coins] SENT notify 21 to 0x%08x: CUT %d Chocobo "
                       "Coin(s) from the bag (paid %d gil)"
                       % (m, _held, doc_stats.coin_gil(_held)), flush=True)
+            # 2026-09-28 (Dirge report): Mako Capsules picked up in the match
+            # stayed in the bag after it -- the kind 11 of each pick-up put
+            # them there and nothing took them out. The same kind-21 cut as
+            # the coins; `holders` is left alone (the tally read it above).
+            _caps = room.holders.get(m, 0)
+            if _caps > 0:
+                s.sendto(gamemsg.build_gs_notify(21, fielditems.field_item_payload(
+                    fielditems.MAKO_CAPSULE, 0, (0.0, 0.0, 0.0), _caps,
+                    head=fielditems.FIELD_QUIET), seq=next_gs_seq(ms), ident=m), dst)
+                print("  [capsule] SENT notify 21 to 0x%08x: CUT %d Mako "
+                      "Capsule(s) from the bag at the battle's end" % (m, _caps),
+                      flush=True)
             s.sendto(gamemsg.build_gs_notify(4, bytes(4) + _res_rec,
                                      seq=next_gs_seq(ms), ident=m), dst)
             ms.gs_battle_end[0] = 0.0
@@ -2627,15 +2642,42 @@ def main():
             tm = _spawn_team(key, cid)
             ts = arenadata.team_start(z, tm) if tm is not None else None
             if ts is not None:
+                ts = _seat_spread(ts, cid, team=tm)
                 print("  [arena] 0x%08x spawns at team %d's start %s (zone %d)"
                       % (cid, tm, tuple(round(v, 1) for v in ts), z), flush=True)
                 return ts
         if z in _zone_spawn:
-            return _zone_spawn[z]
-        try:
-            return tuple(float(x) for x in a.gs_battle_pos.split(","))[:3]
-        except ValueError:
-            return (0.0, 0.0, 0.0)
+            p = _zone_spawn[z]
+        else:
+            try:
+                p = tuple(float(x) for x in a.gs_battle_pos.split(","))[:3]
+            except ValueError:
+                p = (0.0, 0.0, 0.0)
+        if per_team and cid:
+            p = _seat_spread(p, cid)
+            print("  [arena] 0x%08x spawns at %s (zone %d)"
+                  % (cid, tuple(round(v, 1) for v in p), z), flush=True)
+        return p
+
+    def _seat_spread(p, cid, team=None):
+        """2026-09-28 (Dirge report): every player of a table used to get the
+        SAME point -- 8 of 9 live matches -- and two avatars on one spot is
+        the likeliest source of the reported out-of-bounds spawns. Seat i of
+        the n players sharing the point (the table, or `team`'s members at a
+        team start) goes on a SEAT_SPREAD ring around it (units are ~10 cm:
+        a running player covers ~50 a second, measured), same height; alone,
+        the point itself."""
+        room = battle_of(cid)
+        seats = (list(room.members) if room is not None
+                 else [m for m in bt_store.members(bt_store.table_of(cid) or -1) if m])
+        if team is not None:
+            seats = [m for m in seats if _spawn_team(None, m) == team]
+        if cid not in seats or len(seats) < 2:
+            return p
+        i = seats.index(cid)
+        ang = 2.0 * math.pi * i / len(seats)
+        return (p[0] + SEAT_SPREAD * math.cos(ang), p[1],
+                p[2] + SEAT_SPREAD * math.sin(ang))
     def _mission_quest(sess):
         """2026-09-23: the quest id of `sess`'s Mission-flagged table, or 0."""
         cid = sess.seen_charid[0] if sess is not None else 0
@@ -6128,6 +6170,20 @@ def main():
                          (_plain if _plain is not None else data)
                          [framing.BODY_OFF:framing.BODY_OFF + 8].hex(" "),
                          "  [decrypted]" if _plain is not None else ""), flush=True)
+                # 2026-09-28 (Dirge report): the JOIN's 21 goes out HERE, and
+                # `reply` stays None, so the echo in the `reply` block below
+                # never ran for a JOIN: the joiner held no reservation and
+                # its Reserve option stayed open. Echo after the 21, as there.
+                if _bt_echo_key is not None and not a.bt_no_reserve_echo:
+                    s.sendto(tableverbs.build_reserve_echo(
+                        data, _bt_echo_key, seq=a.lobby_seq,
+                        subchannel=(a.world_subchannel
+                                    if a.world_subchannel >= 0 else 7),
+                        ptype=a.world_type, pad_to=a.world_pad, ident=_ident), src)
+                    print("  SENT RESERVATION ECHO (selector 152, unsolicited) for "
+                          "table %d after the JOIN-ok (sec 4fl)" % _bt_echo_key,
+                          flush=True)
+                    _bt_echo_key = None
 
         # THE DELETE ANSWER.  Pressing DELETE on a slot sends a 40-byte mode-2
         # message whose body is `05 11 00 00 <slot> ...` -- selector 17, an odd
