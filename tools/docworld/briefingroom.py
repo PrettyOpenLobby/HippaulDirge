@@ -103,9 +103,9 @@ def gs_ready_roster(pkt, ident, gs_id, members=(), kind=0, rec=None, addr=None):
             # unaddressed: one peer per console, the rest dropped. NETWORK
             # order (inet_aton + big-endian port, like selector 104):
             # MEASURED by running 0x00bd2ab0 on savestate RAM -- the unit then
-            # holds 01 00 00 d7 cb 00 71 52, the live socket's own form, and
-            # the gate 0x00be7dd8 ACCEPTS; '<IH' made it stream to
-            # 203.0.113.82:215 (proof38.py, 10-05).
+            # holds 01 00 00 d7 and then the address, the live socket's own form, and
+            # the gate 0x00be7dd8 ACCEPTS; '<IH' made it stream to a
+            # byte-swapped address (proof38.py, 10-05).
             struct.pack_into(">IH", b, e + 16, addr[0] & 0xFFFFFFFF, addr[1] & 0xFFFF)
     b[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = bytes(2)
     b[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = struct.pack("<H", framing.cksum(b))

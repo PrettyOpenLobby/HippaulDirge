@@ -67,8 +67,7 @@ def build_quest_list_body(ids, subchannel=7):
 # It exists to answer ONE question: does a non-zero 148 put rows on that screen?
 # If yes, we know what to build. If nothing changes, 147/148 is the Select
 # Server list only and it is eliminated. Do not ship a non-empty default, and do
-# not read meaning into the values until a screenshot earns it
-#.
+# not read meaning into the values until a screenshot earns it.
 LIST148_REQ = 147
 LIST148_ANS = 148
 MISSION_ROW_OPEN = 0x02  # 148 entry flags bit1 -> mission row rec+4 = 0 (not greyed)
