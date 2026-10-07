@@ -364,6 +364,14 @@ def build_parser():
                     help="the old spelling of --pol-members on: any value turns "
                          "it on. The path is not read (the core's accounts are "
                          "in PostgreSQL).")
+    ap.add_argument("--chara-id-source", default="derived", choices=("derived", "content"),
+                    help="2026-10-05: content = a NEW character (REGISTER) takes one "
+                         "of its POL member's DoC Content IDs (code 10) as its "
+                         "character id -- the client keeps a memory-card gun "
+                         "loadout only for one. A character that already carries "
+                         "one ('cid' in doc_character, set by "
+                         "doc_contentid_migrate.py or a REGISTER) is served it "
+                         "under either setting.")
     ap.add_argument("--chara-id-base", type=lambda x: int(x, 0), default=0x1000,
                     help="sec 4dv: the base for the CHARACTER ID written at "
                          "wire+0 of each roster record. That u32 becomes "
@@ -493,8 +501,59 @@ def build_parser():
                          "are left out. "
                          "With --mission-ledger the exams among these are "
                          "gated by the instructors. Empty = the old empty list.")
+    ap.add_argument("--mission-spawn-near", type=float, default=150.0,
+                    help="2026-10-03: a mission placing FEWER enemies than its "
+                         "controller has spawn points uses the points nearest "
+                         "the player's start, none closer than this (world "
+                         "units). Live quest 1: its lone Beast Soldier stood "
+                         "~785 units away all mission. 0 = roster order.")
+    ap.add_argument("--mission-player-spawn", default="off", choices=("on", "off"),
+                    help="2026-10-04: start a mission at the controller's OWN "
+                         "type-2 node (doc_mission_spawns 'player', walkable; "
+                         "not a start node) when that sits among more enemies than the "
+                         "generic per-zone spawn. Fixes the Wastelands missions "
+                         "whose enemies cluster far from the zone spawn (live "
+                         "10-04: Dual Horn Duel, Sniper -- empty field). Keeps "
+                         "the generic spawn for a mission that already shows "
+                         "enemies. OFF until a console check (needs the "
+                         "regenerated doc_mission_spawns.json with 'player').")
+    ap.add_argument("--peer-record-addr", default="relay", choices=("relay", "off"),
+                    help="2026-10-05: what another player's peer record carries at "
+                         "+16/+28 (IP/port). 'relay' = our relay endpoint as the "
+                         "receiving console sees it (the --gs-connect host via "
+                         "advertise.host_for, --gs-connect-port): the console "
+                         "copies it into that player's unit and streams to it. "
+                         "'off' = zeros, the old record: each console accepted ONE "
+                         "relayed peer (retail receive gate 0x00be7dd8), so at most "
+                         "two players saw each other.")
+    ap.add_argument("--peer-relay-dedupe-s", type=float, default=1.0,
+                    help="2026-10-05: relay only the FIRST copy of a peer packet "
+                         "(same sender, type, sender clock, body) within this many "
+                         "seconds. A console sends one copy per peer unit -- all to "
+                         "us once --peer-record-addr=relay gives units our address. "
+                         "0 = off.")
+    ap.add_argument("--mission-shared-npcs", default="off", choices=("on", "off"),
+                    help="2026-10-05: ONE enemy set per mission room, simulated "
+                         "by one console (the first to arrive; handed on if it "
+                         "leaves) and told to every member, instead of each "
+                         "member's console placing and controlling its own copy "
+                         "of the same ids. Retail's model; OFF until the peer "
+                         "relay carries the controller's enemy movement to the "
+                         "others (a non-controller only draws an NPC from those "
+                         "updates).")
+    ap.add_argument("--mission-player-radius", type=float, default=300.0,
+                    help="2026-10-04: the radius (world units) --mission-player-"
+                         "spawn counts enemies within when it compares the "
+                         "generic spawn against the controller's player nodes.")
+    ap.add_argument("--mission-spawn-groups", default="on", choices=("on", "off"),
+                    help="2026-10-05: a mission's enemy TYPES and points come from "
+                         "the arena's own spawn groups (doc_mission_spawns "
+                         "'pool_groups', the original server's picker): fixed "
+                         "groups first, then the mission's named target, nearest "
+                         "the start; MISSION_SETUP keeps only how many are alive "
+                         "at once. off = the row's own types.")
     ap.add_argument("--mission-npc-types",
-                    default="3001:3,3,3,3,3,3,0,0;3004:1;4,0,5,6,7,8,9,10,11,12",
+                    default="4,0,5,6,7,8,9,10,11,12",
                     help="2026-09-23: kind-15 TYPE per mission NPC slot (cycled). "
                          "The controller record carries no type; live, types 1, 4 "
                          "and 52 spawned SOLID but INVISIBLE enemies at the "
@@ -505,7 +564,11 @@ def build_parser():
                          "situation: live, every type drew situation 3000's "
                          "dog, which reads as type = INDEX into the situation's "
                          "loaded model list (bzd table 20: 3001 = e030 dog, w010, "
-                         "w003, e102; 3004 = w003, e102) -- e102 = index 3 / 1.")
+                         "w003, e102; 3004 = w003, e102) -- e102 = index 3 / 1. "
+                         "2026-10-05: a quest in doc_missions.MISSION_SETUP takes its "
+                         "types from there; the 09-23 per-situation pins are gone "
+                         "(a 'q39:3,3' pin outlived the course's move to another "
+                         "arena, where type 3 is a model it never loads).")
     ap.add_argument("--respawn-kind", type=int, default=13,
                     help="2026-09-23: notify kind pushed about a KO'd member when "
                          "the room's respawn delay elapses; kind 25 (dead bits + "
@@ -606,16 +669,17 @@ def build_parser():
                          "resource set (3000+ = mission sets). Unlisted = keep "
                          "the table record's own situation. Mapping unknown.")
     ap.add_argument("--quest-zones",
-                    default="5:208,16:208,31:208,20:201,30:201,32:201,"
-                            "18:204,27:204,33:204,19:205,24:205,34:205,"
-                            "23:203,35:203",
+                    default="",
                     help="with the quest mission: QUEST:ZONE pairs for notify "
                          "kind 2's arena zone (rec+26) -- the ARENA; 38's map "
                          "index is list display only. Default = the place each "
                          "quest's own description names, matched to zonelist by "
                          "NAME (church 208, Kalm 203, wastelands 204, sewers "
                          "205, jungle 201) -- inferred, not SE data. Unlisted "
-                         "quests keep --gs-battle-zone. Empty = all keep it.")
+                         "quests keep --gs-battle-zone. 2026-10-05: empty by "
+                         "default -- doc_missions.MISSION_SETUP / ARCHIVE_ZONES "
+                         "give every served quest its arena, and a pair here "
+                         "OVERRIDES them.")
     ap.add_argument("--zone-spawns",
                     default=arenamaps.ZONE_SPAWNS_DEFAULT,
                     help="ZONE:x,y,z entries separated by ';' -- kind 2's spawn "
@@ -1205,6 +1269,14 @@ def build_parser():
                          "the 'Player distribution has been determined' window "
                          "-> leaveBriefingRoom (47) -> get_onlinezone -> the "
                          "arena (--gs-battle-zone).")
+    ap.add_argument("--gs-add-chara-before-dist", default="on", choices=("on", "off"),
+                    help="2026-10-03: right before the distribution (kind 20), "
+                         "send each client a notify 31 (add chara, with team and "
+                         "the distribution's slot) for every OTHER member, so "
+                         "its profile cache holds their teams -- without it a "
+                         "TEAM battle's non-leaders took everyone for a teammate "
+                         "and never sent a hit (live 10-03). off = the old kind "
+                         "0 / kind 20 only.")
     ap.add_argument("--gs-real-dist-settle", type=float, default=5.0,
                     help="sec 4ft: seconds the real roster must stay ready "
                          "before the distribution goes out, so a player can "
@@ -1289,6 +1361,65 @@ def build_parser():
                          "command 3, so without this a joiner never reaches the "
                          "briefing room (38 alone takes a reserved member there, "
                          "sec 4eo).")
+    ap.add_argument("--post-battle-briefing", type=float, default=0.0,
+                    help="2026-10-01, manual p.33: seconds the players stay in the "
+                         "briefing room after the result, leaving by its "
+                         "transporter (lobby command 4); selector 39 sends anyone "
+                         "left to the lobby when it runs out. 0 (default) = the "
+                         "old direct return, selector 39 after "
+                         "--gs-battle-reset-after. Not yet seen on a console: "
+                         "the 09-13 attempt hung in the briefing load.")
+    ap.add_argument("--lobby-capacity", type=int, default=0,
+                    help="2026-10-01, manual p.25: players a lobby takes; at or "
+                         "past it Select Server shows the row as full (Players "
+                         "Connected 1000+, which the client will not enter). 0 = "
+                         "no limit (SE's number is not known).")
+    ap.add_argument("--no-respawn-random", dest="respawn_random",
+                    action="store_false", default=True,
+                    help="2026-10-01: respawn a KO'd player at its OWN first "
+                         "spawn point every time, instead of a random one of "
+                         "its team's (manual p.33; BT: anyone's).")
+    ap.add_argument("--no-status-echo", dest="status_echo",
+                    action="store_false", default=True,
+                    help="2026-10-01: do NOT echo a player's battle status "
+                         "(request 46) to the room as notify kind 43. Without the "
+                         "echo Limit Break never starts and Reraise never shows.")
+    ap.add_argument("--no-team-full-refuse", dest="team_full_refuse",
+                    action="store_false", default=True,
+                    help="2026-10-01: do NOT refuse a briefing-room team pick "
+                         "when that side already holds half the table's player "
+                         "limit (manual p.30; answer 32 = CER-44301).")
+    ap.add_argument("--briefing-start", default="ready", choices=("ready", "full"),
+                    help="2026-10-01: when a briefing room sends everyone to "
+                         "the battlefield before its countdown ends. ready = "
+                         "manual p.30: as soon as every seated player is ready "
+                         "(on a team, both sides occupied; missions: any side). "
+                         "full = the 09-29 rule: a PvP table only when it is "
+                         "full to its player limit, else at the countdown.")
+    ap.add_argument("--bt-fill-start", type=float, default=2.0,
+                    help="2026-10-01, manual p.29: a PvP table whose last seat "
+                         "is taken goes to the briefing room by itself (\"when "
+                         "the table fills, or the leader starts it\"). Seconds "
+                         "after the filling JOIN, so its own answer and echo go "
+                         "out first; a seat freed in that time cancels it. "
+                         "Negative = only the leader's Start.")
+    ap.add_argument("--rematch-after", type=float, default=15.0,
+                    help="2026-10-03, manual p.33 (\"after the battle you jump "
+                         "back to the briefing room\"): a finished PvP table is "
+                         "KEPT, and this many seconds after the battle-over "
+                         "reset (selector 39, which lands the client in the "
+                         "lobby) everyone still in it, plus anyone queued "
+                         "(--join-queue), gets BATTLE READY again, as a filled "
+                         "table does. Missions still dissolve. Negative = "
+                         "dissolve every table after its battle (the old way).")
+    ap.add_argument("--join-queue", default="on", choices=("on", "off"),
+                    help="2026-10-03: a JOIN refused because the table's briefing "
+                         "or battle is running (-4) is remembered, and the player "
+                         "is seated and sent to the briefing room with the next "
+                         "round (--rematch-after). Seats still count: queue + "
+                         "members never exceed the table's maximum.")
+    ap.add_argument("--join-queue-ttl", type=float, default=900.0,
+                    help="seconds a queued join stays valid")
     ap.add_argument("--gs-battle-pos", default="925.4,-12.3,-1271.7",
                     help="sec 4ga: x,y,z of the battle spawn (notify kind 2 "
                          "record +0/+4/+8 -> getBattleInitPos -> "
@@ -1322,6 +1453,14 @@ def build_parser():
                     default=doc_field.RESPAWN_S,
                     help="seconds before an emptied item generator rolls again "
                          "(OURS: the map data carries no interval)")
+    ap.add_argument("--enemy-drops", default="on", choices=("on", "off"),
+                    help="2026-09-24 / ported 10-05: a mission enemy's death "
+                         "rolls the retail client's own drop table (doc_drops: "
+                         "9 handgun / 4 rifle / 30 MG bullets, Potions, Phoenix "
+                         "Downs) and lays the drop on the field (kind 10) where "
+                         "it died. The client's own roll is off online.")
+    ap.add_argument("--drop-seed", type=int, default=-1,
+                    help="seed the enemy-drop roll (tests); -1 = unseeded")
     ap.add_argument("--no-respawn-ammo", dest="respawn_ammo",
                     action="store_false", default=True,
                     help="2026-09-26: send kind 25 (down) WITHOUT the respawn "

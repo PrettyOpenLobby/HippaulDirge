@@ -84,18 +84,46 @@ def usable(item):
     return item not in SKIP_ITEMS and (item >> 16) not in SKIP_CATEGORIES
 
 
-def generators(zone, situation, table=None):
-    """[(pos, set rows)] for the battle's zone + situation, with the rows a
-    generator can actually drop (see SKIP_*); generators left with nothing
-    are dropped. [] when the zone or situation has no data."""
-    table = load() if table is None else table
-    sets, sits = table.get(int(zone or 0), ({}, {}))
+def pvp_twins(situation):
+    """2026-10-03: the 9xxx situations to try for a PvP one. Nine PvP arenas
+    (z203/204/205/208/209/212/231/233/235) have no 10xx/11xx controller, so
+    the 1100 we send placed NO items (live: Church, Train Graveyard). Where
+    both families exist, 1000 == 9000 and 1100 == 9100 enable exactly the
+    same generator nodes, so 10xx borrows 9000/9001 and 11xx-19xx 9100/9101.
+    The client never loads a model set for 9xxx (ev2045 mdlResLoad), so only
+    the server uses them, for item placement."""
+    s = int(situation or 0)
+    if 1000 <= s < 1100:
+        return (9000, 9001)
+    if 1100 <= s < 2000:
+        return (9100, 9101)
+    return ()
+
+
+def _placed(sets, nodes):
     out = []
-    for pos, st in sits.get(int(situation or 0), []):
+    for pos, st in nodes:
         rows = [(ITEM_ALIAS.get(i, i), q, w) for i, q, w in sets.get(st, ())
                 if usable(ITEM_ALIAS.get(i, i)) and w > 0]
         if rows:
             out.append((pos, rows))
+    return out
+
+
+def generators(zone, situation, table=None):
+    """[(pos, set rows)] for the battle's zone + situation, with the rows a
+    generator can actually drop (see SKIP_*); generators left with nothing
+    are dropped. [] when the zone or situation has no data. A PvP situation
+    takes whichever of itself and its 9xxx twins (pvp_twins) places the most:
+    z235's 1100 is a 2-node stub beside a full 9100."""
+    table = load() if table is None else table
+    sets, sits = table.get(int(zone or 0), ({}, {}))
+    s = int(situation or 0)
+    out = _placed(sets, sits.get(s, []))
+    for twin in pvp_twins(s):
+        alt = _placed(sets, sits.get(twin, []))
+        if len(alt) > len(out):
+            out = alt
     return out[:MAX_ITEMS]
 
 
@@ -108,6 +136,25 @@ def roll(rows, rng=random):
             return item, qty
         r -= w
     return None
+
+
+MAKO_CAPSULE = 0x6B300000
+
+
+def capsule_spots(zone, situation, table=None):
+    """2026-10-05: the positions of (zone, situation)'s item generators whose
+    set can hold a Mako Capsule -- SE's own capsule spots (the Trooper 3rd
+    exam's 201:3001 has exactly the 3 its objective asks). The capsule
+    missions placed theirs on a ring around the start instead (live: one
+    inside a box). [] when there are none."""
+    table = load() if table is None else table
+    sets, sits = table.get(int(zone or 0), ({}, {}))
+    out = []
+    for node in sits.get(int(situation or 0), []):
+        pos, si = node[0], node[1]
+        if any(item == MAKO_CAPSULE for item, _q, _w in sets.get(si, ())):
+            out.append(tuple(pos))
+    return out
 
 
 class Generators(object):
@@ -177,6 +224,21 @@ def _selftest():
           g[2][1] == [(0x62300000, 9, 100)])
     check("generators: an unknown zone / situation has none",
           generators(999, 3002, table) == [] and generators(204, 1, table) == [])
+    # 2026-10-03 (live: Church / Train Graveyard placed nothing): a PvP
+    # situation the arena lacks borrows its 9xxx twin; a mission never does
+    tw = {212: ({7: [(0x62300000, 9, 50)]},
+                {9100: [((1.0, 0.0, 1.0), 7), ((2.0, 0.0, 2.0), 7)],
+                 9000: [((3.0, 0.0, 3.0), 7)]})}
+    check("generators: TBT 1100 missing -> the 9100 twin's 2 nodes",
+          [p for p, _ in generators(212, 1100, tw)]
+          == [(1.0, 0.0, 1.0), (2.0, 0.0, 2.0)])
+    check("generators: BT 1000 missing -> the 9000 twin",
+          [p for p, _ in generators(212, 1000, tw)] == [(3.0, 0.0, 3.0)])
+    check("generators: a mission (3000) does not borrow a PvP twin",
+          generators(212, 3000, tw) == [])
+    tw[212][1][1100] = [((9.0, 0.0, 9.0), 7)]
+    check("generators: a 1-node 1100 stub loses to its 2-node 9100 twin",
+          len(generators(212, 1100, tw)) == 2)
     # 2026-09-26: coins are placed now (doc_stats pays them); gil itself and
     # the unnamed "gold 2..6" placeholders are not
     ct = {201: ({1: [(0x67300001, 1, 10), (0x67300002, 1, 6),

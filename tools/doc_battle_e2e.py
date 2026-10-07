@@ -41,6 +41,7 @@ _GEN = bool(doc_field.load())
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41555"))
 A_CID, B_CID = 0x0002A664, 0x00041018
+C_CID = 0x00041020     # 2026-09-29: the late joiner, refused
 FAILS = []
 
 
@@ -69,6 +70,17 @@ def world_req(cid, selector, body_tail=b"", pad=176):
     pkt[0] = 0x04
     pkt[8], pkt[9] = D.PTYPE_WORLD if hasattr(D, "PTYPE_WORLD") else 127, 1
     struct.pack_into("<I", pkt, 16, cid)
+    return seal(pkt)
+
+
+def pose(cid, x=100.0):
+    """A readable type-0x83 position datagram (the lobby/arena pose stream):
+    flags 8, own id at +16 and body[0], (x, y, z) floats after it."""
+    pkt = bytearray(D.BODY_OFF + 40)
+    pkt[0] = 0x04
+    pkt[8], pkt[9] = 0x83, 0x08
+    struct.pack_into("<I", pkt, 16, cid)
+    struct.pack_into("<Ifff", pkt, D.BODY_OFF, cid, x, 0.0, 50.0)
     return seal(pkt)
 
 
@@ -135,7 +147,11 @@ def run(accounts=False):
             "--gs-battle-after-join=30", "--session-idle-drop=0",
             # sec 4hc: one kill graduates, so A's kill drives the broadcast
             "--novice-kills=1", "--intro=off",
-            "--stats", "on"]
+            "--stats", "on",
+            # 2026-10-03: the one-address run plays the next round (the table
+            # is kept, the refused C is queued); the accounts run is the TWIN
+            # with the old dissolve
+            "--rematch-after=%d" % (-1 if accounts else 5)]
     # a fresh database per run: empty careers and, for the accounts run, the
     # core's own (empty) session table
     db_url = docpg.new_database()
@@ -158,6 +174,8 @@ def run(accounts=False):
         ca.settimeout(0.5)
         cb.settimeout(0.5)
 
+        kind4 = {}      # socket -> every kind 4 a drain saw, whichever step it was
+
         def drain(sock):
             got = []
             try:
@@ -165,6 +183,10 @@ def run(accounts=False):
                     got.append(sock.recv(65535))
             except socket.timeout:
                 pass
+            kind4.setdefault(sock, []).extend(
+                p for p in got if len(p) >= D.BODY_OFF + 24
+                and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
+                and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 4)
             return got
 
         # 1. A creates a table (mode 1 = TBT, max 4, no time limit byte ->
@@ -200,6 +222,15 @@ def run(accounts=False):
               any(len(p) > D.BODY_OFF + 1 and p[D.BODY_OFF + 1] == 38 for p in ans_a))
         check("START -> BATTLE READY (38) fanned out to the member",
               any(len(p) > D.BODY_OFF + 1 and p[D.BODY_OFF + 1] == 38 for p in ans_b))
+        # 3a. 2026-09-29 (Dirge report): a third player joining DURING the
+        #     briefing got a seat but no 38, stayed in the lobby, and the room
+        #     counted it. From Start the table takes no new seats.
+        cc = udp_socket()
+        cc.settimeout(0.5)
+        cc.bind(("127.0.0.3", 0))     # its own address: one IP = one account here
+        # no wait and no close here: the later steps time themselves against
+        # the room clock, and the socket stays open so its answers land
+        cc.sendto(world_req(C_CID, D.BT_REQ_JOIN, struct.pack("<H", 1)), dst)
         # 3b. a retransmitted command 3 must NOT re-run the Start
         ca.sendto(world_req(A_CID, D.LOBBY_CMD_SELECTOR_REQ,
                             struct.pack("<II", D.LOBBY_CMD_START, 0)), dst)
@@ -252,6 +283,11 @@ def run(accounts=False):
               "%d / %d" % (len(p_a), len(p_b)))
         cb.sendto(field_req(B_CID, D.P2P_PICKUP, struct.pack(
             "<IIIfff", slot, 1, 2, 10.0, 0.0, 20.0)), dst)
+        # 2026-10-05: a real console starts its 1 Hz report (request 24) at
+        # GO; without it the server re-sends the GO burst (sent here, past
+        # the GO, inside a pause the test already had: the clock is 12 s)
+        ca.sendto(gs_req(A_CID, 24, arg=1, session=1), dst)
+        cb.sendto(gs_req(B_CID, 24, arg=1, session=1), dst)
         time.sleep(0.4)
         check("TWIN: a second PICK-UP of the taken slot sends nothing",
               not notifies(drain(ca), 11) and not notifies(drain(cb), 11))
@@ -334,12 +370,15 @@ def run(accounts=False):
                   pts == (1, 0, 0, 0) and kv == (A_CID, B_CID), "%s %s" % (pts, kv))
         # 7. the room clock (12 s from the shared GO) ends it; reset 1 s later
         time.sleep(11.0)
-        res_a = [p for p in drain(ca) if len(p) >= D.BODY_OFF + 24
-                 and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
-                 and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 4]
-        res_b = [p for p in drain(cb) if len(p) >= D.BODY_OFF + 24
-                 and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
-                 and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 4]
+        # 2026-10-03: the server sent both (log), but 11 s against a 12 s
+        # clock sometimes drained B before its kind 4 went out -- keep
+        # collecting for up to 4 s instead of one drain each
+        # ...and a kind 4 that landed in an EARLIER step's drain (the kill
+        # step's, when the steps ran slow) still counts: kind4[] keeps them
+        _until = time.time() + 4.0
+        while time.time() < _until and not (kind4.get(ca) and kind4.get(cb)):
+            drain(ca), drain(cb)
+        res_a, res_b = list(kind4.get(ca, [])), list(kind4.get(cb, []))
         check("kind 4 (RESULT) reached BOTH members from ONE room clock",
               len(res_a) == 1 and len(res_b) == 1,
               "A %d, B %d" % (len(res_a), len(res_b)))
@@ -379,6 +418,25 @@ def run(accounts=False):
               struct.unpack_from("<I", D.build_gs_message(61) + bytes(12),
                                  D.BODY_OFF + 8)[0] == 0)
         drain(cb)
+        if not accounts:
+            # 2026-10-05: back in the lobby = poses and no game-server
+            # request. B stays on its result screens (keepalives) for 6 s
+            # more; the rematch must wait for B to go quiet.
+            t0 = time.time()
+            b_last = t0
+            seen_at = None
+            while time.time() - t0 < 35.0 and seen_at is None:
+                ca.sendto(pose(A_CID), dst)
+                cb.sendto(pose(B_CID), dst)
+                if time.time() - t0 < 6.0:
+                    cb.sendto(gs_req(B_CID, 1, session=1), dst)
+                    b_last = time.time()
+                time.sleep(0.5)
+                drain(ca), drain(cb)
+                txt = io.open(log_path, encoding="utf-8", errors="replace").read()
+                if "player(s) back to the briefing" in txt.split("[rematch] table 1 KEPT", 1)[-1]:
+                    seen_at = time.time()
+            _rematch_wait = (None if seen_at is None else seen_at - b_last)
     finally:
         srv.terminate()
         try:
@@ -398,6 +456,9 @@ def run(accounts=False):
     check("no traceback in the server log", "Traceback" not in text)
     check("log: CREATE -> table 1", has("CREATE -> table 1"))
     check("log: JOIN seated", has("JOIN table 1 by 0x%08x -> 0 (seated)" % B_CID))
+    check("log: a JOIN during the briefing is REFUSED, never seated",
+          has("JOIN table 1 refused: its briefing is running")
+          and not has("JOIN table 1 by 0x%08x -> 0" % C_CID))
     check("log: the Start retransmit was recognised", has("a retransmit, 241 only"))
     check("log: table READY then the distribution",
           has("table 1 READY") and has("SENT notify 20 (PLAYER DISTRIBUTION) over the REAL"))
@@ -415,12 +476,45 @@ def run(accounts=False):
     check("log: A and B were given DIFFERENT spawn points",
           A_CID in _spn and B_CID in _spn and _spn[A_CID] != _spn[B_CID],
           "%s" % {"0x%x" % k: v for k, v in _spn.items()})
+    # 2026-10-03 (live 04:26): the respawn (kind 25) must repeat THIS battle's
+    # spawn -- it used the last post-join-timer spawn, which a started battle
+    # now skips (a Church point on Train Graveyard: sky only)
+    _down = next((re.search(r"DOWN 0x0*%x: .*respawn at \(([-\d]+), ([-\d]+), "
+                            r"([-\d]+)\)" % B_CID, ln) for ln in lines
+                  if ("DOWN 0x%x:" % B_CID) in ln), None)
+    _bsp = _spn.get(B_CID)
+    check("log: B respawns at ITS battle spawn (kind 25 = the 47's kind 2)",
+          _down is not None and _bsp is not None
+          and [int(v) for v in _down.groups()]
+          == [int(round(float(v))) for v in _bsp.split(",")],
+          "down %s spawn %s" % (_down.groups() if _down else None, _bsp))
     check("log: KILL REPORT tallied", has("KILL REPORT) 0x%x killed 0x%x -> SENT notify 9 to 2"
                                           % (A_CID, B_CID)))
     check("log: the room END fired once", count("[battle] END table 1") == 1)
     check("log: RESULT logged for both", count("SENT notify 4 (the RESULT") == 2)
     check("log: selector 39 to both", count("SENT selector 39 (battle over") == 2)
-    check("log: table DISSOLVED exactly once", count("DISSOLVED after the battle") == 1)
+    if accounts:
+        check("TWIN (--rematch-after -1): table DISSOLVED exactly once, not kept",
+              count("DISSOLVED after the battle") == 1 and not has("[rematch]"))
+    else:
+        # 2026-10-03, manual p.33: back to the briefing room, not the lobby
+        check("log: the table is KEPT after the battle, never dissolved",
+              has("[rematch] table 1 KEPT after the battle")
+              and not has("DISSOLVED after the battle"))
+        check("log: C (refused during the briefing) was QUEUED for the next round",
+              has("[queue] 0x%08x QUEUED for table 1" % C_CID))
+        _rm = next((i for i, ln in enumerate(lines)
+                    if "[rematch] table 1:" in ln and "back to the briefing" in ln),
+                   None)
+        _after = lines[_rm:] if _rm is not None else []
+        check("the rematch waited until B (on its result screens) went quiet "
+              ">= 8 s", _rematch_wait is not None and _rematch_wait >= 7.5,
+              "%r s after B's last keepalive" % (_rematch_wait,))
+        check("log: the next round sends BATTLE READY (38) to A and B again",
+              _rm is not None and all(
+                  any("SENT BATTLE READY (selector 38)" in ln
+                      and ("member 0x%08x" % c) in ln for ln in _after)
+                  for c in (A_CID, B_CID)), log_path)
     check("log: no 'waiting for' stall", not has("waiting for 1 member"))
     check("log: A graduated from the novice mark by kills (sec 4hc), B did not",
           count("0x%08x GRADUATED (1 career kills)" % A_CID) == 1

@@ -211,8 +211,16 @@ def main():
           sorted(struct.unpack_from("<III", p, D.BODY_OFF + 16) for p in k33)
           == [(0, A_CID, 8000), (1, A_CID, 8000)],
           "%r" % [struct.unpack_from("<III", p, D.BODY_OFF + 16) for p in k33])
-    check("[jungle] team 0 spawns at Jungle's team-0 start",
-          "spawns at team 0's start (482.8, -17.7, -993.2) (zone 201)" in text)
+    # 2026-10-05: the situation's own type-2 start node for team 0, seat 0
+    # (the old (482.8, -17.7, -993.2) was the hand table / an MP point)
+    _t0 = D.team_start(201, 0, None, 0)
+    _sp = D.base_spots(201)
+    _d = lambda p, q: ((p[0] - q[0]) ** 2 + (p[2] - q[2]) ** 2) ** 0.5
+    check("[jungle] team 0 spawns at its own start node, nearer its own base",
+          _t0 is not None and _sp is not None
+          and ("spawns at team 0's start %s (zone 201"
+               % (tuple(round(v, 1) for v in _t0),)) in text
+          and _d(_t0, _sp[0]) < _d(_t0, _sp[1]), "%r" % (_t0,))
     check("[jungle] logged", "[base] SENT notify kind 29: bases [26, 23]" in text
           and "[base] SENT notify kind 33 x2: HP 8000" in text)
 
@@ -267,9 +275,15 @@ def main():
     text, notes = battle("capsule", 2, 4, 0, capsules=3)
     k10 = [struct.unpack_from("<IHH", p, D.BODY_OFF + 20) for k, p in notes if k == 10]
     check("[capsule] no traceback", "Traceback" not in text)
+    # 2026-10-05: the arena's own item generators (doc_item_generators.json,
+    # when present) also place FIELD items at GO from slot 3 on -- only the
+    # capsules are this check's business, and no field item may take their
+    # item id or their slots
+    caps = sorted(e for e in k10 if e[0] == D.MAKO_CAPSULE)
     check("[capsule] kind 10 x3 at GO: Mako Capsules in slots 0..2",
-          sorted(k10) == [(D.MAKO_CAPSULE, 1, 0), (D.MAKO_CAPSULE, 1, 1),
-                          (D.MAKO_CAPSULE, 1, 2)], "%r" % k10)
+          caps == [(D.MAKO_CAPSULE, 1, 0), (D.MAKO_CAPSULE, 1, 1),
+                   (D.MAKO_CAPSULE, 1, 2)]
+          and all(e[2] >= 3 for e in k10 if e[0] != D.MAKO_CAPSULE), "%r" % k10)
     check("[capsule] logged placed + sent",
           "[capsule] table 1: 3 Mako Capsule(s) placed" in text
           and "[capsule] SENT notify kind 10 x3" in text)

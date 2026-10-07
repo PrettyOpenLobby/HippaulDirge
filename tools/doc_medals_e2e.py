@@ -8,9 +8,10 @@ through a Team Capsule and a Team Survival table and reads the kind-4 RESULT
 records (the medal-holder slots at rec+30+h, holder h = medal id h =
 group-60 index - 16) and the server log back:
 
-  tcp        mode 4, 2 capsules: B picks one up, A KOs B (request 30), B's
-             client drops it (118) -> Capsule Seeker (23, holder 7) names A in
-             BOTH records, once (the drop is the same KO)
+  tcp        mode 4, 2 capsules: B picks one up, A KOs B (request 30); the
+             SERVER drops B's capsule (21 + 10 to B, 10 to A; the client sends
+             no 118 on a KO) -> Capsule Seeker (23, holder 7) names A in BOTH
+             records, once
   tcp_twin   the same with B holding nothing when KO'd -> nobody holds 7
   tdm        mode 2 (Team Survival): A KOs B, B's side is wiped -> Survivor
              (20, holder 4) and Slayer (21, holder 5) name A; nothing names B
@@ -30,7 +31,7 @@ sys.path.insert(0, HERE)
 import docudp as D                                          # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as S                                       # noqa: E402
-from doc_battle_e2e import (world_req, gs_req, field_req, check,  # noqa: E402
+from doc_battle_e2e import (world_req, gs_req, check, pose,  # noqa: E402
                             notifies, FAILS)
 from doc_base_e2e import touch_req, k10_items, notes_of     # noqa: E402
 
@@ -75,6 +76,7 @@ def run(tag, mode, capsules=0, carrier=True):
     srv = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
                            cwd=HERE)
     got = {A_CID: [], B_CID: []}
+    ko_drop = [([], [])]          # (B's notify kinds, A's capsule kind 10s) at the KO
     try:
         wait_listening(log, srv)
         check("[%s] docudp is up" % tag, srv.poll() is None)
@@ -118,15 +120,20 @@ def run(tag, mode, capsules=0, carrier=True):
             so[B_CID].sendto(touch_req(B_CID, slot, 0, (x + 8.0, y, z)), dst)
             time.sleep(0.5)
             pump()
-        # A KOs B: B's client reports its own death (request 30, killer A)
-        so[B_CID].sendto(gs_req(B_CID, 30, arg=A_CID, hdr_arg=B_CID, session=1), dst)
+        # B's last pose: where a KO'd carrier's capsules fall
+        so[B_CID].sendto(pose(B_CID, x=321.0), dst)
         time.sleep(0.3)
-        if carrier and caps:
-            # ...and drops what it held (118 {item, count, seq, f32 pos})
-            so[B_CID].sendto(field_req(B_CID, D.P2P_DROP, struct.pack(
-                "<IIIfff", D.MAKO_CAPSULE, 1, 1, 0.0, 0.0, 0.0)), dst)
-        time.sleep(0.5)
         pump()
+        n_a, n_b = len(got[A_CID]), len(got[B_CID])
+        # A KOs B: B's client reports its own death (request 30, killer A).
+        # 2026-10-06: it sends NO 118 (that is only the item menu's Drop);
+        # the server drops what B held
+        so[B_CID].sendto(gs_req(B_CID, 30, arg=A_CID, hdr_arg=B_CID, session=1), dst)
+        time.sleep(0.8)
+        pump()
+        ko_drop[0] = ([k for k, _p in notes_of(got[B_CID][n_b:])],
+                      [c for c in k10_items(notes_of(got[A_CID][n_a:]))
+                       if c[0] == D.MAKO_CAPSULE])
         deadline = time.time() + 14.0
         while time.time() < deadline and not (
                 notifies(got[A_CID], 4) and notifies(got[B_CID], 4)):
@@ -148,13 +155,17 @@ def run(tag, mode, capsules=0, carrier=True):
     # roster = the others in seat order, then self: A's = [B, A], B's = [A, B]
     ha = holders_of(res[A_CID][0]) if res[A_CID] else [None] * 15
     hb = holders_of(res[B_CID][0]) if res[B_CID] else [None] * 15
-    return text, ha, hb
+    return text, ha, hb, ko_drop[0]
 
 
 def main():
     M = lambda idx: idx - S.MEDAL_BASE          # medal id = holder slot
 
-    text, ha, hb = run("tcp", 4, capsules=2)
+    text, ha, hb, (kb, ka) = run("tcp", 4, capsules=2)
+    check("[tcp] B's KO: kill notice 9, the drop (21 + quiet 10), the scoreboard "
+          "46, then the down 25 to B; a kind 10 at B's last pose (321, 0, 50) to A",
+          kb[:5] == [9, 21, 10, 46, 25] and len(ka) == 1 and ka[0][3] == (321, 0, 50)
+          and "KO'd carrier DROPPED 1 capsule(s)" in text, "B %r A %r" % (kb, ka))
     check("[tcp] Capsule Seeker names A in A's record (slot 1) and B's (slot 0)",
           ha[M(S.M_CAPSULE_SEEKER)] == 1 and hb[M(S.M_CAPSULE_SEEKER)] == 0,
           "A %r B %r" % (ha, hb))
@@ -165,12 +176,15 @@ def main():
     check("[tcp] no 2005-beta medal (Iron Seal / First Attack) anywhere",
           "Iron Seal" not in text and "First Attack" not in text)
 
-    text, ha, hb = run("tcp_twin", 4, capsules=2, carrier=False)
+    text, ha, hb, (kb, ka) = run("tcp_twin", 4, capsules=2, carrier=False)
+    check("[tcp_twin] TWIN: B held nothing -> no kind 21, no capsule kind 10 to A",
+          21 not in kb and ka == [] and "KO'd carrier DROPPED" not in text,
+          "B %r A %r" % (kb, ka))
     check("[tcp_twin] TWIN: B held nothing when KO'd -> nobody holds Capsule "
           "Seeker", ha[M(S.M_CAPSULE_SEEKER)] == NOBODY
           and hb[M(S.M_CAPSULE_SEEKER)] == NOBODY, "A %r B %r" % (ha, hb))
 
-    text, ha, hb = run("tdm", 2)
+    text, ha, hb, _kd = run("tdm", 2)
     check("[tdm] Survivor and Slayer name A in both records",
           ha[M(S.M_SURVIVOR)] == 1 and ha[M(S.M_SLAYER)] == 1
           and hb[M(S.M_SURVIVOR)] == 0 and hb[M(S.M_SLAYER)] == 0,

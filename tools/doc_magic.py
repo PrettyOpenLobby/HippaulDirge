@@ -144,15 +144,22 @@ class Ledger(object):
         # every charged cast still inside its resend window, not just the last:
         # a recast within 8 s must not turn the first cast's later resends into
         # new casts
-        c["casts"] = [(a, t) for a, t in c["casts"]
-                      if now - t <= RESEND_OFFSETS[-1] + RESEND_TOLERANCE]
-        for a, t in c["casts"]:
+        c["casts"] = [k for k in c["casts"]
+                      if now - k[1] <= RESEND_OFFSETS[-1] + RESEND_TOLERANCE]
+        # 2026-10-03 (live, Itachi 01:13:48): each resend SLOT of a cast is
+        # used once. A real recast landing on a slot its own resend had
+        # already filled (+7.71 s after +7.54 s) was booked free, never became
+        # an anchor, and its four resends were then charged 30 each.
+        for a, t, used in c["casts"]:
             dt = now - t
-            if a == arg and any(abs(dt - off) <= RESEND_TOLERANCE
-                                for off in RESEND_OFFSETS):
-                return c["mp"], 0, "resend (+%.2f s)" % dt
+            if a != arg:
+                continue
+            for i, off in enumerate(RESEND_OFFSETS):
+                if i not in used and abs(dt - off) <= RESEND_TOLERANCE:
+                    used.add(i)
+                    return c["mp"], 0, "resend (+%.2f s)" % dt
         cost = cast_cost(el, lvl, suit)
-        c["casts"].append((arg, now))
+        c["casts"].append((arg, now, set()))
         if cost is None:
             return c["mp"], 0, "unknown element %d level %d: not charged" % (el, lvl)
         c["mp"] = max(0, c["mp"] - cost)
@@ -222,6 +229,16 @@ def _selftest():
         c = L2.enter(8, "b1")
         c["mp"] = max(0, c["mp"] - cast_cost(1, 1))
     check("TWIN: charging every copy drains 100 -> 0 on ONE cast", L2.mp(8) == 0)
+    # 2026-10-03, live (Itachi, table 1, MP 70 before): a cast and its four
+    # resends, a RECAST at +7.715 s (its +7.6 slot already used at +7.541),
+    # then the recast's own four resends. Two casts: 70 -> 40 -> 10, not 0.
+    L5 = Ledger()
+    L5.enter(6, "t1")["mp"] = 70
+    seq = (0.0, 0.524, 1.540, 3.538, 7.541, 7.715, 8.224, 9.248, 11.251, 15.274)
+    got5 = [L5.cast(6, "t1", 0x10001, d)[:2] for d in seq]
+    check("live 01:13:48: two charges (70 -> 40 -> 10), the recast's resends free",
+          [g[1] for g in got5] == [30, 0, 0, 0, 0, 30, 0, 0, 0, 0]
+          and L5.mp(6) == 10)
     print("doc_magic selftest: %s" % ("ALL PASS" if not fails else "FAIL %s" % fails))
     return not fails
 

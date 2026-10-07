@@ -111,8 +111,17 @@ N_AREAS = 4
 # Where a player is, for scoping. area: ("lobby", 0..3), ("battle", key) or
 # None (no position heard yet); table: battletable key or None; battle: room
 # key or None; team: team number or None.
-Where = collections.namedtuple("Where", "area table battle team")
+Where = collections.namedtuple("Where", "area table battle team pos",
+                               defaults=(None,))
 NOWHERE = Where(None, None, None, None)
+
+# 2026-10-01: the help text's "small radius" (36:9) as a distance in world
+# units (x/z), for two players in the lobby whose positions are known. OURS --
+# SE's number is not in the client: about half a lobby wing (a wing is ~1100
+# units across). A shout keeps "its wing and the neighbouring ones" (the
+# "large radius"), and battle chat stays in the room: an arena position is
+# not reliably fresh on the server.
+SAY_RADIUS = 600.0
 
 
 def lobby_region(x, z):
@@ -174,10 +183,24 @@ def recipients(body, sender, live, where=None):
     me = where(sender) or NOWHERE
     at = {c: (where(c) or NOWHERE) for c in others}
     if kind in (KIND_SAY, KIND_SHOUT):
-        if me.area is None:        # no position heard yet: the old broadcast
-            return others
+        # 2026-10-01: no position heard yet = nobody in range (the old
+        # broadcast sent a "nearby" line to the whole server)
+        if me.area is None:
+            return []
         reach = {me.area} if kind == KIND_SAY else adjacent(me.area)
-        return [c for c in others if at[c].area in reach]
+        if kind == KIND_SHOUT or me.area[0] != "lobby" or me.pos is None:
+            return [c for c in others if at[c].area in reach]
+        out = []
+        for c in others:
+            w = at[c]
+            if w.pos is not None and w.area is not None and w.area[0] == "lobby":
+                d = ((w.pos[0] - me.pos[0]) ** 2
+                     + (w.pos[1] - me.pos[1]) ** 2) ** 0.5
+                if d <= SAY_RADIUS:
+                    out.append(c)
+            elif w.area in reach:
+                out.append(c)
+        return out
     if kind == KIND_ENTRY:
         if me.table is None:       # the client refuses this itself (0x9c10)
             return []
@@ -241,7 +264,20 @@ def _selftest():
         to(KIND_SHOUT, 1) == [2, 3, 5, 13])
     chk("shout from south reaches east + west, not north",
         to(KIND_SHOUT, 3) == [1, 2, 4, 13])
-    chk("say with no position: the old broadcast", len(to(KIND_SAY, 6)) == 9)
+    chk("say with no position: nobody (no longer the whole server)",
+        to(KIND_SAY, 6) == [])
+    near = {20: Where(E, None, None, None, (900.0, 100.0)),
+            21: Where(E, None, None, None, (1300.0, 100.0)),
+            22: Where(E, None, None, None, (1600.0, 900.0)),
+            23: Where(S, None, None, None, (900.0, -1000.0))}
+    live.update(near)
+    wn = lambda c: near.get(c) or world.get(c)
+    chk("say by distance: 400 units away hears, 1000 away does not",
+        21 in to(KIND_SAY, 20, where=wn) and 22 not in to(KIND_SAY, 20, where=wn))
+    chk("shout: the next wing, whatever the distance", 23 in to(KIND_SHOUT, 20, where=wn))
+    chk("say by distance still crosses no battle", 10 not in to(KIND_SAY, 20, where=wn))
+    for c in near:
+        live.discard(c)
     chk("battle say stays in the room", to(KIND_SAY, 10) == [11, 12])
     chk("entry: same table (lobby)", to(KIND_ENTRY, 1) == [3])
     chk("entry: table 9 includes the seated lobby member",

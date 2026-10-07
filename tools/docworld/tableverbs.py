@@ -46,6 +46,9 @@ from . import advertise, battleroom, framing, tablerecords, worlddoor
 # browser's (BT_OFF_*); rec+12..15 / rec+20..21 are the game-server endpoint
 # the create arm hands to 0x00bc0320 (bytes in order / big-endian port, the
 # same encoding build_world_answer uses at body[52..57]).
+#: 2026-10-06: the situation an INDIVIDUAL (BT) table loads: mdlResLoad
+#: 1000..1098 = Res_bt1 (arenadata.BT_SITUATION)
+BT_SITUATION_INDIVIDUAL = 1000
 BT_REQ_CREATE = 24
 BT_REQ_CONFIG = 26
 BT_REQ_UPDATE = 28
@@ -102,6 +105,29 @@ class BattletableStore:
         # from doc_missions.MISSION_TIME; `time_unit` = --bt-time-unit
         self.mission_time = {}
         self.time_unit = 1.0
+        # 2026-10-04: {quest: roster map index} and {quest: max players} -- a
+        # MISSION record's Map and "%d/%d" cap as the list and the join gate
+        # read them. The client's CREATE leaves its own create-screen values
+        # there (map 0 = Jungle, max 12), so Dual Horn Duel was listed as a
+        # 12-player Jungle table while it is played in the Wastelands for 3.
+        # Set by main() from the quest's zone and doc_missions.MAX_PLAYERS.
+        self.mission_map = {}
+        self.mission_max = {}
+        # 2026-10-05: {quest: situation} -- the mission's situation at wire+34
+        # in the record itself, so EVERY member's selector 38 carries it. Only
+        # the leader's 38 got the quest rewrite; the others' record said
+        # --bt-situation 1100, loaded the PvP model set (o099 only) and could
+        # draw no enemy whatever type was sent.
+        self.mission_situation = {}
+        # 2026-10-05: {quest: Base Durability} for a BASE mission -- wire+16
+        # nonzero is what makes the client create its base gimmick at all
+        # (doc_missions.MISSION_BASES). Every other mission keeps 0, or its
+        # situation's base would appear in a kill mission.
+        self.mission_base_hp = {}
+        # 2026-10-06: (record, individual) -> the PvP situation for the
+        # record's arena, or None for the default (the server sets it:
+        # arenadata.situation_for through its map -> zone table)
+        self.situation_for = None
         for r in records:
             self.add_record(r)
 
@@ -126,10 +152,32 @@ class BattletableStore:
             if _q in self.mission_time:
                 struct.pack_into("<I", rec, tablerecords.BT_OFF_TIME,
                                  int(round(self.mission_time[_q] / self.time_unit)))
-        if self.situation and not struct.unpack_from("<H", rec,
-                                                     tablerecords.BT_OFF_SITUATION)[0]:
-            struct.pack_into("<H", rec, tablerecords.BT_OFF_SITUATION,
-                             self.situation & 0xFFFF)
+        if struct.unpack_from("<I", rec, tablerecords.BT_OFF_FLAGS)[0] & tablerecords.BT_FLAG_MISSION:
+            _q = struct.unpack_from("<H", rec, tablerecords.BT_OFF_MISSION)[0]
+            if _q in self.mission_map:
+                rec[tablerecords.BT_OFF_MAP] = self.mission_map[_q] & 0xFF
+            if _q in self.mission_max:
+                rec[tablerecords.BT_OFF_MAX] = self.mission_max[_q] & 0xFF
+            if _q in self.mission_situation:
+                struct.pack_into("<H", rec, tablerecords.BT_OFF_SITUATION,
+                                 self.mission_situation[_q] & 0xFFFF)
+            struct.pack_into("<I", rec, tablerecords.BT_OFF_BASE_HP,
+                             self.mission_base_hp.get(_q, 0) & 0xFFFFFFFF)
+        if self.situation and (t.get("auto_sit") or not struct.unpack_from(
+                "<H", rec, tablerecords.BT_OFF_SITUATION)[0]):
+            # 2026-10-06 (live, Train Graveyard BT / Kalm TBT "jail"): an
+            # individual table takes the BT set (1000 = Res_bt1), and a
+            # situation the arena lacks made the client build every fence
+            # (arenadata.situation_for), so the arena picks: 1000 / 1100 or
+            # its 9000 / 9100. Re-picked on every stamp -- the leader can
+            # change the map after the CREATE.
+            _ind = bool(struct.unpack_from("<I", rec, tablerecords.BT_OFF_FLAGS)[0]
+                        & tablerecords.BT_FLAG_INDIVIDUAL)
+            _sit = BT_SITUATION_INDIVIDUAL if _ind else self.situation
+            if self.situation_for is not None:
+                _sit = self.situation_for(rec, _ind) or _sit
+            struct.pack_into("<H", rec, tablerecords.BT_OFF_SITUATION, _sit & 0xFFFF)
+            t["auto_sit"] = True
         if self.gs_ip:
             rec[BT_OFF_GS_IP:BT_OFF_GS_IP + 4] = bytes(
                 int(x) for x in self.gs_ip.split("."))
@@ -222,10 +270,22 @@ class BattletableStore:
             self.reservation[ident] = key
         return key
 
-    def update(self, key, wire_rec, ident=None):
-        """Selector 28: take the client's rule fields, keep what we own."""
+    def update(self, key, wire_rec, ident=None, uid=0):
+        """Selector 28: take the client's rule fields, keep what we own.
+        2026-10-01, manual p.29: "Adjust Rules" is the LEADER's command, so a
+        member's request (by either identity, as is_leader) is refused, and so
+        is any change while the battle runs or one whose maximum is below the
+        players already seated."""
         t = self.tables.get(key)
         if t is None:
+            return False
+        if ident and not self.is_leader(key, ident, uid):
+            return False
+        if t.get("in_progress"):
+            return False
+        mx = bytes(wire_rec[:tablerecords.BT_REC_LEN]).ljust(
+            tablerecords.BT_REC_LEN, b"\x00")[tablerecords.BT_OFF_MAX]
+        if mx and mx < len(t["members"]):
             return False
         new = bytearray(bytes(wire_rec[:tablerecords.BT_REC_LEN]).ljust(tablerecords.BT_REC_LEN, b"\x00"))
         keep = bytes(t["rec"])
@@ -280,8 +340,13 @@ class BattletableStore:
             if not t["members"]:
                 del self.tables[key]
             else:
-                if t.get("leader_cid") == ident or t["leader"] == 0:
+                if (t.get("leader_cid") == ident or t["leader"] in (0, ident)):
+                    # 2026-10-01: the row's Leader column is t["leader"] (the
+                    # creator's id as create() was given it: the charid when
+                    # one is known, as appoint() writes too). Moving only
+                    # leader_cid left the departed player named as leader.
                     t["leader_cid"] = t["members"][0]
+                    t["leader"] = t["members"][0]
                 self._stamp(t)
         return key
 
@@ -384,6 +449,47 @@ def build_battletable_verb_answer(req, selector, rec, members=(), seq=0,
     pkt[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = bytes(2)
     pkt[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = struct.pack("<H", framing.cksum(pkt))
     return bytes(pkt)
+
+
+#: 2026-10-01: the BATTLETABLE INVITATION push (selector 129, arm 0x00bd4524
+#: -> 0x00bd3500, no state gate; MEASURED on the retail lobby state by an
+#: offline run of the client's own code, re-invites/doc_invite_proof.py).
+#: Header ident = the INVITER's character id (the "%s" of 39:11); body[12..13]
+#: u16 the table; body[14..21] 8 bytes kept verbatim and later pre-filled
+#: into the password dialog when the invitee picks it (the table password,
+#: NUL padded; zeros for an open table). The client ignores an invite to its
+#: own reservation and a repeat of one it holds, keeps 20 (oldest dropped),
+#: and filters the ordinary 16 -> 17 list down to the invited tables for its
+#: "Show Invitation List" -- there is no list to serve.
+BT_PUSH_INVITE = 129
+INVITE_PUSH_LEN = 64
+#: request 127's body[12] when the invitation goes to a whole group (phase 49,
+#: "Send All Battletable Invitation"); body[16..23] then names the group
+INVITE_ALL = 0xFFFFFFFF
+
+
+def build_invite_push(table_key, password=b"", subchannel=7):
+    b = bytearray(INVITE_PUSH_LEN)
+    b[0] = subchannel & 0xFF
+    b[1] = BT_PUSH_INVITE
+    struct.pack_into("<H", b, 12, table_key & 0xFFFF)
+    b[14:22] = bytes(password or b"")[:8].ljust(8, b"\x00")
+    return bytes(b)
+
+
+def invite_targets(store, inviter, target, online):
+    """(table key, [character ids to push 129 to]) for request 127 from
+    `inviter` naming `target`. Manual p.27: only a player holding a
+    reservation can invite, so no table = nobody. The target must be online
+    (`online` = live character ids) and not already seated at that table; an
+    invitation never goes back to its sender."""
+    key = store.table_of(inviter) if inviter else None
+    if key is None:
+        return None, []
+    seated = set(store.members(key))
+    if target in (0, INVITE_ALL) or target == inviter or target in seated:
+        return key, []
+    return key, [target] if target in online else []
 
 
 def build_reserve_echo(req, key, seq=0, subchannel=7, ptype=127, pad_to=176,
@@ -499,7 +605,7 @@ def battletable_verb(store, req, body, req_sel, ident, uid, seq=0,
         wire = body[BT_REQ_REC_OFF:BT_REQ_REC_OFF + tablerecords.BT_REC_LEN]
         key = struct.unpack_from("<H", wire, tablerecords.BT_OFF_ID)[0] or \
             store.table_of(ident) or 0
-        ok = store.update(key, wire, ident)
+        ok = store.update(key, wire, ident, uid=uid or 0)
         rec = store.record(key) if ok else bytes(wire)
         return (build_battletable_verb_answer(
                     req, BT_REQ_UPDATE + 1, rec, store.members(key),
@@ -528,8 +634,12 @@ def battletable_verb(store, req, body, req_sel, ident, uid, seq=0,
                     ("REFUSED, not the leader" if key in store.tables
                      else "unknown")))
     if req_sel == BT_REQ_INVITE:
+        # 128's arm (0x00bd4600) reads nothing from the body and cannot report
+        # a failure: a bare answer always. The invitee's 129 is pushed by the
+        # world server (invite_targets / build_invite_push), which knows the
+        # sessions.
         target = struct.unpack_from("<I", body, 12)[0] if len(body) >= 16 else 0
         return (worlddoor.build_world_answer(req, selector=req_sel + 1, result=0,
                                    pad_to=pad_to, **kw),
-                "INVITE 0x%08x (acknowledged only)" % target)
+                "INVITE 0x%08x -> 128" % target)
     return None, "not a battletable verb"

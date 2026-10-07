@@ -20,6 +20,9 @@ from . import gamemsg
 # countdown (10 s, index at body[16]) start / cancel. The client has no
 # capsule win test: the server ends it (kind 4 via end_battle).
 MAKO_CAPSULE = 0x6B300000
+#: the item-id class (id >> 16) of the consumables, Potion .. Ether
+#: (doc_items: 0x69320000..0x6932000C); manual p.34 "consumable items"
+CONSUMABLE_CLASS = 0x6932
 CAPSULE_HOLD_S = 10.0
 CAPSULE_RING = 150.0          # OURS: no fixed capsule points found in bzd
 CAPSULE_HOLDERS = 7
@@ -137,6 +140,36 @@ def capsule_drop(room, cid, iid, count, pos, now=None):
         count, room.holders[cid],
         " (KO'd by 0x%x: a carrier KO, Capsule Seeker)" % seeker
         if seeker is not None else "")
+
+
+def capsule_ko_drop(room, victim, pos):
+    """2026-10-06: a carrier's KO drops every capsule it holds. The client
+    never does it: P2P 118 is only the item menu's Drop (builder 0x00BEE4E0,
+    sole caller chain 0x004A38C8 command 3), so a KO'd carrier kept them
+    (live, Jungle). PROVEN by running the retail arm 0x00BCBED4 (scratchpad
+    re-capdrop/): kind 21 with ident == the receiver cuts the item from its
+    bag once and spawns it, but skips the channel's field table; kind 10
+    registers that table. So: 21 then a quiet 10 to the victim, 10 to the
+    others, one slot per capsule. Returns ([(kind, payload, ident, to)], note)."""
+    field = room.field
+    held = room.holders.get(victim, 0)
+    if field is None or room.over or held <= 0 or pos is None:
+        return [], None
+    out = []
+    n = 0
+    for _ in range(held):
+        slot = next((i for i in range(FIELD_SLOTS) if i not in field), None)
+        if slot is None:
+            break
+        field[slot] = (MAKO_CAPSULE, tuple(pos))
+        out.append((21, field_item_payload(MAKO_CAPSULE, slot, pos), victim, "self"))
+        out.append((10, field_item_payload(MAKO_CAPSULE, slot, pos, head=FIELD_QUIET),
+                    victim, "self"))
+        out.append((10, field_item_payload(MAKO_CAPSULE, slot, pos), victim, "others"))
+        n += 1
+    room.holders[victim] = held - n
+    return out, "KO'd carrier DROPPED %d capsule(s) at %s -> holds %d" % (
+        n, tuple(round(v) for v in pos), room.holders[victim])
 
 
 def capsule_hold(room, now):

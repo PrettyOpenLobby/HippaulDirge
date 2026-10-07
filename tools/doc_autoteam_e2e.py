@@ -50,7 +50,7 @@ def msg(pkts, m):
             and struct.unpack_from("<H", p, D.BODY_OFF)[0] == m]
 
 
-def run(auto_after, extra=(), a_leaves=False, solo=False):
+def run(auto_after, extra=(), a_leaves=False, solo=False, go=False):
     log_path = os.path.join(os.environ.get("TEMP", HERE),
                             "doc_autoteam_e2e_%s.log" % auto_after)
     log = io.open(log_path, "w", encoding="utf-8")
@@ -115,6 +115,17 @@ def run(auto_after, extra=(), a_leaves=False, solo=False):
         time.sleep(1.0)
         got_a += drain(ca)
         got_b += drain(cb)
+        if go:
+            # 2026-10-03 (live, table 7): both leave the briefing room
+            # (request 47) and wait out the shared GO. B never sent 31.
+            ca.sendto(E.gs_req(E.A_CID, 47, session=1), dst)
+            cb.sendto(E.gs_req(E.B_CID, 47, session=1), dst)
+            for _ in range(8):
+                ca.sendto(E.gs_req(E.A_CID, 1, session=1), dst)
+                cb.sendto(E.gs_req(E.B_CID, 1, session=1), dst)
+                time.sleep(0.5)
+                got_a += drain(ca)
+                got_b += drain(cb)
     finally:
         srv.terminate()
         try:
@@ -130,12 +141,29 @@ def run(auto_after, extra=(), a_leaves=False, solo=False):
 
 def main():
     print("run 1: --gs-auto-team-after=3")
-    text, pa, pb, lp = run(3)
+    text, pa, pb, lp = run(3, extra=["--gs-battle-go-after=1"], go=True)
     ka, kb = kind20(pa), kind20(pb)
+    check("A (sent 31) gets the battle START (kind 5)", kind(pa, 5),
+          "A %d" % len(kind(pa, 5)))
+    check("B (AUTO-TEAMED, never sent 31) gets the battle START (kind 5)",
+          kind(pb, 5), lp)
     check("log: B was AUTO-TEAMED onto team 0",
           ("AUTO-TEAMED 0x%x -> team 0" % E.B_CID) in text, lp)
     check("log: the REAL distribution went out",
           "SENT notify 20 (PLAYER DISTRIBUTION) over the REAL" in text, lp)
+    # 2026-10-03 (live: TEAM battles, only the leader hit): before the 20,
+    # each client gets a kind 31 naming the OTHER member WITH its team
+    def add31(pkts, other, team):
+        idx31 = [i for i, p in enumerate(pkts)
+                 if len(p) >= D.BODY_OFF + 48
+                 and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
+                 and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 31
+                 and struct.unpack_from("<I", p, D.BODY_OFF + 20)[0] == other
+                 and p[D.BODY_OFF + 42] >> 4 == team]
+        idx20 = [i for i, p in enumerate(pkts) if p in kind20(pkts)]
+        return bool(idx31 and idx20 and idx31[0] < idx20[0])
+    check("A gets kind 31 {B, team 0} BEFORE its kind 20", add31(pa, E.B_CID, 0), lp)
+    check("B gets kind 31 {A, team 1} BEFORE its kind 20", add31(pb, E.A_CID, 1), lp)
     check("kind 20 reached BOTH clients", ka and kb,
           "A %d, B %d" % (len(ka), len(kb)))
     # B never sent 31 -> re-armed on keepalives
@@ -144,11 +172,17 @@ def main():
           and len(msg(pb, D.GS_ARM_MSG)) >= 1, lp)
     check("A (sent 31) is NOT re-armed on its keepalives",
           ("no team request from 0x%08x" % E.A_CID) not in text, lp)
-    # the other player's team reaches B as a KIND 0 (a kind 31 never moves a count)
-    check("A's team reaches B as kind 0 (first sight), no kind 31",
+    # the other player's team reaches B as a KIND 0 (a kind 31 never moves a
+    # count); the 31s come only with the distribution, after the briefing
+    check("A's team reaches B as kind 0 (first sight); the only kind 31 is "
+          "the distribution's",
           ("SENT notify 0 (set team) 0x%08x -> team 1 -> 0x%08x's briefing "
            "(first sight)" % (E.A_CID, E.B_CID)) in text
-          and kind(pb, 0) and not kind(pb, 31), lp)
+          and kind(pb, 0) and len(kind(pb, 31)) == 1, lp)
+    print("run 1b (TWIN): the same with --gs-add-chara-before-dist=off")
+    text, pa, pb, lp = run(3, extra=["--gs-add-chara-before-dist=off"])
+    check("TWIN: no kind 31 to either client, the 20 still goes out",
+          not kind(pa, 31) and not kind(pb, 31) and kind20(pa) and kind20(pb), lp)
     print("run 2 (TWIN): --gs-auto-team-after=-1 --no-gs-rearm-until-team, "
           "A steps off its space")
     text, pa, pb, lp = run(-1, extra=["--no-gs-rearm-until-team"],

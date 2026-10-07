@@ -42,6 +42,25 @@ APP_93 = 93
 VOICE_OFF = 127
 
 
+#: 2026-10-05: a character's POL CONTENT ID ("cid"), DoC = service code 10.
+#: Static RE (scratchpad re-loadout/): the client purges every memory-card
+#: loadout slot whose owner is not one of the handle's code-10 content ids,
+#: so a character whose id is ours alone loses its gun setup at every boot.
+#: A stored "cid" IS the character's id (charrecords.chara_id_of); bits 30/31
+#: must stay clear (NPC ids, sec 4bw/4ch), as allocated ids always are.
+DOC_CONTENT_CODE = 10
+CONTENT_ID_MAX = 0x40000000
+
+
+def content_id_of(char):
+    """The character's stored Content ID, or 0 (none / not a valid id)."""
+    try:
+        v = int((char or {}).get("cid") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return v if 0 < v < CONTENT_ID_MAX else 0
+
+
 def chr_code(char):
     """The 16-bit o099 costume code for a stored charamake character (sec 4dr).
 
@@ -66,6 +85,33 @@ def chr_code(char):
     app92 = char.get("app92", 0) & 0xFF
     app93 = char.get("app93", 0) & 0xFF
     return (app92 | (app93 << 8)) & 0xFFFF
+
+
+#: SE's character-name rules, from the client's own error table
+#: (data/etc/kelerr.bin) and creation prompt (group 35 [21]): 3 to 15
+#: characters of A-Z, 0-9, hyphen, underscore; a hyphen or underscore may not
+#: begin or end the name, nor follow another.
+NAME_MIN, NAME_MAX = 3, 15
+CER_NAME_LENGTH = 42310
+CER_NAME_CHARS = 42311
+CER_NAME_TAKEN = 45201
+_NAME_SYMBOLS = "-_"
+
+
+def name_error(name):
+    """None for a name SE's rules accept, else the CER code that refuses it."""
+    name = name or ""
+    if not NAME_MIN <= len(name) <= NAME_MAX:
+        return CER_NAME_LENGTH
+    if any(not (ch.isascii() and (ch.isalnum() or ch in _NAME_SYMBOLS))
+           for ch in name):
+        return CER_NAME_CHARS
+    if name[0] in _NAME_SYMBOLS or name[-1] in _NAME_SYMBOLS:
+        return CER_NAME_CHARS
+    if any(a in _NAME_SYMBOLS and b in _NAME_SYMBOLS
+           for a, b in zip(name, name[1:])):
+        return CER_NAME_CHARS
+    return None
 
 
 def parse_register(body):
@@ -228,6 +274,78 @@ class CharaStore:
                 self.save()
                 return slot
         return None
+
+    def name_taken(self, name, key):
+        """True when another roster already holds `name` (any case). Rosters
+        keyed by a bare entrance uid ("0x..") are the pre-account backups of
+        the same players (see adopt), so they are not counted against an
+        account; against another uid roster they are."""
+        low = (name or "").lower()
+        for k, chars in self.data.items():
+            if k == key or (k.startswith("0x") and not key.startswith("0x")):
+                continue
+            if any((c.get("name") or "").lower() == low for c in chars):
+                return True
+        return False
+
+    def register(self, uid, char):
+        """The REGISTER rules SE's server enforced (2026-10-01): (slot, None)
+        when stored, (None, CER code) when refused. The codes are SE's own,
+        data/etc/kelerr.bin: 42310 length, 42311 characters, 45201 "mainly a
+        duplicate name". A REGISTER identical to a stored character (the
+        client resends it every 500 ms until answered) returns that slot; one
+        with an existing name and a DIFFERENT look is a second character of
+        that name and is refused -- add() used to overwrite the first."""
+        err = name_error(char.get("name"))
+        if err:
+            return None, err
+        key = self._key(uid)
+        chars = self.data.setdefault(key, [])
+        low = char["name"].lower()
+        for c in chars:
+            if (c.get("name") or "").lower() == low:
+                same = all(c.get(f) == char.get(f) for f in
+                           ("name", "gender", "app92", "app93", "voice"))
+                return (c.get("slot"), None) if same else (None, CER_NAME_TAKEN)
+        if self.name_taken(char["name"], key):
+            return None, CER_NAME_TAKEN
+        used = {c.get("slot") for c in chars}
+        for slot in range(MAX_SLOTS):
+            if slot not in used:
+                chars.append(dict(char, slot=slot))
+                self.save()
+                return slot, None
+        return None, None
+
+    def assign_content_id(self, uid, slot, ids):
+        """2026-10-05: give the character in `slot` a Content ID from `ids`
+        (the member's code-10 ids, in POL order): the first one no character
+        in the whole store holds. A character that already has one keeps it
+        (an id never moves: every store row is keyed on it). Returns the id,
+        or 0 when the slot is empty or no id is free."""
+        key = self._key(uid)
+        char = next((c for c in self.data.get(key, []) if c.get("slot") == slot), None)
+        if char is None:
+            return 0
+        have = content_id_of(char)
+        if have:
+            return have
+        held = {content_id_of(c) for cs in self.data.values() for c in (cs or ())}
+        for raw in ids or ():
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 < v < CONTENT_ID_MAX and v not in held:
+                char["cid"] = v
+                self.save()
+                return v
+        return 0
+
+    def content_ids_held(self):
+        """How many characters carry a Content ID (the startup line)."""
+        return sum(1 for cs in self.data.values() for c in (cs or ())
+                   if content_id_of(c))
 
     def delete(self, uid, slot):
         """Remove the character in `slot`.  Returns True if one was removed."""
@@ -509,6 +627,23 @@ def _selftest():
     # 6. A resolved key passes through _key(); an int uid keys as before.
     assert S(account="member:3")._key("member:6") == "member:6"
     assert S()._key(0xA455A599) == "0xa455a599"
+    # 7. 2026-10-01: SE's name rules (kelerr.bin 42310 / 42311 / 45201).
+    assert name_error("Vincent") is None and name_error("A-1_b") is None
+    assert name_error("Vi") == CER_NAME_LENGTH
+    assert name_error("V" * 16) == CER_NAME_LENGTH
+    for bad in ("-Vin", "Vin_", "Vi--n", "Vi-_n", "Vi n", "Vin!", "Vin\xe9"):
+        assert name_error(bad) == CER_NAME_CHARS, bad
+    fresh()
+    ra, rb = S(account="member:1"), None
+    ca = dict(name="Shalua", gender=1, app92=0x11, app93=0x01, voice=2)
+    assert ra.register("member:1", ca) == (0, None)
+    assert ra.register("member:1", dict(ca)) == (0, None)     # a retransmit
+    assert ra.register("member:1", dict(ca, voice=4)) == (None, CER_NAME_TAKEN)
+    assert ra.roster("member:1")[0]["voice"] == 2              # not overwritten
+    rb = S(account="member:2")
+    assert rb.register("member:2", dict(ca, name="shalua")) == (None, CER_NAME_TAKEN)
+    assert rb.register("member:2", dict(ca, name="Shelke")) == (0, None)
+    assert rb.register("member:2", dict(ca, name="X")) == (None, CER_NAME_LENGTH)
     conn.close()
     fresh()
     docdb.store("ip_members").clear()

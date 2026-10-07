@@ -176,9 +176,12 @@ def main():
                 check("TWIN (--chat off): %s hears NOTHING" % NAMES[who], not m,
                       "%d packet(s)" % len(m))
             else:
-                check("SAY 'yo' (no position yet) reached %s as selector 255, "
-                      "ident A, stream intact" % NAMES[who], ok,
-                      "%d packet(s)" % len(m))
+                # 2026-10-01: a SAY is "nearby players only" (manual p.26);
+                # with no position heard there is nobody near, so it is no
+                # longer broadcast to the whole server. The delivery itself
+                # (selector 255, ident, one copy) is checked by say() below.
+                check("SAY 'yo' (no position yet) reaches nobody: %s hears "
+                      "nothing" % NAMES[who], not m, "%d packet(s)" % len(m))
         check("speaker gets no selector 255 / selector 2 back (sec 4bz)",
               not [p for p in got[A_CID] if sel_of(p) in (2, 255)])
         if twin:

@@ -10,5 +10,7 @@ tools/doc_npc_table.json
 tools/doc_mission_spawns.json
 tools/doc_item_generators.json
 tools/doc_arena_table.json
+tools/doc_arena_starts.json
+tools/doc_map_pieces.json
 # captured datagrams (docudp.py --save)
 doc-rx/

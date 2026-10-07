@@ -119,6 +119,22 @@ def p2p_server_type_mode4(data, inner):
 
 
 P2P_SHOT_LEN = framing.BODY_OFF + 56
+P2P_ENTITY, P2P_121 = 96, 121
+P2P_ENTITY_LEN = framing.BODY_OFF + 44
+P2P_121_LEN = framing.BODY_OFF + 24
+P2P_121_MAGIC = b"\x64\x65\xfb\x01"
+
+
+def shot_slots(body):
+    """A shot's slot table: five {u8 part, '0'+i} pairs, an EMPTY slot being
+    ff ff (2026-10-03, live: 377 of the evening's shots had one, e.g.
+    `14 30 06 31 ff ff ff ff 17 34`, and were read as GS 12288/12299/12308
+    and dropped -- the leader's shots never reached anyone). Slot 0 always
+    holds a part."""
+    if len(body) < 10 or body[1] != 0x30:
+        return False
+    return all(body[2 * i + 1] == 0x30 + i or body[2 * i:2 * i + 2] == b"\xff\xff"
+               for i in range(5))
 
 
 def p2p_battle_type_mode4(data, inner, sender, members):
@@ -148,14 +164,27 @@ def p2p_battle_type_mode4(data, inner, sender, members):
         stride = (len(body) - 4) // n
         ents = [struct.unpack_from("<IiII", body, 4 + stride * i)
                 for i in range(n)]
-        if all(atk == sender and t != sender and t in members and sid
+        # 2026-10-05: a hit on a mission NPC (bit 30) is a 113 too -- its
+        # victim is no seated member, so it was never named (and never landed)
+        if all(atk == sender and t != sender and sid
+               and (t in members or (t & 0xC0000000) == NPC_ID_BIT)
                for t, _d, atk, sid in ents):
             return P2P_DAMAGE
         return None
-    if len(data) == P2P_SHOT_LEN and body[1:10:2] == b"01234":
+    if len(data) == P2P_SHOT_LEN and shot_slots(body):
         vs = struct.unpack_from("<6f", body, 24)
         if all(math.isfinite(v) and abs(v) < 100000.0 for v in vs):
             return P2P_SHOT
+    # 2026-10-03 (live, the leader's): 96 = 44 bytes, a position (3 finite
+    # floats) first and the shot's slot table at +28 -- 79 read as GS
+    # 3405/44122/55478..; 121 = 24 bytes opening 64 65 fb 01 -- all 50 read
+    # as "GS 25956". Neither a GS request (42 is 44 bytes with no slots).
+    if len(data) == P2P_ENTITY_LEN and shot_slots(body[28:]):
+        if all(math.isfinite(v) and abs(v) < 100000.0
+               for v in struct.unpack_from("<3f", body, 0)):
+            return P2P_ENTITY
+    if len(data) == P2P_121_LEN and body[:4] == P2P_121_MAGIC:
+        return P2P_121
     return None
 
 
@@ -181,6 +210,66 @@ def synth_p2p_inner(data, ptype, sender):
             "synth": True}
 
 
+# 2026-10-05: a mission NPC's POSE, sent by the console that CONTROLS it
+# (subagent static RE, retail; scratchpad re-peers/). The generic per-unit
+# pose builder 0x00bea05c emits it for every unit the console simulates:
+# type byte unit+0x215 = 0x83 for its own avatar, 3 for every other unit;
+# header +16 = the UNIT id (the NPC's 0x400001xx), +20 = the unit's +4 word
+# (not a target), flags 8; the 40-byte body is the same pose record a 0x83
+# carries (+0 id, +4 pos, +16 facing, +28 u16 2, +30 u16 ...). The receiver's
+# router 0x0058c9c8 sends types 3 and 0x83 to one arm -> pose handler
+# 0x00be33e8 (finds the unit by the header id) -> the shared pose store
+# 0x00be9ea0. We read it as "GS request 256/257" (the id's low half).
+NPC_POSE_TYPE = 3
+NPC_ID_BIT = 0x40000000
+NPC_POSE_LEN = framing.BODY_OFF + 40
+
+
+def npc_pose(data, inner):
+    """The NPC id of a controller's NPC pose datagram, else None. Readable:
+    inner type 3, flags & 8, header +16 == body +0 with bit 30 set.
+    Unreadable (mode 4, header under a cipher we do not hold): named by its
+    BODY -- exactly 64 bytes, body +0 an NPC id (bit 30 set, bit 31 clear),
+    a finite position. A player's pose body carries its own charid, which
+    never has bit 30, so the two cannot be confused."""
+    if len(data) != NPC_POSE_LEN:
+        return None
+    nid = struct.unpack_from("<I", data, framing.BODY_OFF)[0]
+    if (nid & 0xC0000000) != NPC_ID_BIT:
+        return None
+    if inner is not None and inner.get("plain") is not None:
+        if (inner.get("type") != NPC_POSE_TYPE
+                or not (inner.get("flags", 0) & worldpose.PEER_RELAY_FLAG)
+                or (inner.get("u32_16") or 0) != nid):
+            return None
+        return nid
+    if data[1] != 4:
+        return None
+    pos = struct.unpack_from("<fff", data, framing.BODY_OFF + 4)
+    if not all(math.isfinite(v) and abs(v) < 100000.0 for v in pos):
+        return None
+    return nid
+
+
+def synth_npc_inner(data, nid):
+    """An `inner` for an NPC pose whose header we cannot decrypt: type 3,
+    flags 8, the NPC id at +16, +20 = 0 (the controller's unit +4 word is in
+    the enciphered header; the pose handler finds the unit by +16), sender
+    ms and body verbatim, checksum recomputed -- synth_peer_inner()'s recipe,
+    so build_peer_relay() can send it on as mode 0."""
+    pkt = bytearray(data)
+    pkt[8:24] = bytes(16)
+    pkt[8] = NPC_POSE_TYPE
+    pkt[9] = worldpose.PEER_RELAY_FLAG
+    struct.pack_into("<I", pkt, 16, nid)
+    pkt[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = bytes(2)
+    ck = framing.cksum(pkt)
+    pkt[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = struct.pack("<H", ck)
+    return {"type": NPC_POSE_TYPE, "flags": worldpose.PEER_RELAY_FLAG, "cksum": ck,
+            "ack_seq": 0, "seq": 0, "u32_16": nid, "u32_20": 0, "is_data": False,
+            "is_ack": False, "plain": bytes(pkt), "synth": True}
+
+
 def p2p_record(plain):
     """(type, flags, sender, target, payload) of a decrypted P2P datagram."""
     b = plain[framing.BODY_OFF:]
@@ -188,6 +277,29 @@ def p2p_record(plain):
     return (b[0], b[1], struct.unpack_from("<I", b, P2P_SENDER_OFF)[0],
             struct.unpack_from("<i", b, P2P_TARGET_OFF)[0],
             bytes(b[P2P_PAYLOAD_OFF:P2P_PAYLOAD_OFF + n]))
+
+
+P2P_DAMAGE_ENTRY = 16
+
+
+def p2p_damage(plain):
+    """(sender, target, [(victim, damage, attacker, shot id)]) of a decrypted
+    113. 2026-10-05 (subagent static RE + offline run of retail serializer
+    0x005961a8): the HEADER carries the sender at +16 and the record's target
+    at +20 (the victim's id for a player; the NPC's CONTROLLER id for an NPC,
+    0 on a console never told one); the body is {u32 count, count x 16-byte
+    {u32 victim, s32 damage, u32 attacker, u32 shot id}} -- NOT the generic
+    record p2p_record() reads (566 captured 113s parsed as "flags 0, empty
+    payload", the victim as sender and the damage as target)."""
+    sender, target = struct.unpack_from("<Ii", plain, 16)
+    b = plain[framing.BODY_OFF:]
+    if len(b) < 4:
+        return sender, target, []
+    n = struct.unpack_from("<I", b, 0)[0]
+    out = []
+    for i in range(min(n, (len(b) - 4) // P2P_DAMAGE_ENTRY)):
+        out.append(struct.unpack_from("<IiII", b, 4 + P2P_DAMAGE_ENTRY * i))
+    return sender, target, out
 
 
 def p2p_damage_entries(payload):

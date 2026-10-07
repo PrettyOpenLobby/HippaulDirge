@@ -69,7 +69,7 @@ shops. Its 474-row sorted {id -> u32} table is the story SELL value (Potion
 70 % of buy + tune fees) and every online id (0x6F3x, 0x6331) carries the
 default 10. So the disc confirms the MODEL (sell = a fixed share of buy +
 tune fees) but has no online prices; the guides give those. Flash Materia
-(0x6F34001B) stays out: per the Lifestream fan archive, a later update added it.
+(0x6F34001B) joined the shop on Feb 16 2006 (Lifestream timeline), 100 gil.
 """
 import json
 import os
@@ -119,6 +119,14 @@ SELL_RATE = 0.8
 #: SOURCED sell prices outside the 80 % rule (FFCheats, 2007): the Broken
 #: Handgun / Broken Barrel (Soar's quest items, never on sale) sell for 1.
 SELL_OVERRIDES = {0x6F300009: 1, 0x6F310009: 1}
+#: 2026-10-06 (live: "??id??" on Modify): parts our 20060124_3 build names
+#: only by SE placeholder (kelstr: OA14 / OA15 / OS5 / OS6 -- no finished
+#: data; the 2006 guides that priced them describe a later build). Out of the
+#: Buy tab and the Modify trees; what players already hold still sells, at
+#: the attachment / scope launch price.
+RETIRED_PARTS = {0x6F34000E: "Quick Turn", 0x6F34000F: "Auto Shot",
+                 0x6F320005: "Snipe Scope +", 0x6F320006: "Snipe Scope -"}
+SELL_OVERRIDES.update({i: 80 for i in RETIRED_PARTS})
 
 # The ids are our build's own (doc_kelitem.py on the 20060124_3 kelstr.bin);
 # the English names are the guides' / Lifestream's renderings.
@@ -147,12 +155,15 @@ DEFAULT_STOCK = tuple(
                       (0x03, 150, "Rapid Fire"), (0x05, 150, "Anti-Gravity Floater")])
     + _parts(0x6F34, [(0x04, 100, "Near Adjuster"), (0x06, 100, "Middle Adjuster"),
                       (0x08, 100, "Far Adjuster"), (0x0A, 100, "Recoil Limiter"),
-                      (0x0B, 100, "Silencer"), (0x0E, 100, "Quick Turn"),
-                      (0x0F, 100, "Auto Shot"),
+                      (0x0B, 100, "Silencer"),
+                      # 0x0E Quick Turn / 0x0F Auto Shot: RETIRED_PARTS
                       (0x17, 100, "Fire Materia"), (0x18, 100, "Blizzard Materia"),
-                      (0x19, 100, "Thunder Materia"), (0x1A, 100, "Cure Materia")])
-    # 2026-09-24: no Flash Materia (0x6F34001B) -- a later update added it to
-    # the shop (Lifestream fan archive); our client is the Jan 24 lobby
+                      (0x19, 100, "Thunder Materia"), (0x1A, 100, "Cure Materia"),
+                      # 2026-10-05: Flash Materia joined the shop on Feb 16
+                      # 2006 (Lifestream timeline; PlayOnline news, Feb 13;
+                      # EX-POTION shop list: 100 gil). Not in the launch
+                      # starter kit (STARTER_KIT leaves it out)
+                      (0x1B, 100, "Flash Materia")])
     + _parts(0x6331, [(0x00, 300, "Soldier Suit"), (0x14, 300, "Snipe Suit"),
                       (0x28, 300, "Speed Suit"), (0x3C, 300, "Magic Suit"),
                       (0x50, 300, "Toughness Suit")])
@@ -177,8 +188,48 @@ LAUNCH_SELL = {iid: LAUNCH_SELL_BY_CAT[iid >> 16] for iid, _p, _n in DEFAULT_STO
 #: shop sells except armor (suits): the three frames, three barrels, the
 #: Snipe Scope, the four options and the eleven accessories / materia, one
 #: each (the count is not given; one each is OURS).
+#: 2026-10-05, OURS, not retail: a ROTATING MASK shelf.
+#: These nine masks are complete in the client (name, description, model) but
+#: no retail source says how players got them (Lifestream, the 2006 player
+#: wiki and guides; likely beta leftovers). Each week ROTATION_SIZE of them
+#: are on sale beside the regular stock, at the suit price, rolling over with
+#: the weekly medals (Monday 00:00 +09:00); every one of the nine sells back
+#: at the suit sell price whatever the week. The sourced masks (SOLDIER Mask,
+#: Shield Visor, the Moogle / Tonberry / Chocobo caps) stay out: they belong
+#: to their own quests and events.
+ROTATING_MASKS = (
+    (0x63300004, "Gutlet Facemask"),
+    (0x63300009, "Capsule Searcher"),
+    (0x63300010, "Flat Helm"),
+    (0x63300006, "Devilhead"),
+    (0x63300011, "Combat Brain"),
+    (0x63300007, "Demonhead"),
+    (0x63300012, "Assault Brain"),
+    (0x63300008, "Diablohead"),
+    (0x63300013, "Tactics Brain"),
+)
+ROTATION_SIZE = 3
+MASK_PRICE, MASK_SELL = 300, 250
+#: Monday 2026-10-05 00:00 +09:00 -- the weekly rollover doc_stats uses
+ROTATION_EPOCH = 1791126000
+ROTATION_WEEK_S = 7 * 24 * 3600
+
+
+def rotating_masks(now=None):
+    """[(id, price, name)] of the masks on sale this week."""
+    import time as _t
+    week = int(((_t.time() if now is None else now) - ROTATION_EPOCH)
+               // ROTATION_WEEK_S)
+    start = (week * ROTATION_SIZE) % len(ROTATING_MASKS)
+    picks = [ROTATING_MASKS[(start + i) % len(ROTATING_MASKS)]
+             for i in range(ROTATION_SIZE)]
+    return [(iid, MASK_PRICE, name) for iid, name in picks]
+
+
+#: (2026-10-05: the retail kit, kept after weighing a minimal one;
+#: Flash Materia, a Feb 16 shop addition, is not part of it)
 STARTER_KIT = tuple((iid, 1) for iid, _p, _n in DEFAULT_STOCK
-                    if iid >> 16 != 0x6331)
+                    if iid >> 16 != 0x6331 and iid != FLASH_MATERIA)
 #: the kit every wallet got until 2026-09-26 (handgun + rifle frame + two
 #: Middle Barrels, the "kit" mark)
 OLD_STARTER_KIT = ((0x6F300000, 1), (0x6F30000B, 1), (0x6F310000, 2))
@@ -218,8 +269,7 @@ DEFAULT_RECIPES = tuple(
              ["Long Barrel II", "Long Barrel III"])
     + _chain([SHORT_BARREL, 0x6F310007, 0x6F310008], 50,
              ["Short Barrel II", "Short Barrel III"])
-    + _tunes(SNIPE_SCOPE, 50, [(0x6F320005, "Snipe Scope +"),
-                               (0x6F320006, "Snipe Scope -")])
+    # Snipe Scope +/- (0x6F320005/6) are placeholders here: RETIRED_PARTS
     + _tunes(POWER_BOOSTER, 50, [(0x6F330001, "Revo Power Booster")])
     + _tunes(RAPID_FIRE, 50, [(0x6F330004, "Revo Rapid Fire")])
 )
@@ -492,6 +542,8 @@ class Shop:
         self.prices = {iid: price for iid, price, _ in self.stock}
         self.names = dict(EXTRA_NAMES)
         self.names.update({iid: name for iid, _, name in self.stock})
+        self.names.update({iid: name for iid, name in ROTATING_MASKS})
+        self.now = None          # tests pin the clock for the mask rotation
         # 2026-09-26: an item's VALUE = everything paid for it: its buy price
         # plus each tune fee on the way (the guides' sell rule is 80 % of
         # that). (source, result) -> (kit, fee); a tune whose source has no
@@ -607,9 +659,12 @@ class Shop:
         w = self.wallet(key)
         bag = w["bag"]
         k = "0x%08x" % iid
-        if iid not in self.prices:
-            return (0, 0), 0, "REFUSED buy 0x%08x: not stocked" % iid
-        cost = self.prices[iid] * qty
+        price = self.prices.get(iid)
+        if price is None:
+            price = {i: p for i, p, _n in rotating_masks(self.now)}.get(iid)
+        if price is None:
+            return (0, 0), 0, "REFUSED buy 0x%08x: not stocked (this week)" % iid
+        cost = price * qty
         if w["gil"] < cost:
             return (0, 0), 0, ("REFUSED buy %s x%d: %d gil < %d (SE 43016 not wired)"
                                % (self.name(iid), qty, w["gil"], cost))
@@ -658,6 +713,19 @@ class Shop:
                     return False, ("REFUSED trade: %s offers %s x%d, server bag has %d"
                                    % (who, self.name(iid), q, have))
 
+        # 2026-10-01, manual p.34: at most BAG_MAX item TYPES. A trade that
+        # would push either bag past it is refused whole (the world door
+        # used to truncate the bag silently, so the items were lost).
+        for w, recv, give, who in ((wa, offer_b[1], offer_a[1], key_a),
+                                   (wb, offer_a[1], offer_b[1], key_b)):
+            kinds = {k for k, v in w["bag"].items() if v > 0}
+            gone = {"0x%08x" % i for i, q in give
+                    if w["bag"].get("0x%08x" % i, 0) <= q}
+            after = (kinds - gone) | {"0x%08x" % i for i, _ in recv}
+            if len(after) > BAG_MAX:
+                return False, ("REFUSED trade: %s's bag would hold %d item types "
+                               "(limit %d)" % (who, len(after), BAG_MAX))
+
         def move(src, dst, gil, items):
             src["gil"] -= gil
             dst["gil"] = min(dst["gil"] + gil, GIL_MAX)
@@ -678,6 +746,8 @@ class Shop:
         0 = not sellable (not listed on 144)."""
         if iid in SELL_OVERRIDES:
             return SELL_OVERRIDES[iid]
+        if iid in {i for i, _n in ROTATING_MASKS}:
+            return MASK_SELL
         base = self.base.get(iid, iid)
         if base in LAUNCH_SELL and iid in self.values:
             return LAUNCH_SELL[base]
@@ -724,8 +794,9 @@ class Shop:
         """(answer body, note) for one shop request, or (None, why)."""
         raw = req_body[12:28].hex(" ") if req_body else ""
         if req_sel == STOCK_REQ:
-            return stock_body(self.stock, subchannel), "%d stocked" % len(
-                self.stock[:STOCK_MAX])
+            st = list(self.stock) + rotating_masks(self.now)
+            return stock_body(st, subchannel), "%d stocked (masks this week: %s)" % (
+                len(st[:STOCK_MAX]), ", ".join(n for _i, _p, n in rotating_masks(self.now)))
         if req_sel == PRICE_REQ:
             rows = self.sell_rows(key)
             return price_body(rows, subchannel), "Sell tab: %d bag item(s) at sell value" % len(rows)
@@ -765,15 +836,22 @@ if __name__ == "__main__":
         pass
     ids = [i for i, _, _ in DEFAULT_STOCK]
     assert len(ids) == len(set(ids)) <= STOCK_MAX == 89, len(ids)
-    # 2026-09-24: Flash Materia came with a later update, after our client
-    assert FLASH_MATERIA not in ids, "Flash Materia is not a launch item"
+    # 2026-10-05: Flash Materia is sold (Feb 16 2006 update, 100 gil) but is
+    # not in the LAUNCH starter kit
+    assert FLASH_MATERIA in ids and LAUNCH_SELL[FLASH_MATERIA] == 80
+    assert FLASH_MATERIA not in {i for i, _q in STARTER_KIT}
     # 2026-09-26: the guides' shop sells no ammunition and no consumables
     assert not [i for i in ids if i >> 16 in (0x6230, 0x6932, 0x6430)], ids
     pairs = [(s, r) for s, r, _, _, _ in DEFAULT_RECIPES]
     assert len(pairs) == len(set(pairs)), "recipe (source, result) must be unique"
     shop = Shop(docdb.store("shop"), start_gil=10000)
     # every sourced tune is offered, none needs a kit
-    assert len(shop.recipes) == len(DEFAULT_RECIPES) == 25, len(shop.recipes)
+    assert len(shop.recipes) == len(DEFAULT_RECIPES) == 23, len(shop.recipes)
+    # 2026-10-06: the build's placeholder parts are neither sold nor made,
+    # but a part a player already holds still sells
+    assert not set(RETIRED_PARTS) & {i for i, _p, _n in DEFAULT_STOCK}
+    assert not set(RETIRED_PARTS) & {r for _s, r, _k, _f, _n in DEFAULT_RECIPES}
+    assert all(shop.sell_value(i) == 80 for i in RETIRED_PARTS)
     assert all(k == 0 for k, _ in shop.recipes.values())
     # the LAUNCH sell prices (January 2006 player blog, shop list: buy/sell
     # 200/100, 150/120, 100/80, 300/250); a tuned item sells as its base part
@@ -789,8 +867,24 @@ if __name__ == "__main__":
     assert int(shop.prices[ONE_EIGHTY] * SELL_RATE) == 160 != shop.sell_value(ONE_EIGHTY)
     assert int(shop.prices[0x6331003C] * SELL_RATE) == 240 != shop.sell_value(0x6331003C)
     assert shop.sell_value(0x69320000) == 0, "an unstocked item still does not sell"
+    # 2026-10-05: the ROTATING MASK shelf (ours): 3 a week, all 9 in 3 weeks,
+    # only this week's buyable, every one sells back at the suit price
+    _wk = [rotating_masks(ROTATION_EPOCH + ROTATION_WEEK_S * w + 60) for w in range(3)]
+    assert all(len(r) == ROTATION_SIZE for r in _wk)
+    assert sorted(i for r in _wk for i, _p, _n in r) == sorted(i for i, _n in ROTATING_MASKS)
+    assert rotating_masks(ROTATION_EPOCH + 60) != rotating_masks(ROTATION_EPOCH - 60)
+    ms = Shop(None)
+    ms.now = ROTATION_EPOCH + 60
+    mk = "member:9/0x00000099"
+    ms.wallet(mk)["gil"] = 5000
+    on, off = _wk[0][0][0], _wk[1][0][0]
+    assert ms.buy(mk, on, 1)[1] == MASK_PRICE, ms.buy(mk, on, 1)
+    assert ms.buy(mk, off, 1)[1] == 0, "TWIN: next week's mask is not on sale"
+    assert ms.sell_value(on) == ms.sell_value(off) == MASK_SELL
+    _sb = ms.body_for(STOCK_REQ, None, mk)
+    assert struct.unpack_from("<I", _sb[0], LIST_COUNT_OFF)[0] == len(DEFAULT_STOCK) + ROTATION_SIZE, _sb[1]
     # the LAUNCH STARTER KIT: every stocked part but the suits, ONCE per character
-    assert len(STARTER_KIT) == 22 and not [i for i, _q in STARTER_KIT if i >> 16 == 0x6331]
+    assert len(STARTER_KIT) == 20 and not [i for i, _q in STARTER_KIT if i >> 16 == 0x6331]
     assert {NELSON, SHORT_BARREL, 0x6F340019} <= {i for i, _q in STARTER_KIT}
     kk = "member:9/0x00000001"
     assert shop.login_fields(kk) == (10000, sorted(STARTER_KIT)), shop.login_fields(kk)
@@ -805,7 +899,7 @@ if __name__ == "__main__":
     bd = dict(b)
     assert g == 1234 and bd[0x6F300000] == 1 and bd[0x6F310000] == 2, (g, b)
     assert bd[NELSON] == 2 and bd[SHORT_BARREL] == 1 and TOMINTOUL not in bd, b
-    assert len(b) == 21, b                 # 22 kit ids minus the rifle frame (sold)
+    assert len(b) == 19, b                 # 20 kit ids minus the rifle frame (sold)
     assert shop.login_fields("pre") == (g, b), "TWIN: the top-up runs once"
     # a FULL bag: new stacks that do not fit are skipped, never over BAG_MAX
     full = {"0x%08x" % (0x69000000 + i): 1 for i in range(BAG_MAX)}
@@ -869,7 +963,7 @@ if __name__ == "__main__":
     # the Modify tab: 142 rows {source, result, kit 0, fee}
     b = shop.body_for(RECIPE_REQ, None, k)[0]
     n = struct.unpack_from("<I", b, LIST_COUNT_OFF)[0]
-    assert n == len(shop.recipes) == 25 and len(b) == LIST_ROWS_OFF + RECIPE_ROW * n
+    assert n == len(shop.recipes) == 23 and len(b) == LIST_ROWS_OFF + RECIPE_ROW * n
     assert struct.unpack_from("<IIII", b, LIST_ROWS_OFF) == (ONE_EIGHTY, 0x6F300003, 0, 100)
     # the Sell tab: 144 = this bag at SELL value (Middle Barrel III -> 120,
     # its base part's launch price)
@@ -908,6 +1002,14 @@ if __name__ == "__main__":
     shop.data["old"]["bag"]["0x6f320000"] = 1          # (cannot come back, but)
     assert shop.login_fields("old")[1] == [(0x6F320000, 1), (0x6F320002, 2)],         "TWIN: the conversion runs once -- a marked wallet is left alone"
     assert START_GIL == 3000 and Shop(docdb.store("shop")).wallet("fresh")["gil"] == 3000
+    # 2026-10-01: a trade never pushes a bag past BAG_MAX item types
+    tr = Shop(docdb.store("shop"))
+    tr.wallet("ta")["bag"] = {"0x%08x" % (0x69320000 + i): 1 for i in range(BAG_MAX)}
+    tr.wallet("tb")["bag"] = {"0x6f320000": 1, "0x6f320002": 1}
+    ok, note = tr.trade("ta", (0, []), "tb", (0, [(0x6F320000, 1)]))
+    assert not ok and "item types" in note, note
+    ok, note = tr.trade("ta", (0, [(0x69320000, 1)]), "tb", (0, [(0x6F320000, 1)]))
+    assert ok, note                     # one type out, one in: still 50
     docdb.store("shop").clear()
     print("doc_shop self-test PASS")
     sys.exit(0)

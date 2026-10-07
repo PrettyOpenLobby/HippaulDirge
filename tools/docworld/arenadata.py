@@ -56,6 +56,84 @@ def load_mission_spawns(path=None):
 MISSION_SPAWNS = load_mission_spawns()
 
 
+def mission_spawn_order(points, player, near=150.0):
+    """2026-10-03: spawn points ordered for a mission that places fewer
+    enemies than it has points -- nearest the player's start first, but none
+    closer than `near` (those go last, farthest of them first), so a lone
+    enemy is found and does not appear on top of the player. Live quest 1:
+    roster node 0 was ~785 units away and the Beast Soldier idled there."""
+    def d2(p):
+        return sum((float(p[i]) - float(player[i])) ** 2 for i in (0, 2))
+    far = sorted((p for p in points if d2(p) >= near * near), key=d2)
+    close = sorted((p for p in points if d2(p) < near * near), key=d2,
+                   reverse=True)
+    return far + close
+
+
+def mission_enemy_plan(pool, groups, player, k, pick, prefer=lambda t: False,
+                       near=150.0):
+    """2026-10-05: [(position, kind-15 type)] for a mission's first `k`
+    enemies, from the arena's own SPAWN GROUPS (doc_mission_spawns
+    "pool_groups", aligned with "pool"; the original server's type picker,
+    static RE scratchpad re-headshot/). `pick(group)` -> a type the situation
+    can draw, or None (the node is skipped). Node order: FIXED groups (flag 1,
+    the stationed enemies) before random ones, and within each the picks
+    `prefer` names first (the mission's target: Sniper Threat's nearest fixed
+    nodes are soldiers, so without it no sniper took the field), then
+    mission_spawn_order (nearest the player's start past `near`). [] when the
+    pool carries no groups."""
+    if not pool or not groups or len(groups) != len(pool):
+        return []
+    rank = {}
+    for i, p in enumerate(mission_spawn_order(list(pool), player, near)):
+        rank.setdefault(tuple(p), i)
+    plan = []
+    for p, g in zip(pool, groups):
+        if not g:
+            continue
+        t = pick(g)
+        if t is None:
+            continue
+        tier = (0 if g[0] == 1 else 2) + (0 if prefer(t) else 1)
+        plan.append((tier, rank.get(tuple(p), 0), tuple(p), t))
+    plan.sort(key=lambda e: (e[0], e[1]))
+    return [(p, t) for _tier, _r, p, t in plan[:k]]
+
+
+def mission_player_spawn(zone, ctrl, generic, radius=300.0, seat=0):
+    """2026-10-04: the player START for a mission at (zone, ctrl).
+
+    2026-10-05 (static RE, all retail arenas): a situation's TYPE-2 pool nodes
+    (doc_mission_spawns 'player') ARE its designed player start points -- in
+    PvP their byte +74 names the team, and every team list sits at its own
+    base. A mission controller's are where its mission begins: the Beginner's
+    Courses' one start node each stands inside the fenced range among their
+    soldiers, while the generic zone spawn left the player outside the gates
+    (live 10-05). So seat `seat` starts at the controller's own start node
+    (one per seat, cycled); `generic` only when the controller has none.
+    `radius` is kept for the old call shape (the 10-04 rule scored nodes by
+    enemies within it, which kept the generic spawn whenever it "won")."""
+    rec = MISSION_SPAWNS.get(str(zone), {}).get(str(ctrl))
+    players = (rec or {}).get("player") or []
+    if not players:
+        return tuple(generic)
+    # 2026-10-05 (live, Iron Curtain): a situation's start nodes alternate
+    # between groups (node byte +72: 205:3001 = two flanks, the second higher
+    # up); seat 1 went to the OTHER group alone and spawned outside the map.
+    # Seats fill the nodes NEAREST the first one, so a party starts together.
+    first = players[0]
+    order = sorted(players, key=lambda p: sum((float(p[i]) - float(first[i])) ** 2
+                                              for i in range(3)))
+    best = order[seat % len(order)]
+    return (float(best[0]), float(best[1]), float(best[2]))
+
+
+def mission_player_starts(zone, ctrl):
+    """How many start nodes (zone, ctrl) has (0 = the generic spawn)."""
+    rec = MISSION_SPAWNS.get(str(zone), {}).get(str(ctrl))
+    return len((rec or {}).get("player") or [])
+
+
 def npc_controller_payload(ctrl_id, n=None):
     """2026-09-23: notify kind 28's payload naming NPC controller `ctrl_id`.
     The record rides body[20] (payload = 4 pad bytes + record); rec+3 = 3,
@@ -108,7 +186,14 @@ BASE_GIMMICKS = {201: (26, 23), 204: None}
 # as Jungle proved live. Arenas whose 1100 controller lists NO base get None
 # (Kalm used to bind gimmicks 0 / 1, which are not bases there).
 BASE_GIMMICKS.update({z: None for z in (203, 205, 207, 208, 209, 210, 211,
-                                        217, 231, 233)})
+                                        212, 217, 231, 233)})
+# 2026-10-05 (static RE + all 484 retail PvP situations, scratchpad
+# re-teams/): the Lab's even 11xx situations list base rows 14 (team 0) and
+# 12 (team 1), the odd ones 15 / 13; rows 1 / 0 there are plain lab objects.
+# Train Graveyard has no 11xx situation, so no base. These hand rows are only
+# the fallback for a server without doc_arena_starts.json, which keys the
+# bases by SITUATION (Jungle 1104-1107 etc. use other rows than 1100).
+BASE_GIMMICKS[206] = (14, 12)
 BASE_GIMMICKS_DEFAULT = (1, 0)
 
 # 2026-09-24: TEAM START POINTS. The client never picks a spawn by team (kind 2
@@ -161,10 +246,107 @@ BASE_POSITIONS, TEAM_STARTS = load_arena_table()
 TEAM_START_STEP = 150.0
 
 
-def team_start(zone, team):
-    """Team `team`'s start point in arena `zone`, or None (no team data)."""
+def load_arena_starts(path=None):
+    """2026-10-05: {zone: {situation: {"starts": {team: [(x, y, z), ...]},
+    "bases": [(row, owner, (x, y, z)), ...]}}} from doc_arena_starts.json
+    (tools/doc_extract_arena.py writes it from your game data). {} when
+    absent, or when the file is the older type-8 {zone: {link: pos}} form."""
+    import json
+    path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "doc_arena_starts.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for z, sits in raw.items():
+        for sid, e in sits.items():
+            if not isinstance(e, dict):
+                return {}        # the old type-8 form: MP points, not starts
+            out.setdefault(int(z), {})[int(sid)] = {
+                "starts": {int(t): [tuple(float(c) for c in p) for p in ps]
+                           for t, ps in e.get("starts", {}).items()},
+                "bases": [(int(r), int(o), tuple(float(c) for c in p))
+                          for r, o, p in e.get("bases", ())]}
+    return out
+
+
+ARENA_STARTS = load_arena_starts()
+#: the situation a PvP record without one loads (--bt-situation's default),
+#: and the 9xxx ones that arenas without a 1xxx controller fall back to
+TEAM_SITUATION, BT_SITUATION = 1100, 1000
+TEAM_SITUATION_9, BT_SITUATION_9 = 9100, 9000
+
+
+#: 2026-10-06: arenas whose 1000 / 1100 are stubs (2 item generators) beside
+#: a complete 9xxx (static, scratchpad re-jail/)
+STUB_1XXX_ZONES = frozenset((235,))
+
+
+def situation_for(zone, individual):
+    """2026-10-06 (live: Kalm / Train Graveyard "jail"): the PvP situation a
+    table on arena `zone` must carry. A situation the zone's table 28 lacks
+    makes the client build EVERY gimmick row, all the g048 electric fences
+    included (builder 0x0066e440: no controller -> all of table 14; proven on
+    the Church savestate). The 20060124_3 patch left nine arenas only
+    9000 / 9001 / 9100..9103, which mdlResLoad maps to the same Res_bt1 /
+    Res_tbt1 as 1000 / 1100. So: 1000 / 1100 where the zone has a real one,
+    else 9000 / 9100; None without data for the zone (keep the default)."""
+    sits = ARENA_STARTS.get(zone)
+    if not sits:
+        return None
+    base, nine = (BT_SITUATION, BT_SITUATION_9) if individual else (TEAM_SITUATION,
+                                                                     TEAM_SITUATION_9)
+    if base in sits and zone not in STUB_1XXX_ZONES:
+        return base
+    if nine in sits:
+        return nine
+    return None
+
+
+def _situation_starts(zone, situation, team):
+    """The start list of `team` in (zone, situation), falling back to the
+    zone's default team situation when that one has none."""
+    sits = ARENA_STARTS.get(zone) or {}
+    for sid in ((situation,) if situation else ()) + (TEAM_SITUATION, TEAM_SITUATION_9):
+        pts = (sits.get(sid) or {}).get("starts", {})
+        if pts.get(0) and pts.get(1):
+            return pts.get(team) or []
+    return []
+
+
+def bt_start(zone, situation=None, seat=0):
+    """2026-10-05: seat `seat`'s start in an INDIVIDUAL battle: the
+    situation's (or the zone's 1000 / 9000) team-0-only start list, one node
+    per seat in order (ours: retail picked starts server-side). None when the
+    arena has none."""
+    sits = ARENA_STARTS.get(zone) or {}
+    for sid in ((situation,) if situation else ()) + (BT_SITUATION, BT_SITUATION_9):
+        pts = (sits.get(sid) or {}).get("starts", {})
+        if pts.get(0) and not pts.get(1):
+            return pts[0][seat % len(pts[0])]
+    return None
+
+
+def team_start_count(zone, team, situation=None):
+    """How many distinct start points `team` has in (zone, situation)."""
+    return len(_situation_starts(zone, situation, team))
+
+
+def team_start(zone, team, situation=None, seat=0):
+    """Team `team`'s start point in arena `zone`, or None (no team data).
+    2026-10-05: the situation's own TYPE-2 start nodes of that team (byte
+    +74), one per seat; every one of the 840 retail (situation, team) lists
+    sits around that team's own base. The type-8 nodes used before are MP
+    points: on Shinra Building (z213) point 0 sits beside team 1's base, so
+    team 0 started at the enemy base (live 10-05). The hand table and the
+    150-toward-the-enemy point are the fallbacks without the extract."""
     if team not in (0, 1):
         return None
+    pts = _situation_starts(zone, situation, team)
+    if pts:
+        return pts[seat % len(pts)]
     if zone in TEAM_STARTS:
         return TEAM_STARTS[zone][team]
     bp = BASE_POSITIONS.get(zone)
@@ -178,8 +360,27 @@ def team_start(zone, team):
 BASE_TYPE_TEAM = 1
 
 
-def base_gimmicks(zone):
-    """The (team 0, team 1) base gimmick instances for arena `zone`, or None."""
+def _situation_bases(zone, situation):
+    """{owner team: (row, pos)} of (zone, situation)'s two bases from the
+    extract; None when the extract has no data for the zone (use the hand
+    table), {} when the situation is missing or has no base pair."""
+    sits = ARENA_STARTS.get(zone)
+    if not sits:
+        return None
+    e = sits.get(situation or TEAM_SITUATION)
+    if e is None:
+        return {}
+    own = {o: (r, p) for r, o, p in e["bases"]}
+    return own if 0 in own and 1 in own else {}
+
+
+def base_gimmicks(zone, situation=None):
+    """The (team 0, team 1) base gimmick instances for arena `zone`, or None.
+    2026-10-05: by SITUATION (each one lists its own two rows) when the
+    extract is there; the owner byte names the team."""
+    own = _situation_bases(zone, situation)
+    if own is not None:
+        return (own[0][0], own[1][0]) if own else None
     return BASE_GIMMICKS.get(zone, BASE_GIMMICKS_DEFAULT)
 
 
@@ -201,16 +402,30 @@ def base_objects_payload(gimmicks, teams=(0, 1)):
 BASE_REPORT_COUNT_OFF, BASE_REPORT_OFF, BASE_REPORT_LEN = 61, 64, 12
 
 
+#: 2026-10-05 (MEASURED, Iron Curtain table 17): a MISSION report lists the
+#: controller's enemies FIRST -- count at body+63, 12-byte {u32 id, u16 HP,
+#: s16 x, y, z} entries from body+64 (gamemsg.mission_npc_report) -- and the
+#: bases AFTER them. Read at +64, the first enemy (id 0x40000100) became
+#: "base 1596, HP 0x40000100" and the base's fall was never seen.
+BASE_REPORT_NPC_COUNT_OFF = 63
+
+
 def base_report(body):
     """[(index, hp, attacker mask)] from a request-24 body, or []."""
     if body is None or len(body) < BASE_REPORT_OFF:
         return []
     n = body[BASE_REPORT_COUNT_OFF]
-    if not 0 < n <= 4 or len(body) < BASE_REPORT_OFF + BASE_REPORT_LEN * n:
+    npcs = body[BASE_REPORT_NPC_COUNT_OFF]
+    start = BASE_REPORT_OFF
+    if npcs and len(body) >= BASE_REPORT_OFF + BASE_REPORT_LEN * npcs and all(
+            struct.unpack_from("<I", body, BASE_REPORT_OFF + BASE_REPORT_LEN * k)[0]
+            & 0x40000000 for k in range(npcs)):
+        start = BASE_REPORT_OFF + BASE_REPORT_LEN * npcs
+    if not 0 < n <= 4 or len(body) < start + BASE_REPORT_LEN * n:
         return []
     out = []
     for i in range(n):
-        o = BASE_REPORT_OFF + BASE_REPORT_LEN * i
+        o = start + BASE_REPORT_LEN * i
         hp, idx, _z, mask = struct.unpack_from("<IHHI", body, o)
         out.append((idx, hp, mask))
     return out
@@ -234,12 +449,19 @@ def base_hp_payload(index, controller, hp):
 # server alone and ends the room with the kind-4 verdict.
 BASE_OCCUPY_RADIUS = 100.0      # OURS: horizontal (x/z) distance to the spot
 BASE_OCCUPY_S = 10.0            # OURS: seconds of unbroken presence
-BASE_POSE_FRESH_S = 2.0         # a 0x83 pose older than this is not "there"
+# 2026-10-05 (live, Iron Curtain): 2 s broke a hold every ~8 s for a player
+# who never left -- a console whose 0x83 we cannot read is placed by its 1 Hz
+# report, and one late report made it "nobody on the spot"
+BASE_POSE_FRESH_S = 4.0         # a pose older than this is not "there"
 
 
-def base_spots(zone):
+def base_spots(zone, situation=None):
     """(team 0 base, team 1 base) world positions for arena `zone`, or None.
-    BASE_POSITIONS lists (g069, g070) and team 0 owns g070 (see team_start)."""
+    BASE_POSITIONS lists (g069, g070) and team 0 owns g070 (see team_start).
+    2026-10-05: by situation from the extract when it is there."""
+    own = _situation_bases(zone, situation)
+    if own is not None:
+        return (own[0][1], own[1][1]) if own else None
     bp = BASE_POSITIONS.get(zone)
     return None if bp is None else (bp[1], bp[0])
 
@@ -263,7 +485,8 @@ def base_occupy_tick(room, poses, now, radius=BASE_OCCUPY_RADIUS,
             continue
         inside = []
         for m in room.members:
-            if m not in alive or room.team_of(m) != team:
+            # team -1 (2026-10-05): a base MISSION -- any living member holds
+            if m not in alive or (team != -1 and room.team_of(m) != team):
                 continue
             p = poses.get(m)
             if p is None or now - p[3] > fresh_s:
@@ -286,11 +509,17 @@ def base_occupy_tick(room, poses, now, radius=BASE_OCCUPY_RADIUS,
         elif cur[0] not in [m for _d, m in inside]:
             cur = room.occupy[idx] = (min(inside)[1], cur[1])
         if now - cur[1] >= hold_s:
-            room.capsule_winner = min(max(team, 0), gamemsg.GS_TEAM_SLOTS - 1)
             room.occupier = cur[0]
             room.over = True
-            room.why = ("team %d's base destroyed and occupied by 0x%x"
-                        % (idx, cur[0]))
+            if team == -1:
+                # a base MISSION: the objective, won by every member
+                # ("mission objective" = doc_missions.WHY_OBJECTIVE)
+                room.why = ("mission objective: the enemy base destroyed and "
+                            "occupied by 0x%x" % cur[0])
+            else:
+                room.capsule_winner = min(max(team, 0), gamemsg.GS_TEAM_SLOTS - 1)
+                room.why = ("team %d's base destroyed and occupied by 0x%x"
+                            % (idx, cur[0]))
             notes.append("team %d HELD base %d for %.0f s -- WINS (occupier "
                          "0x%x)" % (team, idx, now - cur[1], cur[0]))
             break

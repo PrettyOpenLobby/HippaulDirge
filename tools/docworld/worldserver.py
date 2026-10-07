@@ -2,6 +2,7 @@
 import datetime
 import math
 import os
+import random
 import select
 import socket
 import struct
@@ -12,6 +13,7 @@ import doc_playtime
 import doc_npc
 import doc_novice
 import doc_missions
+import doc_drops
 import doc_field
 import doc_npc_spawn
 import doc_npcquests
@@ -24,7 +26,7 @@ import doc_unit
 import doc_gear
 import doc_magic
 import doc_items
-from .deps import _KELCRYPT
+from .deps import _KELCRYPT, doc_kelcrypt
 from . import advertise, arenadata, arenamaps, battleroom, briefingroom, charrecords, cli, fielditems, framing, gamemsg, handshake, lobbycmd, p2pbattle, peerrecords, questlist, tablerecords, tableverbs, teamdist, userlist, worldchannel, worlddoor, worldpose
 
 
@@ -140,6 +142,10 @@ def main():
     _resolver = (doc_charastore.AccountResolver(docdb.store("ip_members"), _store)
                  if (_store is not None and _members) else None)
     if _store is not None:
+        print("[docudp] CHARA IDS: %d character(s) own a POL Content ID; new "
+              "characters get one: %s (--chara-id-source %s)"
+              % (_store.content_ids_held(), "yes" if a.chara_id_source == "content"
+                 else "no", a.chara_id_source), flush=True)
         print("[docudp] chara store (doc_character) keyed by %s" % (
             ("the POL MEMBER signed in at each client's address (the core's "
              "session table, read-only; sec 4ft)") if _resolver is not None
@@ -223,11 +229,48 @@ def main():
     # 2026-09-23: mission NPC replacement. sess -> {"types": {id: type},
     # "spawn": [[x,y,z]..], "next": next index, "due": [(time, type), ..]}
     _mnpc = {}
+    # 2026-10-05: ONE enemy set per MISSION ROOM (room key -> the same dict
+    # every member's _mnpc entry points at), plus "ctrl" = the one console
+    # that controls them, "csess" = its session, "rb" = the Add Npc batches,
+    # "n" = how many, "dead" = ids gone. Before this each member got its own
+    # copy of the same ids and was told it controlled them (live 10-05: three
+    # consoles, HP 100 -> 60 -> 100 from two controllers of one Dual Horn).
+    _room_mnpc = {}
     # 2026-09-23 (sec 4hc): the intro push, keyed by session key (so the
     # adoption re-key below must list it). value = when to send; the send
     # records the key in _intro_sent so one session gets one push.
     _intro_due = {}
     _intro_sent = set()
+    # 2026-10-01 (--bt-fill-start): table key -> when a table that has just
+    # filled goes to the briefing room (begin_briefing), set by the JOIN.
+    _fill_start = {}
+    # 2026-10-03 (--rematch-after): table key -> when its next round's
+    # briefing starts; (--join-queue): table key -> {charid: queued at}
+    _rematch = {}
+    # 2026-10-05: a rematch's BATTLE READY waits for each player to be BACK IN
+    # THE LOBBY (live table 8: a 38 sent at a fixed 39 + 15 s landed while one
+    # console was still on its result screens -> black screen, keepalives
+    # still flowing). In the lobby the console streams poses but sends no
+    # game-server request (keepalive 1 runs from 38 until the lobby).
+    _last_gs_req = {}      # charid -> time of its last game-server request
+    _last_pose_rx = {}     # charid -> time of its last 0x83 pose
+    _rematch_since = {}    # table -> when its battle-over reset went out
+    _rematch_logged = {}   # table -> the last whole second its wait was logged
+    REMATCH_QUIET_S = 8.0   # OURS: > the 7 s keepalive period
+    REMATCH_LOBBY_CAP_S = 60.0  # OURS: then a player not back gives up the seat
+    # 2026-10-05 (live 17:53Z): of the 4-message GO burst the console acked
+    # only one and never left the loading screen -- waitlogin needs ALL of
+    # 28/29/3/30 (facade 0x20) since GO stopped sending kind 5, and nothing
+    # resent them. A console that sends no request 24 (the arena's 1 Hz
+    # report) within GO_RESEND_S of its GO gets the burst again.
+    _last_gs24 = {}        # charid -> time of its last request 24
+    _go_resend = {}        # session -> [due, burst spec, tries left, GO time]
+    GO_RESEND_S = 3.0
+    GO_RESEND_TRIES = 2
+    _join_queue = {}
+    # 2026-10-01: character id -> the battle STATUS word its client last
+    # reported (request 46); notify kind 43 echoes it to the room.
+    _status = {}
     _npc_arena_types = doc_npc_spawn.parse_types(a.npc_arena_types)
     if a.npc_arena == "on":
         print("[docudp] NPC ARENA TEST ON: %d NPC(s) (types %s) in a %.0f-unit "
@@ -272,7 +315,7 @@ def main():
             if not (key.startswith("member:") and key[7:].isdigit()):
                 continue
             for c in chars or ():
-                cid = charrecords.chara_id_for(a.chara_id_base, 0, key, c.get("slot", 0))
+                cid = charrecords.chara_id_of(a.chara_id_base, 0, key, c.get("slot", 0), c)
                 if cid:
                     out.append(("%s/0x%08x" % (key, cid & 0x3FFFFFFF),
                                 c.get("name", ""), cid))
@@ -384,7 +427,7 @@ def main():
                 continue
             # sec 4dv + 09-13: per MEMBER, not per entrance uid -- two members
             # share one uid (see chara_id_for)
-            cid = charrecords.chara_id_for(a.chara_id_base, uid, _skey(uid), i)
+            cid = charrecords.chara_id_of(a.chara_id_base, uid, _skey(uid), i, slots[i])
             recs.append(charrecords.build_used_record(i, slots[i]["name"], slots[i],
                                           char_id=cid,
                                           chr_code=a.chara_chrcode))
@@ -403,6 +446,33 @@ def main():
                                                      ", ".join(names)), flush=True)
 
     _chara_ids = {}       # slot -> the id we served, for logging
+    def _world_door_charid(data, sess):
+        """2026-10-05: the SELECTED character for a world-door (selector 2)
+        request: request body[80], or -- when the console sent 0 there (live
+        10-05, Itachi reconnecting after a doc restart) -- the character the
+        session already knows, or the account's ONLY character. 0 = unknown.
+        A 0 keyed every per-character store (career, gil, bag, gear, unit,
+        novice) as the bare account: the world door then served rank 1 / 0 RP
+        / no medals, and the client took that as its own career."""
+        cid = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0] & 0x3FFFFFFF
+               if len(data) >= framing.BODY_OFF + 84 else 0)
+        if cid:
+            return cid
+        if sess.seen_charid[0]:
+            return sess.seen_charid[0] & 0x3FFFFFFF
+        if _store is not None and sess.seen_uid[0]:
+            slots = _store.roster(_skey(sess.seen_uid[0], sess))
+            used = [i for i in range(doc_charastore.MAX_SLOTS) if slots[i]]
+            if len(used) == 1 and sess.chara_ids.get(used[0]):
+                cid = sess.chara_ids[used[0]] & 0x3FFFFFFF
+                print("  [charid] world door sent no character (body[80] = 0) -> "
+                      "the account's only character 0x%08x" % cid, flush=True)
+                return cid
+        print("  [charid] world door sent no character (body[80] = 0) and none "
+              "can be inferred -- per-character stores key on the bare account",
+              flush=True)
+        return 0
+
 
     def _player_name():
         # sec 4dr (2026-09-11): the name for the in-world PLAYER record -- the
@@ -569,6 +639,56 @@ def main():
     # key per client. A NAT mapping can still MOVE mid-session, so the charid
     # adoption below re-joins a client that reappears on a new port.
     sessions = {}            # (src IP, src port) -> Session
+    # 2026-10-05: LEADER KEYS. A table leader's mode-4 game-server datagrams
+    # are keyed [0, P, 0, 0] / IV [0, P - 0x5B0, 0, 0], P the address of one
+    # heap object that MOVES per session (doc_kelcrypt.LEADER_KEYED): live
+    # 10-05 a tester's console sent 1,594 unreadable headers (P 0x003B5B10) and the
+    # IV-only learner could never find it. A background search of the window
+    # learns a new P from one datagram; the pairs persist across restarts.
+    _lk_path = (os.environ.get("POL_DOC_LEADER_KEYS_FILE")
+                or ("/logs/doc-leader-keys.json" if os.path.isdir("/logs") else ""))
+    if _lk_path and _KELCRYPT:
+        doc_kelcrypt.load_leader_keys(_lk_path)
+        print("[kelcrypt] %d leader key pair(s) known (%s)"
+              % (len(doc_kelcrypt.LEADER_KEYED), _lk_path), flush=True)
+    _lk_job = {"thread": None, "next": 0.0, "tried": {}, "buf": {}}
+
+    def leader_key_search(pkt, hint, src):
+        """Run doc_kelcrypt.find_leader_key off the main loop (one at a time,
+        a minute between tries for one hint)."""
+        import threading
+        # the console's recent unreadable datagrams: the IV is solved from
+        # several (doc_kelcrypt.solve_iv_mitm), the key from this one's id
+        buf = _lk_job["buf"].setdefault(src, [])
+        buf.append(bytes(pkt))
+        del buf[:-16]
+        if len(_lk_job["buf"]) > 64:
+            _lk_job["buf"].pop(next(iter(_lk_job["buf"])))
+        t = _lk_job["thread"]
+        if t is not None and t.is_alive():
+            return
+        now_ = time.time()
+        if now_ < _lk_job["next"] or now_ - _lk_job["tried"].get(hint, 0.0) < 10.0:
+            return
+        _lk_job["tried"][hint] = now_
+        _lk_job["next"] = now_ + 2.0
+        pkts = [bytes(pkt)] + [d for d in buf[:-1]]
+
+        def work():
+            t0 = time.time()
+            r = doc_kelcrypt.find_leader_key(pkts, hint)
+            if r is None:
+                print("  [kelcrypt] no leader key in the window for %s:%d (id 0x%08x, "
+                      "%.0f s)" % (src[0], src[1], hint, time.time() - t0), flush=True)
+                return
+            if doc_kelcrypt.add_leader_key(*r) and _lk_path:
+                doc_kelcrypt.save_leader_keys(_lk_path)
+            print("  [kelcrypt] LEARNED a leader KEY P=0x%08x IV X=0x%08x from %s:%d "
+                  "(id 0x%08x, %.1f s) -- its mode-4 headers decrypt from here"
+                  % (r[0], r[1], src[0], src[1], hint, time.time() - t0), flush=True)
+        th = threading.Thread(target=work, name="leader-key", daemon=True)
+        _lk_job["thread"] = th
+        th.start()
 
     # sec 4ha: PUBLISH THE POPULATION, ON A THREAD. Each session-carrying
     # service publishes {count, stamp} through the core's live_sessions.py
@@ -674,6 +794,32 @@ def main():
             return 0                     # no career yet = a fresh 0 RP one
         return int(_stats.peek(key).get("rp", 0))
 
+    def rank_of_cid(cid):
+        """2026-10-01: character `cid`'s career RANK for the peer / user record
+        (+54, 1-based like the career's, doc_stats.RANK_CODES). Manual p.27:
+        the pick menu shows each player's own rank; the global --user-rank
+        (unset on prod = 0 = "DGD-3") made every other player a DG Drone 3rd.
+        --user-rank still wins when it is set (a probe)."""
+        if a.user_rank is not None or _stats is None or not cid:
+            return a.user_rank
+        key = _novice_key(session_of(cid))
+        if key is None:
+            key = _stats.key_for_charid(cid)
+        if key is None:
+            return doc_stats.RANK_MIN
+        return doc_stats.clamp_rank(_stats.peek(key).get("rank",
+                                                         doc_stats.RANK_MIN))
+
+    def private_cid(cid):
+        """2026-10-01: character `cid` set its record to Anonymous (lobby
+        command 6; manual p.36 公開設定)."""
+        if _stats is None or not cid:
+            return False
+        key = _novice_key(session_of(cid))
+        if key is None:
+            key = _stats.key_for_charid(cid)
+        return _stats.is_private(key)
+
     def peer_flags(cid):
         """The peer record's FLAGS for character `cid`: --user-flags, plus bit
         0x40 while it is a novice. wire+30 lands on peer-table byte +0x2f, the
@@ -681,6 +827,8 @@ def main():
         f = a.user_flags
         if novice_cid(cid):
             f = (f or 0) | doc_novice.NOVICE_BIT
+        if private_cid(cid):
+            f = (f or 0) | doc_stats.PRIVATE_BIT     # 2026-10-01: Anonymous
         return f
 
     def send_push(sess, body, ident, what):
@@ -699,8 +847,24 @@ def main():
         prints "You obtain %s x%d") with whatever tops this player up to the
         battle's supplies: the mission's Initial Supplies, the standard issue
         for PvP. The login top-up alone let ammo run dry over a session."""
-        if not a.mission_supplies or sess.key not in _supply_bag:
+        if not a.mission_supplies:
             return
+        if sess.key not in _supply_bag:
+            # 2026-10-05 (live): the ledger is seeded only by the world door
+            # (selector 2), so after a doc restart a player still logged in
+            # got NO supplies at all (Beginner II without its Bomb Fragments,
+            # Dual Horn without the top-up). Seed it from the stored bag; the
+            # issued bullets are not stored, so this can grant a little extra.
+            cid = sess.seen_charid[0]
+            held0 = {}
+            if _shop is not None and cid:
+                _g, _b = _shop.login_fields(_wallet_key(sess.seen_uid[0], cid, sess))
+                held0 = {i: q for i, q in (_b or ())
+                         if i in doc_missions.SUPPLY_ITEMS}
+            _supply_bag[sess.key] = held0
+            print("  [supplies] 0x%08x: no world door since the restart -- "
+                  "ledger seeded from the stored bag (%d supply row(s))"
+                  % (cid or 0, len(held0)), flush=True)
         quest = _mission_battle.get(sess.key)
         want = doc_missions.supplies(quest, _ammo or
                                      doc_missions.STANDARD_SUPPLIES)
@@ -765,8 +929,10 @@ def main():
             team = None if room.individual() else room.team_of(cid)
         else:
             team = ts.gs_teams.get(cid) if ts is not None else None
+        _pose = ts.last_pose[0] if ts is not None else None
         return doc_chat.Where(area, bt_store.table_of(cid),
-                              room.key if room is not None else None, team)
+                              room.key if room is not None else None, team,
+                              (_pose[0], _pose[2]) if _pose else None)
 
     def broadcast_graduate(cid, why):
         """Selector 134 sub-kind 11 to every client in the world: the mark comes
@@ -921,6 +1087,17 @@ def main():
                                           "why": None, "auto_at": None,
                                           "brief_end": None})
 
+    def _briefing_running(key):
+        """2026-09-29: the leader pressed Start at `key` and its room has not
+        opened yet (the room's own In Progress bit takes over then). Lapses a
+        minute past the briefing's end, so an abandoned briefing never locks
+        the table."""
+        st = gs_tables.get(key)
+        t0 = st.get("started") if st else None
+        if not t0:
+            return False
+        return time.time() < (st.get("brief_end") or t0 + 120.0) + 60.0
+
     # sec 4gk addendum 5: player-to-player TRADE (doc_trade.py). The server is
     # a relay: offers go to the partner as 42/44, and when both have confirmed
     # the wallets are swapped and both clients get 50 (the client applies the
@@ -1013,6 +1190,42 @@ def main():
                  ("  [%s]" % why) if why else ""), flush=True)
         return _ep
 
+    def push_member_peers(me, dst, members, why=""):
+        """2026-10-05: every other table member's selector-37 peer record
+        (with our relay address, peer_addr) to `me` at `dst`, right before its
+        selector 38. MEASURED offline (retail 38 handler 0x00bd2ab0 on savestate
+        RAM): the briefing room creates a unit ONLY for a roster member already
+        in the console's peer table ([kelsvc+0x11c]) -- the lookup 0x00bde418
+        fails for any other id and that player has no unit all battle. The
+        lobby relay pushes records only for players who streamed nearby."""
+        if dst is None or a.peer_record_addr != "relay":
+            return 0
+        sub = a.world_subchannel if a.world_subchannel >= 0 else 7
+        n = 0
+        for m in members:
+            if not m or m == me:
+                continue
+            s.sendto(peerrecords.build_peer_answer(
+                None, m, seq=a.lobby_seq, subchannel=sub, ptype=a.world_type,
+                ident=me,
+                blob=peerrecords.build_peer_record(
+                    m, name=_member_name(m), zone=a.user_zone, rank=rank_of_cid(m),
+                    flags=peer_flags(m), f36=player_look.get(m),
+                    **peer_addr(m, dst[0], me))[4:]), dst)
+            n += 1
+        if n:
+            print("  [peer] SENT %d member peer record(s) to 0x%08x before its "
+                  "selector 38%s" % (n, me, (" (" + why + ")") if why else ""),
+                  flush=True)
+        return n
+
+    def _rec_flags(rec):
+        """2026-10-06: a table record's flags word (wire+0), 0 without one --
+        logged with every 38: the client's BT ally test keys on its 0x200."""
+        if rec is None or len(rec) < tablerecords.BT_OFF_FLAGS + 4:
+            return 0
+        return struct.unpack_from("<I", rec, tablerecords.BT_OFF_FLAGS)[0]
+
     def push_battle_ready(msess, key):
         """sec 4ft: BATTLE READY (selector 38) + the message-27 re-arm to a
         seated member who did NOT send the Start -- the pair the leader's own
@@ -1033,12 +1246,14 @@ def main():
             _rd = briefingroom.gs_ready_roster(_rd, _cid, a.gs_connect_id,
                                   bt_store.members(key),
                                   rec=advertise.rec_for(bt_store.record(key),
-                                              _gs_endpoint, msess.ka_src[0]))
+                                              _gs_endpoint, msess.ka_src[0]),
+                                  addr=battle_addr(msess.ka_src[0]))
         # WARNING:KEY: sec 4gv: the same re-declaration the leader gets, computed
         # PER PEER -- this member may be on the LAN while the leader is on the
         # internet, so host_for() is asked about THIS socket's address.
         if a.gs_connect and a.gs_start_endpoint:
             send_gs_endpoint(msess.ka_src, _cid, why="Start, start-all member")
+        push_member_peers(_cid, msess.ka_src, bt_store.members(key), why="member")
         s.sendto(_rd, msess.ka_src)
         msess.gs_join_deadline[0] = 0.0
         msess.gs_bots_sent[0] = False
@@ -1054,10 +1269,81 @@ def main():
         msess.gs_ka_next[0] = time.time() + a.gs_keepalive_ms / 1000.0
         msess.gs_rearm_pending[0] = a.gs_rearm_until_team
         print("  [start-all] SENT BATTLE READY (selector %d) + re-arm (message "
-              "%d) to seated member 0x%08x at %s:%d, table %d (sec 4ft)"
+              "%d) to seated member 0x%08x at %s:%d, table %d, record flags "
+              "0x%08x (sec 4ft; 0x200 = individual)"
               % (worldchannel.GS_READY_SELECTOR, gamemsg.GS_ARM_MSG, _cid, msess.ka_src[0],
-                 msess.ka_src[1], key), flush=True)
+                 msess.ka_src[1], key, _rec_flags(bt_store.record(key))), flush=True)
         return True
+
+    def begin_briefing(_sk, _lead, _others, skip_sess=None):
+        """The table `_sk` goes to the briefing room: from here it takes no new
+        seats, its countdown and auto-team timer start, and every member in
+        `_others` gets BATTLE READY (push_battle_ready). Two callers: the
+        leader's Start (sec 4ft, the leader's own 38 is sent by the command-3
+        path itself, so the leader is not in `_others`), and a table that has
+        just FILLED (2026-10-01, manual p.29: "when the table fills, or the
+        leader starts it, everyone reserved jumps to the briefing room"),
+        where nobody sent command 3 and so everyone is in `_others`."""
+        gs_tables.pop(_sk, None)
+        # 2026-09-29: from here the table takes no new
+        # seats (see the JOIN's -4 below)
+        gs_table_state(_sk)["started"] = time.time()
+        # 2026-09-23: the briefing countdown's end =
+        # the record's Briefing Time, else the knob
+        _brec = bt_store.record(_sk)
+        _rsec = (float(_brec[tablerecords.BT_OFF_BRIEFING])
+                 * a.gs_briefing_minute
+                 if _brec and len(_brec) > tablerecords.BT_OFF_BRIEFING
+                 else 0.0)
+        # 2026-09-28: a SOLO table has nobody to wait
+        # for, so it keeps the old start (the post-join
+        # timer). Holding it for a 5:00 Briefing Time
+        # read as "stuck in briefing" (Beginner's Course
+        # I/II, live 09-28: three tries, left at ~4:20).
+        if len(bt_store.members(_sk)) <= 1:
+            _rsec = 0.0
+        _bsec = _rsec or a.gs_auto_team_after
+        # 2026-09-24: the client counts wire+111 minutes
+        # down from this 38 (lobby 0x00ada55c) and
+        # does nothing at zero -- the start is ours, at
+        # the zero it shows. 0 = None: no countdown drawn.
+        if _rsec and a.gs_briefing_clock:
+            gs_table_state(_sk)["brief_end"] = (
+                time.time() + _rsec + 1.0)
+            print("  [start-all] table %d: briefing "
+                  "countdown %.0f s -- the battle "
+                  "starts when it reaches 0"
+                  % (_sk, _rsec), flush=True)
+        if a.gs_auto_team_after >= 0:
+            gs_table_state(_sk)["auto_at"] = (
+                gs_table_state(_sk)["brief_end"]
+                or time.time() + _bsec + 2.0)
+            print("  [start-all] table %d: anyone "
+                  "without a team is auto-teamed (and "
+                  "a one-sided table rebalanced) in "
+                  "%.0f s (end of the briefing)"
+                  % (_sk, gs_table_state(_sk)["auto_at"]
+                     - time.time()), flush=True)
+        print("  [start-all] leader 0x%08x START at table "
+              "%d -> other seated: %s"
+              % (_lead or 0, _sk, ["0x%x" % m for m in _others]),
+              flush=True)
+        for _m in _others:
+            _ms = session_of(_m)
+            if _ms is None or _ms is skip_sess:
+                print("  [start-all] seated member "
+                      "0x%08x has no live session -- "
+                      "it stays in the lobby" % _m,
+                      flush=True)
+                continue
+            try:
+                push_battle_ready(_ms, _sk)
+            except Exception:
+                import traceback
+                print("  [start-all] push to 0x%08x "
+                      "FAILED:\n%s"
+                      % (_m, traceback.format_exc()),
+                      flush=True)
 
     def push_lobby_npcs(msess, src):
         """sec 4gs addendum 3: announce the lobby NPCs (notify kind 15) to a
@@ -1157,6 +1443,34 @@ def main():
             ms = session_of(m)
             if ms is not None and ms.gs_src[0] is not None:
                 live[m] = ms
+        # 2026-09-29: a MISSION table is co-op (one side is fine), and a table
+        # FULL to its player limit need not wait out the countdown
+        _rec_t = bt_store.record(key)
+        _coop = bool(_rec_t is not None and len(_rec_t) > tablerecords.BT_OFF_FLAGS + 3
+                     and struct.unpack_from("<I", _rec_t, tablerecords.BT_OFF_FLAGS)[0]
+                     & tablerecords.BT_FLAG_MISSION)
+        # 2026-10-06 (live, 3- and 4-player BT): every BT briefing sends request
+        # 31 with 0, the "one side" rebalance then split them 2/1 and the pairs
+        # saw each other as allies. The client skips the team compare when the
+        # 38's flags carry 0x200 (getter 0x00BDA390, proven offline, scratchpad
+        # re-bt/), so on those consoles it did not; defence in depth: an
+        # individual table has no sides -- no rebalance, no both-sides rule,
+        # and each member's team is its seat (distinct; kind 31 holds 0..14).
+        _ind = bool(_rec_t is not None and len(_rec_t) > tablerecords.BT_OFF_FLAGS + 3
+                    and struct.unpack_from("<I", _rec_t, tablerecords.BT_OFF_FLAGS)[0]
+                    & tablerecords.BT_FLAG_INDIVIDUAL)
+        if _ind:
+            _coop = True
+            for _si, _sm in enumerate(members):
+                if _sm in g["teams"]:
+                    g["teams"][_sm] = min(_si, 14)
+        _full = bool(_rec_t is not None and len(_rec_t) > tablerecords.BT_OFF_MAX
+                     and _rec_t[tablerecords.BT_OFF_MAX]
+                     and len(members) >= _rec_t[tablerecords.BT_OFF_MAX])
+        # 2026-10-01, manual p.30: "when every member is ready, or the time
+        # limit runs out" -- for every mode (--briefing-start ready). `full`
+        # is the 09-29 rule: PvP waits for a full table or the countdown.
+        g["early"] = (a.briefing_start == "ready") or _coop or _full
         # 2026-09-23: the briefing countdown ran out and someone still has no
         # team -- seat them on the smaller side so the distribution can go out
         if (a.gs_real_dist and not g["dist"] and g.get("auto_at")
@@ -1188,7 +1502,15 @@ def main():
                           "AUTO-TEAMED %s (they never sent request 31)"
                           % (key, ", ".join("0x%x -> team %d" % (m, _auto[m])
                                             for m in _assigned)), flush=True)
-                if len(members) >= 2 and a.gs_rebalance:
+                    # 2026-10-03 (live, table 7): request 31 is also what sets
+                    # gs_join_src, and the GO burst (kind 5 START) only goes to
+                    # a session that has one -- so an auto-teamed player loaded
+                    # the arena and never started. Same move as the SOLO branch.
+                    for _m in _assigned:
+                        _msa = live.get(_m)
+                        if _msa is not None:
+                            _msa.gs_join_src[0] = _msa.gs_src[0]
+                if len(members) >= 2 and a.gs_rebalance and not _coop:
                     _rb, _moved = teamdist.gs_rebalance_teams(g["teams"], members)
                     if _moved:
                         g["teams"].update(_rb)
@@ -1196,6 +1518,11 @@ def main():
                               "everyone is on ONE side -- REBALANCED %s"
                               % (key, ", ".join("0x%x -> team %d" % (m, _rb[m])
                                                 for m in _moved)), flush=True)
+        if _ind:
+            # the auto-team above may have seated a latecomer on 0 / 1
+            for _si, _sm in enumerate(members):
+                if _sm in g["teams"]:
+                    g["teams"][_sm] = min(_si, 14)
         for obs, ms in live.items():
             shown = g["shown"].setdefault(obs, {})
             # 2026-09-23: someone stepped off a space (request 33) -> kind 1,
@@ -1255,7 +1582,7 @@ def main():
                       "(sec 4he)" % (key, {"0x%x" % k: v for k, v in _ut.items()}),
                       flush=True)
                 g["teams"].update(_ut)
-        ok, why = teamdist.gs_real_ready(g["teams"], members)
+        ok, why = teamdist.gs_real_ready(g["teams"], members, coop=_coop)
         if ok and len(live) < len(members):
             ok, why = False, ("waiting for %d member(s) to reach the briefing "
                               "room" % (len(members) - len(live)))
@@ -1276,6 +1603,29 @@ def main():
         if now < teamdist.gs_dist_due(g, a.gs_real_dist_settle):
             return
         dist = teamdist.gs_real_distribution(g["teams"], members)
+        if a.gs_add_chara_before_dist == "on":
+            # 2026-10-03 (live: in TEAM battles only the leader's hits
+            # landed): a client keeps a remote's TEAM only in its profile
+            # cache entry ([kelsvc+0x118], team +0x3c), and kind 0 / kind 20
+            # store it only when that entry exists. Nothing created one in
+            # battle, so every remote resolved to team 0xff -- a client whose
+            # own team was also 0xff took them all for teammates
+            # (0x00bd36d0 -> 0x006b0aa0 side 0) and never sent a 113. Kind
+            # 31 (add chara) creates the entry WITH its team. Sent here, after
+            # the briefing counts are final (a 31 with a team never moves a
+            # count), with the distribution's own slots.
+            for obs, ms in live.items():
+                for cid, tm, slot in dist:
+                    if cid == obs:
+                        continue
+                    s.sendto(gamemsg.build_gs_add_chara(
+                        cid, tm, slot=slot, seq=next_gs_seq(ms), self_ident=obs,
+                        addr=battle_addr(ms.gs_src[0][0])),
+                        ms.gs_src[0])
+            print("  [roster] SENT notify 31 (add chara, with team) for every "
+                  "other member to %d client(s) before the distribution -- "
+                  "each remote's team in the client's profile cache"
+                  % len(live), flush=True)
         for obs, ms in live.items():
             s.sendto(gamemsg.build_gs_distribution(dist, seq=next_gs_seq(ms), ident=obs),
                      ms.gs_src[0])
@@ -1313,6 +1663,16 @@ def main():
                         and (r.key == -1 or r.key in bt_store.tables)):
                     return r
         return room
+
+    def mission_npc_send(cid, kind, payload):
+        """2026-10-05: one game-server notify to mission member `cid` on its
+        battle channel (gs_join_src), for the room's shared enemy set."""
+        ms = session_of(cid)
+        if ms is None or ms.gs_join_src[0] is None:
+            return False
+        s.sendto(gamemsg.build_gs_notify(kind, payload, seq=next_gs_seq(ms),
+                                         ident=cid), ms.gs_join_src[0])
+        return True
 
     def member_dst(cid):
         ms = session_of(cid)
@@ -1373,6 +1733,11 @@ def main():
             _mt = doc_missions.time_limit(mission)
             if _mt:
                 rules.time_limit = float(_mt)
+            # 2026-10-03: the stored record keeps --bt-situation 1100; only
+            # the 38 the client gets carries the quest's situation (sec 4ft
+            # rewrite), so a mission room placed the PvP item generators
+            if _quest_sit.get(mission):
+                rules.situation = _quest_sit[mission]
         room = battleroom.BattleRoom(key if key is not None else -1, members, teams, rules,
                           leader=bt_store.leader_cid(key) if key is not None else 0,
                           mission=mission, now=now)
@@ -1393,12 +1758,121 @@ def main():
             tag_leaders(room, list(room.team_leaders.values()), True, "battle start")
         return room
 
-    def close_battle(room, why="over"):
+    def queued_for(key, now=None):
+        """The live queue of `key`: expired entries dropped."""
+        now = time.time() if now is None else now
+        q = _join_queue.get(key) or {}
+        for c in [c for c, t0 in q.items() if now - t0 > a.join_queue_ttl]:
+            del q[c]
+        return list(q)
+
+    def unqueue(cid, why=""):
+        for k in list(_join_queue):
+            if _join_queue[k].pop(cid, None) is not None:
+                print("  [queue] 0x%08x left table %d's queue (%s)"
+                      % (cid, k, why), flush=True)
+            if not _join_queue[k]:
+                del _join_queue[k]
+
+    def queue_join(key, cid):
+        """2026-10-03 (--join-queue): a JOIN refused because `key`'s briefing
+        or battle runs. Kept OUT of the table's members (a late seat counted
+        by the running room was the 09-29 bug), seated at the next round."""
+        t = bt_store.tables.get(key)
+        if a.join_queue != "on" or not cid or t is None or cid in t["members"]:
+            return False
+        unqueue(cid, "queued elsewhere")
+        mx = min(t["rec"][tablerecords.BT_OFF_MAX] or tableverbs.BT_MAX_MEMBERS,
+                 tableverbs.BT_MAX_MEMBERS)
+        if len(t["members"]) + len(queued_for(key)) >= mx:
+            print("  [queue] table %d is FULL with its queue -- 0x%08x not "
+                  "queued" % (key, cid), flush=True)
+            return False
+        _join_queue.setdefault(key, {})[cid] = time.time()
+        print("  [queue] 0x%08x QUEUED for table %d's next round (%d waiting)"
+              % (cid, key, len(_join_queue[key])), flush=True)
+        return True
+
+    def keep_for_rematch(room, why):
+        """2026-10-03, manual p.33: the table outlives its battle. Whoever
+        took command 4 out of the battle, or has no session, gives up the
+        seat; the others (and the queue) go back to the briefing room in
+        --rematch-after s. False when there is nobody to play again."""
+        key = room.key
+        if a.rematch_after < 0 or room.mission is not None or key == -1:
+            return False
+        rec = bt_store.record(key)
+        if rec is None or (struct.unpack_from("<I", rec, tablerecords.BT_OFF_FLAGS)[0]
+                           & tablerecords.BT_FLAG_MISSION):
+            return False
+        stay = [m for m in bt_store.members(key)
+                if m and m not in room.left and session_of(m) is not None]
+        if len(stay) + len(queued_for(key)) < 2:
+            return False
+        for m in [m for m in bt_store.members(key) if m not in stay]:
+            bt_store.cancel(m)
+            send_reservation_clear(m, why="left table %d before its next round"
+                                   % key)
+        bt_store.set_in_progress(key, False)
+        gs_tables.pop(key, None)
+        _rematch[key] = time.time() + a.rematch_after
+        _rematch_since[key] = time.time()
+        print("  [rematch] table %d KEPT after the battle (%s): %d seated, %d "
+              "queued -- back to the briefing room in %.0f s (manual p.33)"
+              % (key, why, len(stay), len(queued_for(key)), a.rematch_after),
+              flush=True)
+        return True
+
+    def start_rematch(key):
+        if key not in bt_store.tables:
+            _join_queue.pop(key, None)
+            return
+        if _briefing_running(key) or bt_store.in_progress(key):
+            print("  [rematch] table %d already started -- nothing to do" % key,
+                  flush=True)
+            return
+        for q in queued_for(key):
+            qs = session_of(q)
+            if (qs is None or qs.ka_src is None or bt_store.table_of(q) is not None
+                    or battle_of(q) is not None):
+                print("  [queue] 0x%08x skipped for table %d (gone, seated "
+                      "elsewhere or in a battle)" % (q, key), flush=True)
+                continue
+            res, _k = bt_store.reserve(key, q, None)
+            print("  [queue] 0x%08x SEATED at table %d for the next round -> %d"
+                  % (q, key, res), flush=True)
+        _join_queue.pop(key, None)
+        members = [m for m in bt_store.members(key) if m]
+        if len(members) < 2:
+            print("  [rematch] table %d has %d player(s) -- it stays open in "
+                  "the lobby" % (key, len(members)), flush=True)
+            return
+        # 39 may have cleared the client's own reservation (R+2970/R+684 bit
+        # 4, sec 4fl); re-echo it before the 38, as after a CREATE/JOIN
+        if not a.bt_no_reserve_echo:
+            for m in members:
+                ms = session_of(m)
+                if ms is not None and ms.ka_src is not None:
+                    s.sendto(tableverbs.build_reserve_echo(
+                        synth_world_req(), key, seq=a.lobby_seq,
+                        subchannel=(a.world_subchannel
+                                    if a.world_subchannel >= 0 else 7),
+                        ptype=a.world_type, pad_to=a.world_pad, ident=m),
+                        ms.ka_src)
+        print("  [rematch] table %d: %d player(s) back to the briefing room"
+              % (key, len(members)), flush=True)
+        begin_briefing(key, bt_store.leader_cid(key), members)
+
+    def close_battle(room, why="over", rematch=False):
         battles.pop(room.key, None)
         if room.leader_mode():
             tag_leaders(room, list(room.team_leaders.values()), False, "battle over")
+        if rematch and room.key in bt_store.tables and keep_for_rematch(room, why):
+            return
         if room.key in bt_store.tables:
             bt_store.set_in_progress(room.key, False)
+            # the queue was refused (-4), so it holds no reservation to clear
+            _join_queue.pop(room.key, None)
             if bt_store.dissolve(room.key, force=True):
                 gs_tables.pop(room.key, None)
                 print("  [battle] table %d DISSOLVED after the battle (%s) -- "
@@ -1440,8 +1914,9 @@ def main():
                     None, lc, seq=a.lobby_seq, subchannel=sub,
                     ptype=a.world_type, ident=ms.seen_charid[0],
                     blob=peerrecords.build_peer_record(lc, name=shown, zone=a.user_zone,
-                                           rank=a.user_rank, flags=peer_flags(lc),
-                                           f36=player_look.get(lc))[4:]), dst)
+                                           rank=rank_of_cid(lc), flags=peer_flags(lc),
+                                           f36=player_look.get(lc),
+                                           **peer_addr(lc, dst[0], m))[4:]), dst)
                 sent += 1
             print("  [leader] %s 0x%08x as %r -> %d member(s)%s"
                   % ("TAGGED" if on else "UNTAGGED", lc, shown, sent,
@@ -1467,11 +1942,53 @@ def main():
             print("  [battle] DOWN 0x%x: no recorded spawn, respawn point "
                   "(0, 0, 0) map %s" % (victim, _dbm), flush=True)
             _dp = (0.0, 0.0, 0.0)
+        elif a.respawn_random:
+            # 2026-10-01, manual p.33: a KO'd character "revives at a random
+            # position (in team battles, a random position of its own team)".
+            # The arena data has no list of respawn nodes, so the pool is the
+            # points this battle already put players on (each one's first
+            # spawn, on the floor by construction): the victim's team's in a
+            # team battle, everyone's in BT.
+            _pool = [_spawn_of[m][0] for m in room.members
+                     if m in _spawn_of and _spawn_of[m][0] is not None
+                     and (room.individual() or room.team_of(m) == room.team_of(victim))]
+            if _pool:
+                _dp = random.choice(_pool)
+        # 2026-10-01: RERAISE (manual p.32, "revive from KO with full HP").
+        # The client never revives itself -- at HP 0 it reports the death
+        # (request 30) whatever its status -- so the server does: the victim
+        # comes back where it fell, at once (kind 25 at its last position,
+        # kind 13 on the next tick), and the spent Reraise is echoed off
+        # (kind 43). Only kinds seen working live (re-battle option B); kind 9
+        # followed by kind 19 without a 13 leaves the victim untouchable.
+        _rr = _status.get(victim, 0)
+        if a.status_echo and _rr & gamemsg.STATUS_RERAISE:
+            # 2026-10-05 (live, Iron Curtain): only a FRESH arena pose. The
+            # session's last_pose can be a LOBBY position (a console whose
+            # arena pose stream we cannot read), which revived the player in
+            # the void at (1089, 0, 202); without one, the battle spawn.
+            _vp0 = _battle_pose.get(victim)
+            if _vp0 is not None and time.time() - _vp0[3] < 5.0:
+                _dp = (float(_vp0[0]), float(_vp0[1]), float(_vp0[2]))
+            room.dead_until[victim] = time.time()
+            _status[victim] = _rr & ~gamemsg.STATUS_RERAISE & 0xFFFFFFFF
+            for m in room.present():
+                ms, dst = member_dst(m)
+                if dst is not None:
+                    s.sendto(gamemsg.build_gs_notify(
+                        gamemsg.GS_KIND_STATUS, struct.pack("<I", _status[victim]),
+                        seq=next_gs_seq(ms), ident=victim), dst)
+            print("  [battle] RERAISE 0x%x: revives where it fell (%.0f, %.0f, "
+                  "%.0f), no penalty time; status -> 0x%08x"
+                  % ((victim,) + tuple(_dp) + (_status[victim],)), flush=True)
         # 2026-09-26: the respawn REFILL (kind 25 carries 3 entries and SETS
         # each quantity). Retail rule: BULLETS only, topped up to the
         # battle-start count; each row is max(supplies ledger, battle-start)
         # so a SET never cuts a count the ledger knows (doc_missions.
         # respawn_refill).
+        # 2026-10-06: the pieces AT the respawn point (random pool, Reraise),
+        # not the first spawn's -- else the respawn lands on unloaded ground
+        _dbm = arenamaps.spawn_bmap(_spawn_zone.get(victim), _dp, _dbm)
         _ammo25 = ()
         if a.respawn_ammo:
             _vs = session_of(victim)
@@ -1490,9 +2007,9 @@ def main():
                                    seq=next_gs_seq(ms), ident=victim,
                                    ammo=_ammo25), dst)
         print("  [battle] DOWN 0x%x: SENT notify kind %d to %d member(s), "
-              "respawn at (%.0f, %.0f, %.0f) in %.0f s%s"
+              "respawn at (%.0f, %.0f, %.0f) pieces %s in %.0f s%s"
               % (victim, gamemsg.GS_DOWN_KIND, len(room.present()), _dp[0], _dp[1],
-                 _dp[2], room.rules.respawn,
+                 _dp[2], tuple(_dbm), room.rules.respawn,
                  ", ammo refilled to %s" % ", ".join(
                      "0x%08x x%d" % e for e in _ammo25) if _ammo25 else ""),
               flush=True)
@@ -1517,6 +2034,48 @@ def main():
                 print("  [magic] 0x%x respawned: MP -> %d (notify kind 44)"
                       % (victim, _vmp), flush=True)
 
+    _MODE_INDEX = {"BT": 0, "TBT": 1, "TDM": 2, "TBS": 3, "TCP": 4, "TLD": 5,
+                   "TFL": 6}
+
+    def result_inputs(room, m):
+        """2026-10-01: member `m`'s inputs to SE's rank-point formula
+        (doc_stats.results_rp) and to the kind-4 record that shows them: the
+        mode index (the table's mode byte), teammate KOs, kill streak, player
+        count, base HP and the mode block's team rows. A row OURS can't fill
+        (damage dealt to a base, capsule hold time, flags) stays 0."""
+        mi = _MODE_INDEX.get(room.rules.mode, 1)
+        team = room.team_of(m)
+        mates = [x for x in room.members if room.team_of(x) == team]
+        foes = [x for x in room.members if room.team_of(x) != team]
+        blk = {}
+        if mi == 1:
+            blk["team_kills"] = sum(room.kills.get(x, 0) for x in mates)
+        elif mi == 2:
+            blk["survivors"] = sum(1 for x in mates if x not in room.left
+                                   and not room.eliminated(x))
+        elif mi == 3:
+            own = room.base_hp.get(team)
+            enemy = room.base_hp.get(1 - team) if team in (0, 1) else None
+            blk["own_base_hp"] = own or 0
+            blk["enemy_base_left"] = (room.rules.base_hp if enemy is None
+                                      else enemy)
+            blk["base_attack"] = int(m == room.occupier)
+            blk["base_flags"] = 4 if own else 0
+        elif mi == 4:
+            blk["carriers_killed"] = room.carrier_kos.get(m, 0)
+            blk["capsule_obtained"] = int(room.holders.get(m, 0) > 0)
+            blk["capsules_end"] = sum(room.holders.get(x, 0) for x in mates)
+        elif mi == 5:
+            blk["leaders_killed"] = room.leader_kills.get(m, 0)
+            blk["leader_points_earned"] = sum(room.leader_kills.get(x, 0)
+                                              for x in mates)
+            blk["leader_points_lost"] = sum(room.leader_kills.get(x, 0)
+                                            for x in foes)
+        return {"mode_idx": mi, "team_kos": room.team_kos.get(m, 0),
+                "streak": room.streaks.get(m, 0),
+                "players": len(room.members),
+                "base_hp": room.rules.base_hp, "block": blk}
+
     def end_battle(room, now, why=None):
         """Kind 4 (the RESULT, facade 0x40) to every member still in the
         room, with the room's verdict; selector 39 follows for each after
@@ -1524,7 +2083,13 @@ def main():
         room.over = True
         room.why = room.why or why or "time limit"
         room.end_at = None
-        room.reset_at = now + a.gs_battle_reset_after
+        # 2026-10-01 (--post-battle-briefing): the manual's "back to the
+        # briefing room, then the transporter to the lobby" (p.33). Kind 4
+        # already takes the client to br_main (ev2046, facade 0x80 kept); the
+        # transporter sends lobby command 4 and the client resets itself.
+        # Selector 39 is then only the fallback for whoever never leaves.
+        room.reset_at = now + (a.post_battle_briefing if a.post_battle_briefing > 0
+                               else a.gs_battle_reset_after)
         print("  [battle] END %s" % room.summary(), flush=True)
         for m in room.present():
             if m in room.result_sent:
@@ -1582,6 +2147,21 @@ def main():
                 print("  [capsule] SENT notify 21 to 0x%08x: CUT %d Mako "
                       "Capsule(s) from the bag at the battle's end" % (m, _caps),
                       flush=True)
+            # 2026-10-01, manual p.33: consumables picked up on the field stay
+            # behind. Only the net still held (a used Potion sends no request,
+            # so this may cut one the player drank: the client's REMOVE stops
+            # at what the bag holds).
+            for _ci, _cq in sorted(room.field_picks.pop(m, {}).items()):
+                if _cq <= 0:
+                    continue
+                s.sendto(gamemsg.build_gs_notify(21, fielditems.field_item_payload(
+                    _ci, 0, (0.0, 0.0, 0.0), _cq,
+                    head=fielditems.FIELD_QUIET), seq=next_gs_seq(ms), ident=m), dst)
+                if ms.key in _supply_bag and _ci in _supply_bag[ms.key]:
+                    _supply_bag[ms.key][_ci] = max(0, _supply_bag[ms.key][_ci] - _cq)
+                print("  [field] SENT notify 21 to 0x%08x: CUT %d x 0x%08x "
+                      "picked up on the field (manual p.33)" % (m, _cq, _ci),
+                      flush=True)
             s.sendto(gamemsg.build_gs_notify(4, bytes(4) + _res_rec,
                                      seq=next_gs_seq(ms), ident=m), dst)
             ms.gs_battle_end[0] = 0.0
@@ -1613,7 +2193,7 @@ def main():
                       "0x00bcbd70) to 0x%08x at %s:%d (sec 4fy)"
                       % (briefingroom.GS_BATTLE_OVER_SELECTOR, m, ms.ka_src[0], ms.ka_src[1]),
                       flush=True)
-        close_battle(room, room.why or "reset")
+        close_battle(room, room.why or "reset", rematch=True)
 
     def fire_battles(now):
         for room in list(battles.values()):
@@ -1751,6 +2331,7 @@ def main():
         """A player is gone: its seat, and its place in a running room."""
         if not cid:
             return
+        unqueue(cid, why)
         room = battle_of(cid)
         if room is not None and cid not in room.left:
             if why in LINE_DROP_WHYS:
@@ -1801,11 +2382,40 @@ def main():
             ms = session_of(cid)
             center = _battle_pos(ms.key if ms is not None else None, cid,
                                  per_team=False)
-            room.field = {i: (fielditems.MAKO_CAPSULE, pos) for i, pos in
-                          enumerate(fielditems.capsule_ring(center, n))}
-            print("  [capsule] table %d: %d Mako Capsule(s) placed on a %.0f-unit "
-                  "ring around %s" % (room.key, len(room.field), fielditems.CAPSULE_RING,
-                                      tuple(round(v, 1) for v in center)), flush=True)
+            # 2026-10-05: a mission's capsules go on SE's own capsule spots --
+            # its situation's item generators that hold Mako Capsules (live:
+            # the ring put one inside a box) -- nearest the start first; the
+            # ring only when the situation has too few
+            spots = []
+            _cz = _battle_zone(ms.key if ms is not None else None, cid)
+            if room.mission is not None:
+                spots = doc_field.capsule_spots(_cz, room.rules.situation)
+            else:
+                # 2026-10-06 (live, Jungle TCP): a Team Capsule table used the
+                # ring too (capsules in a circle, some in a wall). Its own
+                # situation's capsule generators, else its 9xxx twin's
+                # (Jungle 1100 has 10; most arenas carry theirs on 9100/9101)
+                for _cs in (room.rules.situation,) + doc_field.pvp_twins(room.rules.situation):
+                    spots = doc_field.capsule_spots(_cz, _cs)
+                    if len(spots) >= n:
+                        break
+            if len(spots) >= n:
+                pts = (arenadata.mission_spawn_order(spots, center, a.mission_spawn_near)[:n]
+                       if room.mission is not None
+                       # PvP: nearest one member's start would favour its team
+                       else random.sample(spots, n))
+                room.field = {i: (fielditems.MAKO_CAPSULE, tuple(p))
+                              for i, p in enumerate(pts)}
+                print("  [capsule] table %d: %d Mako Capsule(s) on situation %d's "
+                      "capsule generators (%d spot(s))"
+                      % (room.key, len(room.field), room.rules.situation, len(spots)),
+                      flush=True)
+            else:
+                room.field = {i: (fielditems.MAKO_CAPSULE, pos) for i, pos in
+                              enumerate(fielditems.capsule_ring(center, n))}
+                print("  [capsule] table %d: %d Mako Capsule(s) placed on a %.0f-unit "
+                      "ring around %s" % (room.key, len(room.field), fielditems.CAPSULE_RING,
+                                          tuple(round(v, 1) for v in center)), flush=True)
         return room.field
 
     def field_tick(room, now):
@@ -1855,6 +2465,50 @@ def main():
                  ", ".join("0x%08x x%d@%d" % (i, q, sl)
                            for _g, sl, i, q, _p in placed[:6])
                  + (" ..." if len(placed) > 6 else "")), flush=True)
+
+    _drop_rng = (random.Random(a.drop_seed) if a.drop_seed >= 0
+                 else random.Random())
+
+    def enemy_drop(room, mn, nid, pos):
+        """2026-09-24 (ported 10-05): roll a dead mission enemy's drop on the
+        retail client's own table (doc_drops; the client's roll is off online)
+        and lay it on the field at `pos`, the enemy's last reported s16
+        position: notify kind 10 to every member present. Picking it up is the
+        ordinary 119 -> kind 11 path."""
+        if a.enemy_drops != "on" or room is None or room.over:
+            return
+        zone, typ = (mn or {}).get("zone"), (mn or {}).get("types", {}).get(nid)
+        defs = doc_missions.CHARDEF.get(int(zone or 0), ())
+        model = defs[typ][0] if typ is not None and 0 <= typ < len(defs) else None
+        sit = room.rules.situation
+        got = (doc_drops.roll(model, int(zone or 0), sit, rng=_drop_rng)
+               if model else None)
+        if got is None or pos is None:
+            print("  [drops] enemy 0x%x (%s): %s" % (
+                nid, model or "model unknown",
+                "no position reported" if got and pos is None else "no drop"),
+                flush=True)
+            return
+        iid, count = got
+        field = battle_field(room)
+        slot = next((k for k in range(fielditems.FIELD_SLOTS) if k not in field), None)
+        if slot is None:
+            print("  [drops] enemy 0x%x: field full, 0x%08x x%d lost"
+                  % (nid, iid, count), flush=True)
+            return
+        field[slot] = (iid, tuple(pos), count)
+        n = 0
+        for m in room.present():
+            ms, dst = member_dst(m)
+            if dst is None:
+                continue
+            s.sendto(gamemsg.build_gs_notify(10, fielditems.field_item_payload(
+                iid, slot, pos, count, head=fielditems.FIELD_QUIET),
+                seq=next_gs_seq(ms), ident=m), dst)
+            n += 1
+        print("  [drops] enemy 0x%x (%s) dropped 0x%08x x%d at %s -> slot %d, "
+              "kind 10 to %d member(s)" % (nid, model, iid, count, tuple(pos),
+                                           slot, n), flush=True)
 
     def battle_field(room):
         """2026-09-26: every battle has a field -- the capsules when the table
@@ -2029,6 +2683,9 @@ def main():
                                         + (_fn if kind == 11 else -_fn))
                 print("  [coins] table %d: 0x%08x holds %d Chocobo Coin(s)"
                       % (room.key, ident, room.coins[ident]), flush=True)
+            if (_fi >> 16) == fielditems.CONSUMABLE_CLASS:
+                _fp = room.field_picks.setdefault(ident, {})
+                _fp[_fi] = _fp.get(_fi, 0) + (_fn if kind == 11 else -_fn)
             _fs = session_of(ident)
             if _fi in doc_npcquests.FIELD_QUEST_ITEMS:
                 # a QUEST item (the Fuzzy Seed) is the SERVER bag's business:
@@ -2060,6 +2717,133 @@ def main():
             if hnote:
                 print("  [capsule] table %d: %s" % (room.key, hnote), flush=True)
 
+    _relay_seen = {}         # 2026-10-05: (sender key, type, ms, body) -> first seen
+
+    def relay_dup(sender, plain, ptype, synth=False):
+        """2026-10-05: True for a second copy of a peer packet. With every peer
+        unit born holding our address (peer_addr), a console sends its stream
+        ONCE PER UNIT -- all to us -- so N players mean N-1 identical copies
+        per tick; relaying each to everyone would land damage N-1 times. A copy
+        = same sender, type, sender clock (header +4) and body, inside
+        --peer-relay-dedupe-s. The clock keeps a still player's identical
+        poses flowing tick to tick (a unit with no accepted packet for 4 s
+        shows the stale-link "!")."""
+        if a.peer_relay_dedupe_s <= 0 or plain is None or len(plain) < framing.BODY_OFF:
+            return False
+        now = time.time()
+        # 2026-10-05 (offline run of retail 0x005961a8): the copies share the
+        # record's SEQUENCE (header +14) and body; only the sender clock at +4
+        # is re-read PER COPY, so a copy that straddles a millisecond carried
+        # a different +4 and slipped through. Key on the seq; a synthesised
+        # header (unreadable mode 4, seq unknown) keys on the body and calls
+        # clocks within 2 ms the same tick.
+        _synth = synth or not any(plain[12:16])
+        body = bytes(plain[framing.BODY_OFF:])
+        ms = struct.unpack_from("<I", plain, 4)[0]
+        k = ((sender.key, ptype, "ms", body) if _synth
+             else (sender.key, ptype, "seq", bytes(plain[14:16]), body))
+        t = _relay_seen.get(k)
+        if t is not None and now - t[0] < a.peer_relay_dedupe_s and (
+                not _synth or abs(ms - t[1]) <= 2):
+            return True
+        _relay_seen[k] = (now, ms)
+        if len(_relay_seen) > 4096:
+            for _k in [x for x, v in _relay_seen.items() if now - v[0] >= a.peer_relay_dedupe_s]:
+                _relay_seen.pop(_k, None)
+        return False
+
+    _npc_relay_seen = {}     # (npc id, dst) -> count, for the log
+    _npc_pose_at = {}        # npc id -> (x, y, z, t), its controller's last pose
+    GS_KIND_EXTINCT = 22     # notify kind 22 {u32 id}: the client releases that NPC
+    MISSION_EXTINCT_S = 4.5  # OURS: after the death animation, before the 5 s replacement
+    MISSION_REPLACE_NEAR = 150.0  # OURS: a replacement's minimum distance (~15 m)
+    SHOT_OWNER_NEAR = 60.0   # OURS: ~6 m (units ~10 cm) from shot origin to shooter
+
+    def shot_owner(cid, data, room, fresh_s=2.0, near=SHOT_OWNER_NEAR):
+        """2026-10-05 (static RE, retail; scratchpad re-udp2/): a shot whose
+        mode-4 header we cannot read is stamped with the SENDER's id, but the
+        room's NPC controller also fans out its NPCs' shots (0x00bee828 puts
+        the NPC id at +16). Stamped as the controller's, an NPC's shot reads
+        as a teammate's and the victim's team filter (0x00bcdfc8) cancels the
+        damage. The shooter is whichever of the controller and its NPCs stood
+        nearest the shot's origin (body+24), by their last poses; an NPC
+        only when the origin is within `near` of it (a muzzle, not a guess)."""
+        if room is None or room.mission is None:
+            return cid
+        shared = _room_mnpc.get(room.key)
+        if shared is None or shared.get("room") is not room or shared.get("ctrl") != cid:
+            return cid
+        try:
+            o = struct.unpack_from("<3f", data, framing.BODY_OFF + 24)
+        except struct.error:
+            return cid
+        now = time.time()
+        dead = shared.get("dead") or set()
+        cands = [(cid, _battle_pose.get(cid))]
+        cands += [(n, _npc_pose_at.get(n)) for n in shared.get("types", {})
+                  if n not in dead]
+        best = None
+        for who, p in cands:
+            if p is None or now - p[3] > fresh_s:
+                continue
+            d = ((p[0] - o[0]) ** 2 + (p[1] - o[1]) ** 2 + (p[2] - o[2]) ** 2) ** 0.5
+            if best is None or d < best[0]:
+                best = (d, who)
+        if best is None or best[1] == cid or best[0] > near:
+            return cid
+        _k = ("npcshot", best[1])
+        _npc_relay_seen[_k] = _npc_relay_seen.get(_k, 0) + 1
+        if _npc_relay_seen[_k] in (1, 50) or _npc_relay_seen[_k] % 500 == 0:
+            print("  [missions] unreadable shot from controller 0x%08x is NPC "
+                  "0x%08x's (origin %.0f from it): %d so far"
+                  % (cid, best[1], best[0], _npc_relay_seen[_k]), flush=True)
+        return best[1]
+
+    def relay_npc_pose(sender, data, inner, nid):
+        """2026-10-05 (--mission-shared-npcs on): forward the room's enemy
+        CONTROLLER's NPC pose (p2pbattle.npc_pose) to every OTHER present
+        member, re-stamped like a relayed 0x83 (build_peer_relay: mode 0, flags
+        8, checksum recomputed). On a non-controller the NPC exists from its
+        kind 15 and is uncontrolled (+0x10 = 0, no kind 27 sent there), so the
+        receive gate 0x00be7dd8 accepts it from us, and the pose handler
+        0x00be33e8 drives it through the same store that moves relayed player
+        avatars. NEVER echoed to the controller: its own NPC would accept the
+        stale copy and stutter. Only the room set's controller's stream."""
+        room = battle_of(sender.seen_charid[0])
+        if room is None or room.mission is None:
+            return 0
+        shared = _room_mnpc.get(room.key)
+        if shared is None or shared.get("room") is not room:
+            return 0
+        ctrl = shared.get("ctrl")
+        if sender.seen_charid[0] != ctrl:
+            return 0
+        _syn = not (inner is not None and inner.get("plain") is not None)
+        plain = (p2pbattle.synth_npc_inner(data, nid)["plain"] if _syn
+                 else inner["plain"])
+        if relay_dup(sender, plain, p2pbattle.NPC_POSE_TYPE, _syn):
+            return 0
+        _npc_pose_at[nid] = struct.unpack_from("<3f", plain, framing.BODY_OFF + 4) + (time.time(),)
+        out = worldpose.build_peer_relay(plain)
+        sent = 0
+        for m in room.present():
+            if not m or m == ctrl:
+                continue
+            ms = session_of(m)
+            dst = (ms.gs_src[0] or ms.ka_src or ms.src) if ms is not None else None
+            if dst is None:
+                continue
+            s.sendto(out, dst)
+            sent += 1
+            k = (nid, dst)
+            _npc_relay_seen[k] = _npc_relay_seen.get(k, 0) + 1
+            n = _npc_relay_seen[k]
+            if n == 1 or n % 200 == 0:
+                print("  [missions] NPC POSE 0x%08x (controller 0x%08x) -> 0x%08x "
+                      "%s:%d: %d update(s)" % (nid, ctrl, m, dst[0], dst[1], n),
+                      flush=True)
+        return sent
+
     def relay_p2p_battle(sender, inner, ptype):
         """sec 4he: forward a shot / damage / entity datagram to the OTHER
         members of the sender's battle, re-stamped exactly like the 0x83 pose
@@ -2070,9 +2854,48 @@ def main():
         it at 0x00be9860, so the whole room gets every packet and the
         receiver does the filtering the way it was built to."""
         plain = inner["plain"]
+        if relay_dup(sender, plain, ptype, inner.get("synth", False)):
+            return 0
         _t, _f, _sid, _tgt, _payload = p2pbattle.p2p_record(plain)
+        _dent = []
+        if ptype == p2pbattle.P2P_DAMAGE:
+            # the real 113 layout (header sender / target, 16-byte entries)
+            _sid, _tgt, _dent = p2pbattle.p2p_damage(plain)
         cid = sender.seen_charid[0] or _sid
         room = battle_of(cid)
+        # 2026-10-05: a NON-controller's hit on a SHARED mission enemy. Its
+        # console addresses the 113 to the NPC's controller id, which is 0
+        # there (no kind 27), so every member dropped it (retail receiver
+        # 0x00beeb38 takes -1 or its own id only) and the hit never landed.
+        # Re-target it to the controller, the one console that applies it
+        # (0x00beea50 -> 0x00beec10, a ring at unit+0x220 drops repeats).
+        if (_dent and room is not None and room.mission is not None
+                and a.mission_shared_npcs == "on"):
+            _sh = _room_mnpc.get(room.key)
+            _npc_hits = [e for e in _dent if (e[0] & 0xC0000000) == 0x40000000]
+            if (_sh is not None and _sh.get("room") is room and _npc_hits
+                    and cid != _sh.get("ctrl")):
+                _ctl = _sh.get("ctrl")
+                _pk = bytearray(plain)
+                struct.pack_into("<I", _pk, 20, _ctl & 0xFFFFFFFF)
+                _cs = session_of(_ctl)
+                _cd = ((_cs.gs_src[0] or _cs.ka_src or _cs.src)
+                       if _cs is not None else None)
+                if _cd is not None:
+                    s.sendto(worldpose.build_peer_relay(bytes(_pk)), _cd)
+                _lh = _sh.setdefault("last_hit", {})
+                for e in _npc_hits:
+                    _lh[e[0]] = e[2] if e[2] in room.kills else cid
+                k = (sender.key, "npc-hit")
+                _p2p_seen[k] = _p2p_seen.get(k, 0) + 1
+                if _p2p_seen[k] <= 3 or _p2p_seen[k] % 50 == 0:
+                    print("  [missions] NPC HIT by 0x%08x: %s -> RE-TARGETED to the "
+                          "controller 0x%08x%s (#%d)"
+                          % (cid, ", ".join("0x%x:%+d shot %d" % (e[0], e[1], e[3])
+                                            for e in _npc_hits[:3]),
+                             _ctl, "" if _cd else " (no address yet)", _p2p_seen[k]),
+                          flush=True)
+                return 1 if _cd else 0
         peers = (room.members if room is not None
                  else [m for m in bt_store.members(bt_store.table_of(cid) or -1)
                        if m])
@@ -2094,8 +2917,7 @@ def main():
             extra = ""
             if ptype == p2pbattle.P2P_DAMAGE:
                 extra = " " + ", ".join(
-                    "0x%x:%+d by 0x%x shot %d" % e
-                    for e in p2pbattle.p2p_damage_entries(_payload)[:4])
+                    "0x%x:%+d by 0x%x shot %d" % e for e in _dent[:4])
             print("  [p2p] %s (type %d, mode %d, %d B) from 0x%08x -> target %s "
                   "-> RELAYED to %d member(s) of %s (#%d)%s"
                   % (p2pbattle.P2P_NAMES.get(ptype, "?"), ptype, plain[1], len(plain),
@@ -2103,16 +2925,54 @@ def main():
                      sent, ("battle table %d" % room.key) if room is not None
                      else "its table", n, extra), flush=True)
         if room is not None and ptype == p2pbattle.P2P_DAMAGE:
-            room.saw_damage(cid, p2pbattle.p2p_damage_entries(_payload), time.time())
+            room.saw_damage(cid, _dent, time.time())
         battle_capture("p2p", type=ptype, name=p2pbattle.P2P_NAMES.get(ptype, "?"),
                        flags=_f, sender=cid, target=_tgt,
                        table=room.key if room is not None else None,
-                       payload=_payload)
+                       payload=(bytes(plain[framing.BODY_OFF:])
+                                if ptype == p2pbattle.P2P_DAMAGE else _payload))
         return sent
+
+    def peer_addr(peer_id, dst_ip, self_id=0):
+        """2026-10-05: {ip, port} for another player's 56-byte peer record
+        (+16 IP, +28 port): OUR relay endpoint as the receiving console sees
+        it. The console copies the record's address into the peer's UNIT at
+        spawn and streams to it; a unit at 0.0.0.0 gets no stream, and the
+        receive gate (retail 0x00be7dd8) gives a source address to ONE unit
+        only -- every relayed packet comes from us, so the first peer to
+        arrive took our address and every other peer was dropped ("bad
+        packet"): at most two players ever saw each other, and the rest wore
+        the 4-second staleness "!". Born with our address, every unit matches
+        on the first compare. {} = leave +16/+28 zero (--peer-record-addr off,
+        the receiver's own record, or no usable host)."""
+        if a.peer_record_addr != "relay" or not peer_id or peer_id == self_id:
+            return {}
+        host = advertise.host_for(a.gs_connect_ip or a.lobby_ip, dst_ip)
+        try:
+            socket.inet_aton(host or "")
+        except OSError:
+            return {}
+        return {"ip": host, "port": a.gs_connect_port}
+
+    def battle_addr(dst_ip):
+        """2026-10-05: (numeric IPv4, port) of OUR relay endpoint as the console
+        at `dst_ip` sees it, for selector 38's roster entries and notify 31
+        (+16 / +20) -- the address a BATTLE unit is created with. None with
+        --peer-record-addr off or no usable host."""
+        if a.peer_record_addr != "relay":
+            return None
+        host = advertise.host_for(a.gs_connect_ip or a.lobby_ip, dst_ip)
+        try:
+            import ipaddress
+            return int(ipaddress.IPv4Address(host)), a.gs_connect_port
+        except (ValueError, TypeError):
+            return None
 
     relay_names = {}         # sec 4fu: relayed peer id -> name (cache misses)
     player_look = {}         # sec 4fu (look): charid -> o099 look code, the
                              # peer record's +36 -> slot+40 -> unit+88
+
+    _gear_look = {}          # 2026-10-06: charid -> its gear-store costume (None = none)
 
     def _player_look(sess):
         """sec 4fu (look): the o099 costume code (doc_charastore.chr_code) of
@@ -2122,6 +2982,16 @@ def main():
         _cid = sess.seen_charid[0] & 0x3FFFFFFF
         if not _cid:
             return None
+        # 2026-10-06 (live): a mask / armor change (lobby commands 17/18) is
+        # stored by the gear store as the new costume; the roster keeps the
+        # creation code, so everyone else kept seeing the old look. The gear
+        # costume first (cached: this runs on every relayed pose).
+        if _gearstore is not None:
+            if _cid not in _gear_look:
+                _grec = _gearstore.get(_wallet_key(sess.seen_uid[0], _cid, sess)) or {}
+                _gear_look[_cid] = _grec.get("costume")
+            if _gear_look[_cid] is not None:
+                return _gear_look[_cid] & 0xFFFF
         # sec 4fx: through the member key (sec 4ft). The raw uid reads the
         # old uid-keyed backup roster, i.e. somebody else's (or no) look.
         _slots = _store.roster(_skey(sess.seen_uid[0], sess))
@@ -2161,14 +3031,25 @@ def main():
         if (plain is None or len(plain) < framing.BODY_OFF + 40 or not rid
                 or rid & 0xC0000000):
             return
+        if relay_dup(sender, plain, 0x83, inner.get("synth", False)):
+            return
         now = datetime.datetime.now().timestamp()
         ms = struct.unpack_from("<I", plain, 4)[0]
         x, y, z, dx, dy, dz = pose[1:]
         b = framing.BODY_OFF
         h28, h30 = struct.unpack_from("<HH", plain, b + 28)
+        # 2026-10-03 (live): after a restart the clients streamed on without
+        # a world door, so `players` had no names and every peer record said
+        # "Player_41050" -- the name the receiver keeps. The chara store
+        # still knows the character; ask it before the placeholder.
         name = (players.get(sender.seen_charid[0], {}).get("name")
-                or players.get(rid, {}).get("name") or "Player_%x" % rid)
-        relay_names[rid] = name
+                or players.get(rid, {}).get("name") or relay_names.get(rid)
+                or next((nm for _k, nm, _i in _rank_characters()
+                         if nm and (_i & 0x3FFFFFFF) == rid), None))
+        if name:
+            relay_names[rid] = name
+        else:
+            name = "Player_%x" % rid
         sender.pos_id[0] = rid
         # KEY: sec 4fu (look, 2026-09-13): THE REMOTE AVATAR'S LOOK IS UNIT+88.
         # The unit update 0x00be4850 (vt+28's first call) does `lhu a0, 88(unit);
@@ -2184,11 +3065,27 @@ def main():
         player_look[rid] = look
         raw = worldpose.build_peer_relay(plain) if a.peer_relay == "raw" else None
         sub = a.world_subchannel if a.world_subchannel >= 0 else 7
+        # 2026-10-03 (live): a lobby player's pose reached a client in the
+        # arena and that client's arena pose reached the lobby, both ways
+        # ghosts. Relay only within one battle room, or lobby to lobby.
+        s_room = battle_of(sender.seen_charid[0] or rid)
         for other in list(sessions.values()):
             if other is sender or other.src is None:
                 continue
-            if now - other.last_stream[0] > a.peer_relay_live_s:
+            if battle_of(other.seen_charid[0]) is not s_room:
                 continue
+            if now - other.last_stream[0] > a.peer_relay_live_s:
+                # 2026-10-05 (static RE + 9 battle starts, live 10-05): in a
+                # BATTLE a console streams only once a relayed packet has
+                # given one of its units an address (retail gate 0x00be7dd8),
+                # so "relay only to the already streaming" deadlocked a member
+                # that missed the race: Kanon sent GS traffic all mission and
+                # got ZERO relays. A battle-room member still talking to us
+                # (any datagram in 15 s) gets the relay; the lobby keeps the
+                # old rule (its world channel is shut when not streaming).
+                if not (s_room is not None and other.last_peer_rx[0]
+                        and now - other.last_peer_rx[0] <= 15.0):
+                    continue
             dst = other.src
             first = rid not in other.relay_pushed
             if first or now - other.relay_pushed[rid] >= a.peer_relay_push_s:
@@ -2197,9 +3094,11 @@ def main():
                     None, rid, seq=a.lobby_seq, subchannel=sub,
                     ptype=a.world_type, ident=other.seen_charid[0],
                     blob=peerrecords.build_peer_record(rid, name=name, zone=a.user_zone,
-                                           rank=a.user_rank,
+                                           rank=rank_of_cid(rid),
                                            flags=peer_flags(rid),
-                                           f36=look)[4:]), dst)
+                                           f36=look,
+                                           **peer_addr(rid, dst[0],
+                                                       other.seen_charid[0]))[4:]), dst)
                 print("  [peer-relay] PEER record 0x%08x (%s, look 0x%04x) -> "
                       "%s:%d%s"
                       % (rid, name, look, dst[0], dst[1],
@@ -2318,6 +3217,7 @@ def main():
     _mp_point_seen = {}   # charid -> 117 count (log throttle)
     _item_uses = doc_items.UseLedger()
     _spawn_of = {}        # charid -> ((x, y, z), bmap) of its kind-2 spawn
+    _spawn_zone = {}      # 2026-10-06: charid -> the arena zone of that spawn
     _battle_pose = {}     # 2026-09-26: charid -> (x, y, z, t), its last 0x83
     if a.mission_ledger == "on" and _stats is None:
         print("[missions] LEDGER OFF: --mission-ledger=on needs --stats (no "
@@ -2485,7 +3385,9 @@ def main():
                                  "leader_kills": room.leader_kills.get(m, 0),
                                  "left": m in room.left,
                                  "coins": (room.coins.get(m, 0)
-                                           if a.chocobo_coins == "on" else 0)})
+                                           if a.chocobo_coins == "on" else 0),
+                                 **(result_inputs(room, m)
+                                    if room.mission is None else {})})
                 if a.leave_rp_penalty > 0:
                     # 2026-09-24: a player who left partway already paid the
                     # --leave-rp-penalty; the end tally must not score them too
@@ -2589,10 +3491,48 @@ def main():
             holders, columns = doc_stats.result_board(
                 cid, room.members,
                 {m: room.tally.get(k) for m, k in room.tally_keys.items()})
+        # 2026-10-01: what the retail Results screen computes its rank-point
+        # breakdown from (doc_stats.results_rp): the counts, the battle
+        # type, the mode block and the player count
+        _rtype, _rwin = 0, None
+        _is_mission = summ.get("mode") == "MISSION" or (room is not None
+                                                        and room.mission is not None)
+        # 2026-10-04 (live): the Reward page (+28 bit 5) carries "Promotion
+        # Granted" (55:46) beside Reward / Item Obtained / Rank; we asked for it
+        # on EVERY mission and always set +44 RANK, so a quit showed a reward
+        # page and a promotion that never happened (the server kept the exam
+        # open). Only a CLEARED mission gets the page, and +44 is only set when
+        # this battle raised the rank (0 = "leave R+763 alone", the arm writes
+        # 1..254 only).
+        _res_rank = c["rank"]
+        if _is_mission:
+            if summ.get("outcome") == "w":
+                _rtype = doc_stats.RES_TYPE_REWARD
+            if not summ.get("promoted"):
+                _res_rank = 0
+        elif room is not None:
+            if not room.individual():
+                _rtype |= doc_stats.RES_TYPE_TEAM
+                _rwin = room.winner_team()
+            _why = room.why or ""
+            if _why.startswith("kill target"):
+                _rtype |= doc_stats.RES_TYPE_KILLS
+            elif "capsule" in _why:
+                _rtype |= doc_stats.RES_TYPE_CAPSULES
+            elif "base destroyed" in _why:
+                _rtype |= doc_stats.RES_TYPE_BASE
         rec = doc_stats.result_record(summ["outcome"], c["rp"], gil,
-                                      doc_stats.medal_mask(c), c["rank"],
+                                      doc_stats.medal_mask(c), _res_rank,
                                       score=summ["rp"], holders=holders,
-                                      columns=columns)
+                                      columns=columns,
+                                      counts=(summ.get("kills", 0),
+                                              summ.get("kos", 0),
+                                              summ.get("team_kos", 0),
+                                              summ.get("streak", 0)),
+                                      rtype=_rtype, winner=_rwin,
+                                      mode=summ.get("mode_idx"),
+                                      block=summ.get("block"),
+                                      players=summ.get("players", 0))
         return rec, ("RESULT [%s] %s %s%s: +%d rank points, +%d gil, medals %s -> %s"
                      % (key, mode, {"w": "WIN", "l": "LOSS", "d": "DRAW"}.get(
                          summ["outcome"], summ["outcome"]),
@@ -2640,12 +3580,25 @@ def main():
         z = _battle_zone(key, cid)
         if per_team:
             tm = _spawn_team(key, cid)
-            ts = arenadata.team_start(z, tm) if tm is not None else None
+            # 2026-10-05: one of the situation's own start nodes per seat
+            _sit = _record_situation(cid)
+            _seat, _nseat = _seat_of(cid, team=tm)
+            ts = (arenadata.team_start(z, tm, _sit, _seat)
+                  if tm is not None else None)
             if ts is not None:
-                ts = _seat_spread(ts, cid, team=tm)
-                print("  [arena] 0x%08x spawns at team %d's start %s (zone %d)"
-                      % (cid, tm, tuple(round(v, 1) for v in ts), z), flush=True)
+                if _nseat > arenadata.team_start_count(z, tm, _sit):
+                    ts = _seat_spread(ts, cid, team=tm)
+                print("  [arena] 0x%08x spawns at team %d's start %s (zone %d, "
+                      "situation %s, seat %d)" % (cid, tm, tuple(round(v, 1) for v in ts),
+                                                  z, _sit, _seat), flush=True)
                 return ts
+            if cid and _is_bt_pvp(cid):
+                _bp = arenadata.bt_start(z, _sit, _seat)
+                if _bp is not None:
+                    print("  [arena] 0x%08x spawns at individual start %s (zone %d, "
+                          "situation %s, seat %d)" % (cid, tuple(round(v, 1) for v in _bp),
+                                                      z, _sit, _seat), flush=True)
+                    return _bp
         if z in _zone_spawn:
             p = _zone_spawn[z]
         else:
@@ -2653,8 +3606,31 @@ def main():
                 p = tuple(float(x) for x in a.gs_battle_pos.split(","))[:3]
             except ValueError:
                 p = (0.0, 0.0, 0.0)
+        # 2026-10-04: a mission whose controller has its own player node may
+        # start the player there, among its enemies, instead of at the generic
+        # zone spawn (which can sit far from the fight -- Dual Horn Duel, live).
+        if a.mission_player_spawn == "on" and cid:
+            _mq = _record_quest(cid)
+            _mctl_ps = _quest_sit.get(_mq, 0) if _mq else 0
+            if _mctl_ps:
+                _mp = arenadata.mission_player_spawn(z, _mctl_ps, p,
+                                                     radius=a.mission_player_radius,
+                                                     seat=_seat_of(cid)[0])
+                if tuple(round(v, 1) for v in _mp) != tuple(round(v, 1) for v in p):
+                    print("  [missions] quest %s controller %d: player starts at "
+                          "its own node %s, not the generic z%d spawn %s "
+                          "(--mission-player-spawn)"
+                          % (_mq, _mctl_ps, tuple(round(v, 1) for v in _mp), z,
+                             tuple(round(v, 1) for v in p)), flush=True)
+                    p = _mp
         if per_team and cid:
-            p = _seat_spread(p, cid)
+            # 2026-10-05: no ring when every seat has its own start node (the
+            # 15-unit nudge pushed a player off a ledge, Iron Curtain)
+            _mq2 = _record_quest(cid) if a.mission_player_spawn == "on" else None
+            _nst = (arenadata.mission_player_starts(z, _quest_sit.get(_mq2, 0))
+                    if _mq2 else 0)
+            if not (_nst and _seat_of(cid)[1] <= _nst):
+                p = _seat_spread(p, cid)
             print("  [arena] 0x%08x spawns at %s (zone %d)"
                   % (cid, tuple(round(v, 1) for v in p), z), flush=True)
         return p
@@ -2667,17 +3643,60 @@ def main():
         team start) goes on a SEAT_SPREAD ring around it (units are ~10 cm:
         a running player covers ~50 a second, measured), same height; alone,
         the point itself."""
-        room = battle_of(cid)
-        seats = (list(room.members) if room is not None
-                 else [m for m in bt_store.members(bt_store.table_of(cid) or -1) if m])
-        if team is not None:
-            seats = [m for m in seats if _spawn_team(None, m) == team]
-        if cid not in seats or len(seats) < 2:
+        i, n = _seat_of(cid, team=team)
+        if n < 2:
             return p
-        i = seats.index(cid)
-        ang = 2.0 * math.pi * i / len(seats)
+        ang = 2.0 * math.pi * i / n
         return (p[0] + SEAT_SPREAD * math.cos(ang), p[1],
                 p[2] + SEAT_SPREAD * math.sin(ang))
+
+    def forgotten_table(key, cid):
+        """2026-10-05: True when a game-server request echoes table `key`
+        (body+2, from selector 38) that this server does not seat `cid` at --
+        no such table at all (a restart forgot it), or the player is known
+        and sits elsewhere. 0 / 0xFFFF = no table echoed."""
+        if key in (0, 0xFFFF):
+            return False
+        if bt_store.get(key) is None:
+            return True
+        return bool(cid) and bt_store.table_of(cid) != key
+
+    def _seat_of(cid, team=None):
+        """(seat index, seats) of `cid` among its table's players (or among
+        `team`'s); (0, 0) when it is not seated."""
+        room = battle_of(cid) if cid else None
+        seats = (list(room.members) if room is not None
+                 else [m for m in bt_store.members(bt_store.table_of(cid) or -1) if m]
+                 if cid else [])
+        if team is not None:
+            seats = [m for m in seats if _spawn_team(None, m) == team]
+        if cid not in seats:
+            return 0, 0
+        return seats.index(cid), len(seats)
+
+    def _record_situation(cid):
+        """2026-10-05: the situation id of `cid`'s table record (wire+34),
+        else --bt-situation; None when neither is set."""
+        tk = bt_store.table_of(cid) if cid else None
+        rec = bt_store.record(tk) if tk is not None else None
+        if rec and len(rec) > tablerecords.BT_OFF_SITUATION + 1:
+            v = struct.unpack_from("<H", rec, tablerecords.BT_OFF_SITUATION)[0]
+            if v:
+                return v
+        return bt_store.situation or None
+
+    def _is_bt_pvp(cid):
+        """True when `cid`'s battle is an individual (BT) PvP battle."""
+        room = battle_of(cid)
+        if room is not None:
+            return room.mission is None and room.individual()
+        tk = bt_store.table_of(cid)
+        rec = bt_store.record(tk) if tk is not None else None
+        if not rec or len(rec) <= tablerecords.BT_OFF_MODE:
+            return False
+        if struct.unpack_from("<I", rec, tablerecords.BT_OFF_FLAGS)[0] & tablerecords.BT_FLAG_MISSION:
+            return False
+        return tablerecords.BT_MODE_NAMES.get(rec[tablerecords.BT_OFF_MODE], "TBT") == "BT"
     def _mission_quest(sess):
         """2026-09-23: the quest id of `sess`'s Mission-flagged table, or 0."""
         cid = sess.seen_charid[0] if sess is not None else 0
@@ -2715,32 +3734,44 @@ def main():
     _r24_next = {}
 
     def _base_setup(sess):
-        """2026-09-24: (gimmicks, hp, controller) when `sess`'s battle is a
-        TEAM BASE table (mode byte 3) with a Base Durability and its arena
-        has bases, else None."""
+        """2026-09-24: (gimmicks, hp, controller, owner teams, spots) when
+        `sess`'s battle is a TEAM BASE table (mode byte 3) with a Base
+        Durability and its arena has bases, else None. 2026-10-05: or a BASE
+        MISSION (doc_missions.MISSION_BASES): its one enemy base, owned by
+        team 1, at its own spot. spots None = the arena's PvP pair."""
         cid = sess.seen_charid[0] if sess is not None else 0
         tk = bt_store.table_of(cid) if cid else None
         rec = bt_store.record(tk) if tk is not None else None
         if not rec or len(rec) <= tablerecords.BT_OFF_MODE:
             return None
-        if rec[tablerecords.BT_OFF_MODE] != 3:
-            return None
         hp = struct.unpack_from("<I", rec, tablerecords.BT_OFF_BASE_HP)[0]
         if not hp:
             return None
-        g = arenadata.base_gimmicks(_battle_zone(sess.key, cid))
+        ctrl = bt_store.leader_cid(tk) or cid
+        _mq = _record_quest(cid)
+        if _mq is not None:
+            if _mq not in doc_missions.MISSION_BASES:
+                return None
+            _row, _team, _pos = doc_missions.MISSION_BASES[_mq]
+            return (_row,), hp, ctrl, (_team,), (_pos,)
+        if rec[tablerecords.BT_OFF_MODE] != 3:
+            return None
+        g = arenadata.base_gimmicks(_battle_zone(sess.key, cid), _record_situation(cid))
         if not g:
             return None
-        ctrl = bt_store.leader_cid(tk) or cid
-        return g, hp, ctrl
+        return g, hp, ctrl, (0, 1), None
 
     def base_report_in(room, bs, reports, zone=None):
         """The CONTROLLER's base HP: forward changes (kind 33) to the other
         members' HUDs. A base that falls opens its OCCUPATION phase
         (--base-occupy, base_occupy_tick in fire_battles); with no spot for
         the arena, or --base-occupy off, it ends the room at once."""
+        if room.base_spots is None and len(bs) > 4 and bs[4] is not None:
+            room.base_spots = bs[4]          # a base mission's own base
+            room.base_teams = bs[3]
         if room.base_spots is None and zone is not None:
-            room.base_spots = arenadata.base_spots(zone)
+            room.base_spots = arenadata.base_spots(
+                zone, _record_situation(room.members[0] if room.members else 0))
         _occ = a.base_occupy == "on" and room.base_spots is not None
         _was_down = set(room.base_down)
         changed = room.base_update(reports, occupy=_occ)
@@ -2772,7 +3803,7 @@ def main():
         bs = _base_setup(sess)
         if bs is None or dst is None:
             return
-        s.sendto(gamemsg.build_gs_notify(29, arenadata.base_objects_payload(bs[0]),
+        s.sendto(gamemsg.build_gs_notify(29, arenadata.base_objects_payload(bs[0], bs[3]),
                                  seq=next_gs_seq(sess), ident=sess.seen_charid[0]),
                  dst)
         print("  [base] SENT notify kind 29: bases %s (team 0, team 1), %s"
@@ -2790,8 +3821,25 @@ def main():
         gs_ip=_gs_endpoint, gs_port=(a.world_gs_port or a.gs_connect_port),
         cur_min=(2 if a.bt_start_ready else 0),
         situation=a.bt_situation)
+    # 2026-10-06: a PvP table carries a situation its arena HAS (else the
+    # client builds every fence -- arenadata.situation_for)
+    bt_store.situation_for = lambda rec, ind: arenadata.situation_for(
+        _map_zone.get(rec[tablerecords.BT_OFF_MAP], a.gs_battle_zone), ind)
     bt_store.mission_time = dict(doc_missions.MISSION_TIME)
     bt_store.time_unit = a.bt_time_unit
+    # 2026-10-04: a mission table lists its OWN arena and player cap, not the
+    # create screen's (Jungle / 12). Only quests with a known zone / archive cap.
+    bt_store.mission_map = {q: _zone_map[z] for q, z in _quest_zone.items()
+                            if z in _zone_map}
+    bt_store.mission_max = dict(doc_missions.MAX_PLAYERS)
+    bt_store.mission_situation = dict(_quest_sit)
+    # 2026-10-05: enemy-less capsule missions carry the situation whose
+    # generators are their capsule spots (no controller: no enemies)
+    bt_store.mission_situation.update(
+        {q: zs[1] for q, zs in doc_missions.CAPSULE_SITUATIONS.items()
+         if q not in bt_store.mission_situation})
+    bt_store.mission_base_hp = {q: doc_missions.MISSION_BASE_HP
+                                for q in doc_missions.MISSION_BASES}
     bt_tables = bt_store.records()
     if bt_tables:
         print("[battletable] serving %d table(s) on selector %d -> %d"
@@ -3069,7 +4117,7 @@ def main():
                 # the gate burst's kind 29 must carry the SAME bases: a zero
                 # record would empty the object table the HUD reads HP from
                 _gspec = ",".join(
-                    ("29:" + arenadata.base_objects_payload(_bs[0]).hex())
+                    ("29:" + arenadata.base_objects_payload(_bs[0], _bs[3]).hex())
                     if part.strip() == "29" else part
                     for part in (_gspec or "").split(","))
             for _k, _np in briefingroom.gs_battle_sequence(_gspec,
@@ -3081,6 +4129,8 @@ def main():
                       "its 47 (sec 4ga)" % (_k, gamemsg.GS_NOTIFY_NAMES.get(_k, "?"),
                                             now - (sess.gs_battle_on[0] or now)),
                       flush=True)
+            if _gspec:
+                _go_resend[sess] = [now + GO_RESEND_S, _gspec, GO_RESEND_TRIES, now]
             try:
                 capsule_send_field(battle_of(sess.seen_charid[0]), sess)
             except Exception:
@@ -3097,6 +4147,23 @@ def main():
                       % (len(_bs[0]), _bs[1], _bs[2]), flush=True)
             if (a.npc_arena == "on" and _npc_arena_types) or _mission_ctrl(sess):
                 _npc_arena_due[sess] = now + a.npc_arena_after
+        # 2026-10-05: the GO burst again when the arena never reported in
+        _gor = _go_resend.get(sess)
+        if _gor is not None and now >= _gor[0]:
+            _gcid = sess.seen_charid[0]
+            if (_last_gs24.get(_gcid, 0.0) >= _gor[3] or _gor[2] <= 0
+                    or sess.gs_join_src[0] is None or battle_of(_gcid) is None):
+                _go_resend.pop(sess, None)
+            else:
+                _gor[2] -= 1
+                _gor[0] = now + GO_RESEND_S
+                # back to back: a sleep here stalls every other client
+                for _k, _np in briefingroom.gs_battle_sequence(
+                        _gor[1], seq_fn=lambda: next_gs_seq(sess), ident=_gcid):
+                    s.sendto(_np, sess.gs_join_src[0])
+                print("  [battle] GO RE-SENT to 0x%08x: no 1 Hz report %.1f s after "
+                      "its GO (%d resend(s) left)" % (_gcid, now - _gor[3], _gor[2]),
+                      flush=True)
         # sec 4gs addendum 4: the arena kind-15 test ring.
         _nad = _npc_arena_due.get(sess)
         if _nad and now >= _nad and sess.gs_join_src[0] is not None:
@@ -3104,26 +4171,50 @@ def main():
             _ctr = _battle_pos(sess.key, sess.seen_charid[0], per_team=False)
             _rb = None
             _mctl2 = _mission_ctrl(sess)
+            # 2026-10-05: a room whose enemies are already placed shares them
+            _shared, _mroom = None, None
+            if _mctl2:
+                _mroom = battle_of(sess.seen_charid[0])
+                if _mroom is not None and _mroom.mission is not None:
+                    _shared = _room_mnpc.get(_mroom.key)
+                    if _shared is not None and _shared.get("room") is not _mroom:
+                        _room_mnpc.pop(_mroom.key, None)   # an older room's set
+                        _shared = None
+                else:
+                    _mroom = None
             _mz = _battle_zone(sess.key, sess.seen_charid[0]) if _mctl2 else None
             _msp = (arenadata.MISSION_SPAWNS.get(str(_mz), {}).get(str(_mctl2))
                     if _mctl2 else None)
+            # 2026-10-05 (static RE, retail 0x0066e440): a controller's ROSTER
+            # [a, b) lists TABLE-14 GIMMICK rows (crates, bases), not enemy
+            # nodes -- the extract's "spawn"/"count" read them as table-15
+            # nodes, which only landed on type-4 nodes because the low node
+            # indices are type 4, mostly OTHER controllers' (201:3001's 8 all
+            # sat in 3000's pool). The enemy points are the controller's own
+            # POOL type-4 nodes; the client never places a mission enemy itself
+            # (kind 15 carries the position).
+            _mpts = list((_msp or {}).get("pool") or [])
+            if _mctl2 and _mpts:
+                _msp = dict(_msp, count=len(_mpts), spawn=_mpts)
+            elif _msp:
+                _msp = dict(_msp, count=0, spawn=[])
             if _mctl2 and not (_msp and _msp.get("count") and _msp.get("spawn")):
                 # 2026-09-23: the situation picks the MODELS (live: every type
                 # value drew situation 3000's one enemy model, the dog), but
                 # some mission controllers carry no spawn nodes (z201 3003..
                 # 3005). Place the NPCs at the nearest mission controller that
-                # has them.
+                # has them (its pool, 2026-10-05).
                 _zc = arenadata.MISSION_SPAWNS.get(str(_mz), {})
                 _alt = sorted((abs(int(k) - _mctl2), k) for k, v in _zc.items()
-                              if 3000 <= int(k) < 4000 and v.get("count")
-                              and v.get("spawn"))
+                              if 3000 <= int(k) < 4000 and v.get("pool"))
                 if _alt:
-                    _msp = _zc[_alt[0][1]]
+                    _mpts = list(_zc[_alt[0][1]]["pool"])
+                    _msp = dict(_zc[_alt[0][1]], count=len(_mpts), spawn=_mpts)
                     print("  [missions] controller %d has no spawn nodes in zone "
                           "%s -> placing at controller %s's" % (_mctl2, _mz,
                                                                _alt[0][1]),
                           flush=True)
-            if _msp and _msp.get("count") and _msp.get("spawn"):
+            if _shared is None and _msp and _msp.get("count") and _msp.get("spawn"):
                 # 2026-09-23: the mission's own NPCs -- the controller's spawn
                 # count at its own spawn nodes (arena bzd tables 28/29/15). The
                 # enemy TYPE is not in the controller record yet, so the test
@@ -3147,9 +4238,60 @@ def main():
                 _mtypes = (_mexact or _mtspec.get(None)
                            or _npc_arena_types or doc_npc_spawn.parse_types(
                                doc_npc_spawn.ARENA_TYPES_DEFAULT))
+                if (_mexact and len(_msp["spawn"]) < len(_mexact)
+                        and len(_mpts) > len(_msp["spawn"])):
+                    # 2026-09-29: a roster shorter than the mission's enemies
+                    # (36: one point, a DG Soldier AND a Beast Soldier) tops
+                    # up from the controller's own pool
+                    _msp = dict(_msp, count=len(_mpts), spawn=_mpts)
+                    print("  [missions] controller %d in zone %s: roster too "
+                          "short for %d enemies -> + its pool, %d spawn point(s)"
+                          % (_mctl2, _mz, len(_mexact), len(_mpts)), flush=True)
+                # 2026-10-05: the arena's own SPAWN GROUPS pick each enemy's
+                # type and point (fixed groups first, then the mission's
+                # named target, nearest the start); the row keeps only the
+                # COUNT of enemies alive at once
+                _planned = False
+                _grp = _msp.get("pool_groups")
+                if (a.mission_spawn_groups == "on" and _mexact and _msu
+                        and _grp and len(_grp) == len(_mpts)):
+                    _plan = arenadata.mission_enemy_plan(
+                        _mpts, _grp, _ctr or _mpts[0], len(_mexact),
+                        pick=lambda g: doc_missions.group_type(_mz, _mctl2, g),
+                        prefer=lambda t: doc_missions.kill_target_type(_mquest, _mz, t),
+                        near=a.mission_spawn_near)
+                    if _plan:
+                        _ppos = [list(p) for p, _t in _plan]
+                        _pset = {tuple(p) for p in _ppos}
+                        _msp = dict(_msp, count=len(_plan),
+                                    spawn=_ppos + [p for p in _mpts
+                                                   if tuple(p) not in _pset])
+                        _mexact = _mtypes = [t for _p, t in _plan]
+                        _planned = True
+                        print("  [missions] quest %s controller %d: %d enemies from "
+                              "the arena's spawn groups: %s" % (
+                                  _mquest, _mctl2, len(_plan),
+                                  ", ".join("t%d@%s" % (t, tuple(round(v) for v in p))
+                                            for p, t in _plan)), flush=True)
+                if (_mexact and _ctr and len(_mexact) < len(_mpts) and not _planned
+                        and a.mission_spawn_near > 0):
+                    # 2026-10-03 (live, quest 1 twice): ONE Beast Soldier at
+                    # roster node 0, ~785 units from the player's start, idle
+                    # there all mission (the 1 Hz report: HP 100, never moved)
+                    # -- "no enemies". With fewer enemies than spawn points,
+                    # use the points nearest the player, past a margin.
+                    _near = arenadata.mission_spawn_order(_mpts, _ctr,
+                                                          a.mission_spawn_near)
+                    _msp = dict(_msp, spawn=_near)
+                    print("  [missions] %d enemies for %d spawn point(s): "
+                          "nearest the player first, >= %.0f away: %s"
+                          % (len(_mexact), len(_mpts), a.mission_spawn_near,
+                             _near[:len(_mexact)]), flush=True)
                 _ments = [doc_npc_spawn.entry(
                     doc_npc_spawn.ARENA_ID_BASE + _i, _mtypes[_i % len(_mtypes)],
-                    tuple(_p), (0.0, 0.0, 1.0), a.npc_spawn_hp)
+                    tuple(_p), (0.0, 0.0, 1.0),
+                    # 2026-10-05: each enemy's own max HP (was a flat 100)
+                    doc_missions.npc_hp(_mz, _mtypes[_i % len(_mtypes)], a.npc_spawn_hp))
                     for _i, _p in enumerate(_msp["spawn"][:(
                         min(_msp["count"], len(_mexact)) if _mexact
                         else _msp["count"])])]
@@ -3160,13 +4302,27 @@ def main():
                 _mnpc[sess] = {
                     "types": {doc_npc_spawn.ARENA_ID_BASE + _i:
                               _mtypes[_i % len(_mtypes)] for _i in range(_nmis)},
-                    "spawn": list(_msp["spawn"]), "next": _nmis, "due": []}
+                    "spawn": list(_msp["spawn"]), "next": _nmis, "due": [],
+                    "rb": _rb, "n": _nmis, "ctrl": sess.seen_charid[0],
+                    "csess": sess, "dead": set(), "room": _mroom, "zone": _mz,
+                    "center": tuple(_ctr) if _ctr else None}
+                if _mroom is not None and a.mission_shared_npcs == "on":
+                    _room_mnpc[_mroom.key] = _mnpc[sess]
                 print("  [missions] zone %s controller %d: %d NPC(s) at the "
                       "controller's spawn nodes, types by id: %s"
                       % (_mz, _mctl2, _nmis, ", ".join(
                           "0x%x=t%d" % (doc_npc_spawn.ARENA_ID_BASE + _i,
                                         _mtypes[_i % len(_mtypes)])
                           for _i in range(_nmis))), flush=True)
+            if _shared is not None:
+                # another member placed this room's enemies: the same Add Npc
+                # batches (same ids, same spots), controlled by that console
+                _rb, _nmis = _shared["rb"], _shared["n"]
+                _mnpc[sess] = _shared
+                print("  [missions] table %d: 0x%08x joins the room's enemy set "
+                      "(%d NPC(s), controlled by 0x%08x)"
+                      % (_mroom.key, sess.seen_charid[0], _nmis, _shared["ctrl"]),
+                      flush=True)
             if _rb is None:
                 if not (a.npc_arena == "on" and _npc_arena_types):
                     _rb = []
@@ -3198,19 +4354,30 @@ def main():
             # controller's char id (== ours -> take over, 0x00be7bc8(.., 1)),
             # body[24] u32 mask (0 -> 0x7fffff). In a MISSION battle, give
             # every arena NPC to the player so its client simulates them.
-            if _mission_ctrl(sess) and _nmis:
-                _me = sess.seen_charid[0]
+            _me = sess.seen_charid[0]
+            _ctl_id = (_mnpc[sess].get("ctrl") or _me) if sess in _mnpc else _me
+            if _mission_ctrl(sess) and _nmis and _ctl_id != _me:
+                # 2026-10-05: a NON-controller of a shared room set gets NO
+                # kind 27: its NPC stays uncontrolled (+0x10 = 0), which the
+                # receive gate 0x00be7dd8 accepts relayed poses for from any
+                # address (relay_npc_pose); a 27 naming the controller would
+                # redirect the gate to the controller's player unit instead.
+                print("  [missions] 0x%08x shares the room's %d NPC(s): no kind 27 "
+                      "(controller 0x%08x; their poses are relayed)"
+                      % (_me, _nmis, _ctl_id), flush=True)
+            if _mission_ctrl(sess) and _nmis and _ctl_id == _me:
                 for _i in range(_nmis):
                     s.sendto(gamemsg.build_gs_notify(
                         27, struct.pack("<III", doc_npc_spawn.ARENA_ID_BASE + _i,
-                                        _me, 0),
+                                        _ctl_id, 0),
                         seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
                     time.sleep(0.02)
-                print("  [missions] SENT notify kind 27 x%d: NPC control of "
-                      "0x%08x.. -> 0x%08x (the player)"
-                      % (_nmis, doc_npc_spawn.ARENA_ID_BASE, _me),
+                print("  [missions] SENT notify kind 27 x%d to 0x%08x: NPC control "
+                      "of 0x%08x.. -> 0x%08x%s"
+                      % (_nmis, _me, doc_npc_spawn.ARENA_ID_BASE, _ctl_id,
+                         " (the player)" if _ctl_id == _me else " (the room's controller)"),
                       flush=True)
-                if sess in _mnpc:
+                if sess in _mnpc and _ctl_id == _me:
                     _mnpc[sess]["ctl"] = {
                         doc_npc_spawn.ARENA_ID_BASE + _i:
                         [now + gamemsg.MISSION_CTL_CHECK_S, 1] for _i in range(_nmis)}
@@ -3221,69 +4388,137 @@ def main():
         # same type on the next spawn node a few seconds after each death, until
         # the objective ends the room.
         _mn = _mnpc.get(sess)
-        if (_mn and (_mn["due"] or _mn.get("ctl"))
-                and sess.gs_join_src[0] is not None):
+        if _mn is not None and sess.gs_join_src[0] is not None:
             _room_r = battle_of(sess.seen_charid[0])
-            if _room_r is None or _room_r.over:
+            if (_room_r is None or _room_r.over
+                    or (_mn.get("room") or _room_r) is not _room_r):
                 _mnpc.pop(sess, None)
+                _gone = _mn.get("room")
+                if _gone is not None and _room_mnpc.get(_gone.key) is _mn:
+                    _room_mnpc.pop(_gone.key, None)
             else:
-                for _due, _typ in [d for d in _mn["due"] if now >= d[0]]:
-                    _mn["due"].remove((_due, _typ))
-                    _nid = doc_npc_spawn.ARENA_ID_BASE + _mn["next"]
-                    _pos = _mn["spawn"][_mn["next"] % len(_mn["spawn"])]
-                    _mn["next"] += 1
-                    _mn["types"][_nid] = _typ
+                # 2026-10-05: the room's controller left -> hand every live
+                # enemy to a member still in it, and tell everyone who it is
+                if (_room_mnpc.get(_room_r.key) is _mn
+                        and _mn.get("ctrl") not in _room_r.present()):
+                    _newc = next((m for m in _room_r.present()
+                                  if session_of(m) is not None), None)
+                    if _newc:
+                        _live = [i for i in sorted(_mn["types"]) if i not in _mn["dead"]]
+                        _mn["ctrl"], _mn["csess"] = _newc, session_of(_newc)
+                        # only the NEW controller takes them over; the others
+                        # stay uncontrolled and follow the relayed poses
+                        for _nid in _live:
+                            mission_npc_send(_newc, 27, struct.pack("<III", _nid, _newc, 0))
+                        _mn["ctl"] = {_nid: [now + gamemsg.MISSION_CTL_CHECK_S, 1]
+                                      for _nid in _live}
+                        print("  [missions] table %d: enemy controller left -> %d "
+                              "NPC(s) handed to 0x%08x" % (_room_r.key, len(_live), _newc),
+                              flush=True)
+                # replacements and control retries run ONCE per room: in the
+                # controller's session (a room-less, unshared set is its own)
+                if _mn.get("csess", sess) is sess and (_mn["due"] or _mn.get("ctl")
+                                                       or _mn.get("extinct")):
                     _me = sess.seen_charid[0]
-                    s.sendto(gamemsg.build_gs_notify(
-                        doc_npc_spawn.KIND_ADD_NPC,
-                        struct.pack("<I", 1) + doc_npc_spawn.entry(
+                    _others = [m for m in _room_r.present() if m != _me]
+                    # 2026-10-05 (static RE, scratchpad re-invisible/): kind 22
+                    # {u32 id} is the client's own NPC release (registry row,
+                    # unit, scene chara, models; the per-frame update tears it
+                    # down). We never sent it, so every dead enemy stayed
+                    # allocated all battle -- live, quest 1's 8th Beast
+                    # Soldier was solid, hittable and INVISIBLE. Sent before
+                    # the replacement's kind 15 in the same tick.
+                    for _ex in [e for e in _mn.get("extinct", ()) if now >= e[0]]:
+                        _mn["extinct"].remove(_ex)
+                        _xb = struct.pack("<I", _ex[1])
+                        s.sendto(gamemsg.build_gs_notify(
+                            GS_KIND_EXTINCT, _xb, seq=next_gs_seq(sess), ident=_me),
+                            sess.gs_join_src[0])
+                        for _m in _others:
+                            mission_npc_send(_m, GS_KIND_EXTINCT, _xb)
+                        print("  [missions] SENT kind 22 (extinct) for dead NPC 0x%x "
+                              "-> 0x%x (+%d other member(s))"
+                              % (_ex[1], _me, len(_others)), flush=True)
+                    for _due, _typ in [d for d in _mn["due"] if now >= d[0]]:
+                        _mn["due"].remove((_due, _typ))
+                        _nid = doc_npc_spawn.ARENA_ID_BASE + _mn["next"]
+                        # 2026-10-05 (live, quest 1): replacements cycled the
+                        # pool in raw order and walked off ~1000 units from the
+                        # player ("couldn't find any more"). Now: one of the
+                        # three points nearest the controller's latest pose,
+                        # past --mission-spawn-near.
+                        # 2026-10-05 (live 18:08Z): a console whose arena pose
+                        # stream we cannot read gave no pose, and the raw cycle
+                        # came back -- so without a fresh pose, around the
+                        # mission's own START point instead
+                        _cp = _battle_pose.get(_me)
+                        _ref = (_cp[:3] if _cp is not None and time.time() - _cp[3] < 10.0
+                                else _mn.get("center"))
+                        if _ref is not None:
+                            # at least MISSION_REPLACE_NEAR away (prod's
+                            # --mission-spawn-near 40 put them on top of the
+                            # player: "swarmed", live 18:40Z), over the 6 nearest
+                            _near_pts = arenadata.mission_spawn_order(
+                                _mn["spawn"], _ref,
+                                max(a.mission_spawn_near, MISSION_REPLACE_NEAR))
+                            _pos = _near_pts[_mn["next"] % min(6, len(_near_pts))]
+                        else:
+                            _pos = _mn["spawn"][_mn["next"] % len(_mn["spawn"])]
+                        _mn["next"] += 1
+                        _mn["types"][_nid] = _typ
+                        _add = struct.pack("<I", 1) + doc_npc_spawn.entry(
                             _nid, _typ, tuple(_pos), (0.0, 0.0, 1.0),
-                            a.npc_spawn_hp),
-                        seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
-                    # 2026-09-28: a kind 27 sent straight
-                    # after its Add Npc reached the client in the SAME frame
-                    # and was handled FIRST (acks 235 before 234, 243 before
-                    # 242), before the NPC existed. The soldier spawned
-                    # uncontrolled, never entered the 1 Hz report, and its
-                    # death was never counted (a mission stuck at 3 of 5).
-                    # So the 27 goes out MISSION_CTL_GAP_S later, below.
-                    _mn.setdefault("ctl", {})[_nid] = [now + gamemsg.MISSION_CTL_GAP_S, 0]
-                    print("  [missions] REPLACEMENT NPC 0x%x type %d at %s -> "
-                          "control 0x%x in %.1f s" % (_nid, _typ, _pos, _me,
-                                                      gamemsg.MISSION_CTL_GAP_S),
-                          flush=True)
-                # Hand control (kind 27) to the player and check it TOOK: a
-                # controlled NPC is listed in the player's 1 Hz report
-                # (mission_npc_report), so one missing from it after
-                # MISSION_CTL_CHECK_S gets its 27 again, up to
-                # MISSION_CTL_TRIES sends in all.
-                _seen = _mn.get("seen", ())
-                for _nid, _st in list(_mn.get("ctl", {}).items()):
-                    if _nid in _seen:
-                        _mn["ctl"].pop(_nid, None)
+                            doc_missions.npc_hp(_mn.get("zone"), _typ, a.npc_spawn_hp))
+                        s.sendto(gamemsg.build_gs_notify(
+                            doc_npc_spawn.KIND_ADD_NPC, _add,
+                            seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
+                        # the other members get the same enemy (no kind 27:
+                        # uncontrolled there, moved by the relayed poses)
+                        for _m in _others:
+                            mission_npc_send(_m, doc_npc_spawn.KIND_ADD_NPC, _add)
+                        # 2026-09-28: a kind 27 sent straight
+                        # after its Add Npc reached the client in the SAME frame
+                        # and was handled FIRST (acks 235 before 234, 243 before
+                        # 242), before the NPC existed. The soldier spawned
+                        # uncontrolled, never entered the 1 Hz report, and its
+                        # death was never counted (a mission stuck at 3 of 5).
+                        # So the controller's 27 goes out MISSION_CTL_GAP_S later.
+                        _mn.setdefault("ctl", {})[_nid] = [now + gamemsg.MISSION_CTL_GAP_S, 0]
+                        print("  [missions] REPLACEMENT NPC 0x%x type %d at %s -> "
+                              "control 0x%x in %.1f s (+%d other member(s))"
+                              % (_nid, _typ, _pos, _me, gamemsg.MISSION_CTL_GAP_S,
+                                 len(_others)), flush=True)
+                    # Hand control (kind 27) to the controller and check it
+                    # TOOK: a controlled NPC is listed in its 1 Hz report
+                    # (mission_npc_report), so one missing from it after
+                    # MISSION_CTL_CHECK_S gets its 27 again, up to
+                    # MISSION_CTL_TRIES sends in all.
+                    _seen = _mn.get("seen", ())
+                    for _nid, _st in list(_mn.get("ctl", {}).items()):
+                        if _nid in _seen:
+                            _mn["ctl"].pop(_nid, None)
+                            if _st[1] > 1:
+                                print("  [missions] NPC 0x%x is in the 1 Hz report "
+                                      "now (control took on send %d)"
+                                      % (_nid, _st[1]), flush=True)
+                            continue
+                        if now < _st[0]:
+                            continue
+                        if _st[1] >= gamemsg.MISSION_CTL_TRIES:
+                            _mn["ctl"].pop(_nid, None)
+                            print("  [missions] NPC 0x%x STILL not in the 1 Hz "
+                                  "report after %d kind-27 sends -- its death "
+                                  "cannot be counted" % (_nid, _st[1]), flush=True)
+                            continue
+                        s.sendto(gamemsg.build_gs_notify(
+                            27, struct.pack("<III", _nid, _me, 0),
+                            seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
+                        _st[1] += 1
+                        _st[0] = now + gamemsg.MISSION_CTL_CHECK_S
                         if _st[1] > 1:
-                            print("  [missions] NPC 0x%x is in the 1 Hz report "
-                                  "now (control took on send %d)"
+                            print("  [missions] NPC 0x%x not in the 1 Hz report -- "
+                                  "RE-SENT notify kind 27 (send %d)"
                                   % (_nid, _st[1]), flush=True)
-                        continue
-                    if now < _st[0]:
-                        continue
-                    if _st[1] >= gamemsg.MISSION_CTL_TRIES:
-                        _mn["ctl"].pop(_nid, None)
-                        print("  [missions] NPC 0x%x STILL not in the 1 Hz "
-                              "report after %d kind-27 sends -- its death "
-                              "cannot be counted" % (_nid, _st[1]), flush=True)
-                        continue
-                    _me = sess.seen_charid[0]
-                    s.sendto(gamemsg.build_gs_notify(
-                        27, struct.pack("<III", _nid, _me, 0),
-                        seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
-                    _st[1] += 1
-                    _st[0] = now + gamemsg.MISSION_CTL_CHECK_S
-                    if _st[1] > 1:
-                        print("  [missions] NPC 0x%x not in the 1 Hz report -- "
-                              "RE-SENT notify kind 27 (send %d)"
-                              % (_nid, _st[1]), flush=True)
         # sec 4fy: the battle END. Kind 4 is the RESULT (its arm 0x00bc1760
         # sets facade 0x40, which ends ev2045's battle loop -> act_win/lose ->
         # the result windows), and selector 39's arm 0x00bcbd70 is the full
@@ -3347,6 +4582,17 @@ def main():
                 for m in _dmem:
                     send_reservation_clear(m, why="table %d dissolved after "
                                            "the battle" % _dk)
+        if (sess.gs_join_deadline[0] and time.time() >= sess.gs_join_deadline[0]
+                and sess.gs_battle_on[0]):
+            # 2026-10-03 (live, table 1): the deadline armed by request 31
+            # outlived the room's start and re-sent kind 2 73 s into the
+            # battle -- one client's timer read 0, it could not shoot, and the
+            # clients drew a result the server never sent. Its 47 already
+            # had the spawn.
+            sess.gs_join_deadline[0] = 0.0
+            print("  [battle] post-join timer SKIPPED for 0x%08x -- its battle "
+                  "already started (request 47)" % (sess.seen_charid[0] or 0),
+                  flush=True)
         if sess.gs_join_deadline[0] and time.time() >= sess.gs_join_deadline[0]:
             sess.gs_join_deadline[0] = 0.0
             _bkey = sess.key if sess.gs_join_src[0] else None
@@ -3357,15 +4603,17 @@ def main():
                 print("  [arena] " + _bnote, flush=True)
             if _bcid:
                 # kind 25 (push_down) repeats this spawn and its M0/M1
-                _spawn_of[_bcid] = (_bpos, arenamaps.battle_bmap(_bzone, _zone_pieces,
-                                                       _gs_bmap))
+                _spawn_of[_bcid] = (_bpos, arenamaps.spawn_bmap(
+                    _bzone, _bpos, arenamaps.battle_bmap(_bzone, _zone_pieces, _gs_bmap)))
+                _spawn_zone[_bcid] = _bzone
             for _k, _np in briefingroom.gs_battle_sequence(a.gs_battle_start, spawn=_bpos,
                                               seq_fn=lambda: next_gs_seq(sess),
                                               ident=sess.seen_charid[0],
                                               zone=_bzone,
-                                              bmap=arenamaps.battle_bmap(_bzone,
-                                                               _zone_pieces,
-                                                               _gs_bmap)):
+                                              # 2026-10-06: the pieces AT the spawn
+                                              bmap=arenamaps.spawn_bmap(
+                                                  _bzone, _bpos, arenamaps.battle_bmap(
+                                                      _bzone, _zone_pieces, _gs_bmap))):
                 s.sendto(_np, sess.gs_join_src[0])
                 time.sleep(0.05)
                 print("  SENT notify kind %d (%s) on the post-join timer -- sec 4ed"
@@ -3459,6 +4707,8 @@ def main():
                     _due = teamdist.gs_dist_due(gs_table_state(_rk), a.gs_real_dist_settle)
                     if _due is not None:
                         due.append(_due)   # sec 4fw: wake for the settle
+        due.extend(_fill_start.values())           # a full table's start
+        due.extend(_rematch.values())              # a kept table's next round
         due.extend(battle_deadlines())             # sec 4he: room clocks
         _wd = weekly_deadline()                    # the weekly medals' rollover
         if _wd is not None:
@@ -3504,6 +4754,62 @@ def main():
             import traceback
             print("  [battle] fire_battles FAILED:\n%s" % traceback.format_exc(),
                   flush=True)
+        for _fk, _fdue in list(_fill_start.items()):
+            if _now < _fdue:
+                continue
+            _fill_start.pop(_fk, None)
+            try:
+                _fm = [m for m in bt_store.members(_fk) if m]
+                _frec = bt_store.record(_fk)
+                _fmax = min((_frec[tablerecords.BT_OFF_MAX] if _frec else 0)
+                            or tableverbs.BT_MAX_MEMBERS, tableverbs.BT_MAX_MEMBERS)
+                if (not _fm or _frec is None or len(_fm) < _fmax
+                        or _briefing_running(_fk) or bt_store.in_progress(_fk)):
+                    print("  [fill-start] table %d: no longer full / already "
+                          "started -- nothing to do" % _fk, flush=True)
+                    continue
+                print("  [fill-start] table %d is FULL (%d/%d) -- everyone "
+                      "goes to the briefing room (manual p.29)"
+                      % (_fk, len(_fm), _fmax), flush=True)
+                begin_briefing(_fk, bt_store.leader_cid(_fk), _fm)
+            except Exception:
+                import traceback
+                print("  [fill-start] FAILED:\n%s" % traceback.format_exc(),
+                      flush=True)
+        for _rk, _rdue in list(_rematch.items()):
+            if _now < _rdue:
+                continue
+            # wait until every seated player is back in the lobby (no game-
+            # server request for REMATCH_QUIET_S, poses still arriving)
+            _since = _rematch_since.get(_rk, _rdue)
+            _seated = [m for m in bt_store.members(_rk) if m]
+            _away = [m for m in _seated
+                     if not (_now - _last_gs_req.get(m, 0.0) >= REMATCH_QUIET_S
+                             and _now - _last_pose_rx.get(m, 0.0) <= 3.0)]
+            if _away and _now - _since < REMATCH_LOBBY_CAP_S:
+                if int(_now - _since) % 5 == 0 and _rematch_logged.get(_rk) != int(_now - _since):
+                    _rematch_logged[_rk] = int(_now - _since)
+                    print("  [rematch] table %d waiting for %s to reach the lobby "
+                          "(last game-server request / pose, s ago: %s)"
+                          % (_rk, ", ".join("0x%08x" % m for m in _away),
+                             ", ".join("%.0f/%.0f" % (_now - _last_gs_req.get(m, 0.0),
+                                                      _now - _last_pose_rx.get(m, 0.0))
+                                       for m in _away)), flush=True)
+                continue
+            for _m in _away:
+                bt_store.cancel(_m)
+                send_reservation_clear(_m, why="not back in the lobby %.0f s after "
+                                       "table %d's battle" % (_now - _since, _rk))
+                print("  [rematch] table %d: 0x%08x not back in the lobby after "
+                      "%.0f s -- seat given up" % (_rk, _m, _now - _since), flush=True)
+            _rematch.pop(_rk, None)
+            _rematch_since.pop(_rk, None)
+            try:
+                start_rematch(_rk)
+            except Exception:
+                import traceback
+                print("  [rematch] FAILED:\n%s" % traceback.format_exc(),
+                      flush=True)
         _wd = weekly_deadline()
         if _wd is not None and _now >= _wd:
             try:
@@ -3626,6 +4932,26 @@ def main():
         print("\n[%s] RECV #%d from %s:%d  %d bytes" % (ts, n, src[0], src[1], len(data)),
               flush=True)
         inner = None if a.no_decrypt else framing.describe_inner(data)
+        if (inner is None and _KELCRYPT and not a.no_decrypt and len(data) >= 40
+                and data[1] == 4):
+            # 2026-10-03: a table LEADER's IV is [0, X, 0, 0]; learn an X we
+            # have not seen from the client's own P2P datagrams
+            _lx = doc_kelcrypt.learn_leader_iv(data, now)
+            if _lx is None and sess is not None:
+                # 2026-10-05: not an IV-only leader -- learn its KEY. The id
+                # the header must carry: a 64-byte pose's body +0 (the charid
+                # of a 0x83, the NPC id of a type 3), else the session's own.
+                _lk_hint = (struct.unpack_from("<I", data, framing.BODY_OFF)[0]
+                            if len(data) == framing.BODY_OFF + 40
+                            else (sess.seen_charid[0] or sess.wire_cid[0]))
+                if _lk_hint:
+                    leader_key_search(data, _lk_hint, src)
+            if _lx is not None:
+                print("  [kelcrypt] LEARNED a leader IV X=0x%08x from %s:%d -- "
+                      "its mode-4 headers decrypt from here (%d known)"
+                      % (_lx, src[0], src[1], len(doc_kelcrypt.LEADER_IVS)),
+                      flush=True)
+                inner = framing.describe_inner(data)
         if inner is not None:
             print("  INNER (decrypted) type=0x%02x flags=0x%02x SEQ=%d ack-seq=%d%s%s"
                   % (inner["type"], inner["flags"], inner["seq"], inner["ack_seq"],
@@ -3725,6 +5051,22 @@ def main():
                   % inner["u32_16"], flush=True)
         _itype = (inner["type"] if inner is not None
                   else (data[8] if len(data) > 8 else -1))
+        if _itype == 0x83 and seen_charid[0]:
+            _last_pose_rx[seen_charid[0]] = time.time()
+        # 2026-10-05: a mission NPC's POSE from the console simulating it
+        # (inner type 3, the NPC id at +16 and in the body) -- relayed to the
+        # room's other members under --mission-shared-npcs, never parsed as a
+        # game-server request (it was "GS request 256/257", the id's low half)
+        _npc_pid = p2pbattle.npc_pose(data, inner)
+        if _npc_pid is not None:
+            if a.mission_shared_npcs == "on":
+                try:
+                    relay_npc_pose(sess, data, inner, _npc_pid)
+                except Exception:
+                    import traceback
+                    print("  [missions] NPC pose relay FAILED:\n%s"
+                          % traceback.format_exc(), flush=True)
+            continue
         # sec 4gz: THE CLIENT MAY HAVE MOVED PORT. Before a single field is
         # touched, fold in the session this charid was last playing on (its
         # router re-bound the mapping while the lobby socket idled). Done here,
@@ -3770,7 +5112,10 @@ def main():
                 data, inner, seen_charid[0],
                 _rm4.members if _rm4 is not None else ())
             if _p2pk is not None:
-                inner = p2pbattle.synth_p2p_inner(data, _p2pk, seen_charid[0])
+                _shooter = seen_charid[0]
+                if _p2pk == p2pbattle.P2P_SHOT:
+                    _shooter = shot_owner(seen_charid[0], data, _rm4)
+                inner = p2pbattle.synth_p2p_inner(data, _p2pk, _shooter)
         _srvk = None if _p2pk is not None else p2pbattle.p2p_server_type(data, inner)
         _srvb = bytes(inner["plain"][framing.BODY_OFF:]) if _srvk is not None else None
         if _p2pk is None and _srvk is None:
@@ -3805,6 +5150,24 @@ def main():
                 and (_gs_mode4 or (_itype == gamemsg.GS_INNER_TYPE and inner is not None
                                    and inner["is_data"]))):
             _gmt, _gbody = gamemsg.gs_request_type(data, inner)
+            if _gmt is not None and seen_charid[0]:
+                _last_gs_req[seen_charid[0]] = time.time()
+                if _gmt == 24:
+                    _last_gs24[seen_charid[0]] = time.time()
+                    # 2026-10-05: the 1 Hz report carries the player's own
+                    # position in the clear (body+24 id, +28 x/y/z floats);
+                    # a console whose 0x83 stream we cannot read had no
+                    # arena pose at all (base occupation, near-the-player
+                    # replacements and Reraise all read _battle_pose)
+                    if _gbody is not None and len(_gbody) >= 40:
+                        _rid = struct.unpack_from("<I", _gbody, 24)[0] & 0x3FFFFFFF
+                        _rxyz = struct.unpack_from("<3f", _gbody, 28)
+                        _bp0 = _battle_pose.get(seen_charid[0])
+                        if (_rid == seen_charid[0] & 0x3FFFFFFF
+                                and all(math.isfinite(v) and abs(v) < 100000.0
+                                        for v in _rxyz)
+                                and (_bp0 is None or time.time() - _bp0[3] > 2.0)):
+                            _battle_pose[seen_charid[0]] = _rxyz + (time.time(),)
             # 2026-09-24: in a TEAM BASE battle the controller reports base HP
             # in request 24 (proto builder 0x00bc06d0: up to 4 x {u32 HP, u16
             # index, u16 0, u32 attacker mask}, count at body+61 -- retail
@@ -3848,13 +5211,22 @@ def main():
             # 2026-09-23: a mission's enemy HP rides the 1 Hz report in the
             # clear even when the header is not readable (mission_npc_report).
             _npcs = gamemsg.mission_npc_report(data)
+            # 2026-10-05: a room's shared enemies are simulated by ONE console;
+            # another member's report lists its own idle copy (HP 100) and
+            # would undo the controller's damage (live: 100 -> 60 -> 100).
+            _mn24 = _mnpc.get(sess)
+            if _npcs and _mn24 is not None and _mn24.get("csess", sess) is not sess:
+                _npcs = []
             if _npcs:
-                if _mnpc.get(sess) is not None:
-                    _mnpc[sess]["seen"] = {_n for _n, _hp in _npcs}
+                if _mn24 is not None:
+                    _mn24["seen"] = {_n for _n, _hp in _npcs}
                 _rmn = battle_of(seen_charid[0])
                 if _rmn is not None and _rmn.mission is not None:
                     _me24 = seen_charid[0] or (_rmn.members[0] if _rmn.members else 0)
-                    _died = _rmn.npc_hp_update(_npcs, _me24, time.time())
+                    _died = _rmn.npc_hp_update(
+                        _npcs, _me24, time.time(),
+                        credit=(_mn24 or {}).get("last_hit"),
+                        types=(_mn24 or {}).get("types"))
                     if _died:
                         print("  [missions] enemy down (1 Hz report): %s -> %d "
                               "enemy kill(s) for 0x%x%s"
@@ -3862,6 +5234,18 @@ def main():
                                  _me24, "; " + _rmn.why if _rmn.over else ""),
                               flush=True)
                         _mn = _mnpc.get(sess)
+                        # 2026-10-05: each death rolls the enemy's own drop
+                        # where this report last placed it
+                        _dpos = gamemsg.mission_npc_positions(data)
+                        for _d in _died:
+                            enemy_drop(_rmn, _mn, _d, _dpos.get(_d))
+                        if _mn is not None:
+                            _mn.setdefault("dead", set()).update(_died)
+                            # 2026-10-05: release each dead enemy on the clients
+                            # (kind 22) when its body has lain MISSION_EXTINCT_S
+                            for _d in _died:
+                                _mn.setdefault("extinct", []).append(
+                                    (time.time() + MISSION_EXTINCT_S, _d))
                         if _mn is not None and not _rmn.over:
                             for _d in _died:
                                 _mn["due"].append((time.time() + 5.0,
@@ -3870,6 +5254,14 @@ def main():
                             end_battle(_rmn, time.time())
             _gs_was_up = sess.gs_src[0] is not None
             sess.gs_src[0] = src     # sec 4ft: its channel is up -- pushable
+            # 2026-10-01, manual p.30: "you get various consumables on
+            # entering the briefing room". The channel coming up after Start
+            # (38 cleared gs_src) is that arrival. The grant at request 47
+            # stays as the backstop; supply_grant only tops up what is missing.
+            if (not _gs_was_up and seen_charid[0] and not sess.gs_battle_on[0]):
+                _bk = bt_store.table_of(seen_charid[0])
+                if _bk is not None and (gs_tables.get(_bk) or {}).get("started"):
+                    issue_supplies(sess, src)
             # 2026-09-23: a member whose channel comes up AFTER the others
             # picked their teams never heard about them (sync ran only on
             # someone's 31). Catch it up now.
@@ -3958,7 +5350,11 @@ def main():
                              if _kr else "dropped"), flush=True)
                 else:
                     _was_over30 = _room30.over
-                    _kf = _room30.kill(_kr[0], _kr[1], time.time(), dedupe_s=_kdd)
+                    # 2026-10-05: an enemy's TYPE, so "defeat N X" counts only X
+                    # whichever of request 30 / the 1 Hz report lands first
+                    _mn30 = _room_mnpc.get(_room30.key) or _mnpc.get(sess) or {}
+                    _kf = _room30.kill(_kr[0], _kr[1], time.time(), dedupe_s=_kdd,
+                                       npc_type=_mn30.get("types", {}).get(_kr[1]))
                     if _kf is None:
                         print("  GS request 30 (KILL REPORT) 0x%x killed 0x%x -- "
                               "duplicate / not a member, ignored" % _kr,
@@ -3971,6 +5367,20 @@ def main():
                             end_battle(_room30, time.time())
                     else:
                         push_kill_event(_room30, _kf)
+                        # 2026-10-06: a KO'd capsule carrier drops its capsules
+                        # where it fell -- the server's job (fielditems)
+                        if (fielditems.capsule_count(_room30) > 0
+                                and _room30.holders.get(_kr[1], 0) > 0):
+                            _vp30 = _battle_pose.get(_kr[1])
+                            _cm, _cn = fielditems.capsule_ko_drop(
+                                _room30, _kr[1], _vp30[:3] if _vp30 else None)
+                            if _cn:
+                                _capsule_after(_room30, _kr[1], _cm, _cn)
+                            else:
+                                print("  [capsule] 0x%x KO'd holding %d capsule(s) "
+                                      "but no pose is known -- not dropped"
+                                      % (_kr[1], _room30.holders.get(_kr[1], 0)),
+                                      flush=True)
                         if (a.respawn_kind and not _room30.over
                                 and _kr[1] in _room30.dead_until):
                             push_down(_room30, _kr[1])
@@ -4094,14 +5504,88 @@ def main():
                     print("  [magic] Cure/Bind: the heal rides the caster's "
                           "113 (relayed); each target applies it to its own "
                           "HP", flush=True)
+            elif _gmt == gamemsg.GS_STATUS_REQ and a.status_echo:
+                # 2026-10-01 (retail, re-battle/revive_emu.py): request 46 =
+                # {u16 46, u16 session, u32 seconds, u32 NEW STATUS WORD},
+                # fire and forget. Our 47 had no handler on the retail build,
+                # so nothing ever came of it: Limit Break (bit 0x20) only
+                # STARTS when the server echoes the status as notify kind 43
+                # (arm 0x00bcc790, ident = the character), and Reraise (bit
+                # 0x08, a Phoenix Down) shows only through the same push. A
+                # table that bans Limit Break (wire+116 bit 0x04) gets the
+                # bit back stripped, so it never starts.
+                _gs_answered = True
+                _scid = seen_charid[0] or 0
+                _sroom = battle_of(_scid) if _scid else None
+                _sval = (_garg or 0) & 0xFFFFFFFF
+                if (_sroom is not None and _sroom.rules.flags
+                        & tablerecords.BT_FLAG_HAS_RESTRICT
+                        and _sroom.rules.restrictions & gamemsg.RESTRICT_LIMIT_BREAK
+                        and _sval & gamemsg.STATUS_LIMIT_BREAK):
+                    _sval &= ~gamemsg.STATUS_LIMIT_BREAK & 0xFFFFFFFF
+                    print("  [status] 0x%08x: Limit Break is banned at table %d "
+                          "-- echoed without it" % (_scid, _sroom.key), flush=True)
+                # 2026-10-05: the same for a Bomb Fragment (lit = status 0x40,
+                # the table's "Bomb Fragments banned" rule = wire+116 bit 0x10)
+                if (_sroom is not None and _sroom.rules.flags
+                        & tablerecords.BT_FLAG_HAS_RESTRICT
+                        and _sroom.rules.restrictions & gamemsg.RESTRICT_BOMB
+                        and _sval & gamemsg.STATUS_BOMB):
+                    _sval &= ~gamemsg.STATUS_BOMB & 0xFFFFFFFF
+                    print("  [status] 0x%08x: Bomb Fragments are banned at table %d "
+                          "-- echoed without the lit bomb" % (_scid, _sroom.key), flush=True)
+                _status[_scid] = _sval
+                _sto = ([m for m in _sroom.present()] if _sroom is not None
+                        else [_scid])
+                for _sm in _sto:
+                    _sms, _sdst = member_dst(_sm) if _sroom is not None else (sess, src)
+                    if _sdst is None:
+                        continue
+                    s.sendto(gamemsg.build_gs_notify(
+                        gamemsg.GS_KIND_STATUS, struct.pack("<I", _sval),
+                        seq=next_gs_seq(_sms), ident=_scid), _sdst)
+                print("  GS request 46 (STATUS) from 0x%08x: 0x%08x -> SENT "
+                      "notify kind 43 to %d member(s)%s"
+                      % (_scid, _sval, len(_sto),
+                         " [Limit Break ON]" if _sval & gamemsg.STATUS_LIMIT_BREAK
+                         else ""), flush=True)
             elif _gmt in gamemsg.GS_REQ_ANSWERS:
                 _gans = gamemsg.GS_REQ_ANSWERS[_gmt]
+                _g32 = b""
+                if (_gmt == 31 and a.team_full_refuse and seen_charid[0]
+                        and (_garg or 0) & 0xFF < gamemsg.GS_TEAM_NONE):
+                    # 2026-10-01, manual p.30: "a team that is already full
+                    # cannot be joined". Answer 32's u32 body[4..7] < 0 is
+                    # the refusal (stub 0x00bc9538 -> facade +0x23c ->
+                    # CER-44301 "This team cannot accept any more members.",
+                    # MEASURED on the retail build, re-visibility); the
+                    # client has no cap of its own. A side holds half the
+                    # table's limit, rounded up; a mission is co-op.
+                    _fk = bt_store.table_of(seen_charid[0])
+                    _frec = bt_store.record(_fk) if _fk is not None else None
+                    if (_frec is not None and not struct.unpack_from(
+                            "<I", _frec, tablerecords.BT_OFF_FLAGS)[0]
+                            & tablerecords.BT_FLAG_MISSION):
+                        _ft = (_garg or 0) & 0xFF
+                        _fmax = _frec[tablerecords.BT_OFF_MAX] or len(
+                            bt_store.members(_fk))
+                        _fon = [m for m, t in gs_table_state(_fk)["teams"].items()
+                                if t == _ft and m != seen_charid[0]]
+                        if _fmax and len(_fon) >= (_fmax + 1) // 2:
+                            _g32 = struct.pack("<i", -gamemsg.CER_TEAM_FULL)
+                            print("  [roster] 0x%08x: team %d at table %d is FULL "
+                                  "(%d of %d) -- 32 refuses with CER-%d"
+                                  % (seen_charid[0], _ft, _fk, len(_fon),
+                                     (_fmax + 1) // 2, gamemsg.CER_TEAM_FULL),
+                                  flush=True)
+                            _garg = gamemsg.GS_TEAM_NONE    # = on no team
                 if _gans == 57:
                     _gp = gamemsg.build_gs_team_list(
                         [(0, 0, seen_charid[0])], seq=next_gs_seq(sess),
                         ident=seen_charid[0])
                 else:
                     _gp = gamemsg.build_gs_message(_gans, seq=next_gs_seq(sess),
+                                           body_extra=_g32,
                                            ident=seen_charid[0])
                 s.sendto(_gp, src)
                 _gs_answered = True
@@ -4213,7 +5697,23 @@ def main():
                         import traceback  # docudp down for BOTH clients
                         print("  [roster] gs_sync_table FAILED:\n%s"
                               % traceback.format_exc(), flush=True)
-                if _gmt == 31 and a.gs_battle_after_join > 0:
+                # 2026-10-05 (live 01:38, the deploy restart): consoles in a
+                # briefing room RETRANSMIT an unanswered 31 from before the
+                # restart (seq behind their poses); the new server had no
+                # such table, armed this timer and its kind 2 FROZE them
+                # (handler 0x00bca5c8 -> 0x00be4180; only kind 5 or selector
+                # 39 thaws). Every game-server request echoes the table key
+                # selector 38 gave it (body+2, [chan+220]): a key this server
+                # does not seat the player at is a table it forgot -- no timer.
+                _sk31 = (struct.unpack_from("<H", _gbody, 2)[0]
+                         if _gbody is not None and len(_gbody) >= 4 else 0)
+                _stale31 = _gmt == 31 and forgotten_table(_sk31, seen_charid[0])
+                if _stale31 and a.gs_battle_after_join > 0:
+                    print("  [gs] request 31 from 0x%08x echoes table %d, which "
+                          "this server does not seat it at (a table from before "
+                          "a restart?) -- battle start NOT armed"
+                          % (seen_charid[0] or 0, _sk31), flush=True)
+                if _gmt == 31 and a.gs_battle_after_join > 0 and not _stale31:
                     gs_join_src[0] = src
                     if not gs_join_deadline[0]:
                         # sec 4fn: arm ONCE per 38 -- the repeated 31s used to
@@ -4248,6 +5748,15 @@ def main():
                     # copies get their 48 (above) and nothing else.
                     print("  [battle] request 47 again -- 48 only, this battle "
                           "already started (sec 4fy)", flush=True)
+                elif (_gmt == gamemsg.GS_LEAVE_BRIEFING and a.gs_battle_start
+                      and forgotten_table(_sk31, seen_charid[0])):
+                    # 2026-10-05: a 47 for a table this server forgot (the
+                    # briefing loop also sends one on its way back to the
+                    # lobby) gets its 48 only -- a start burst would freeze
+                    # the player in the lobby
+                    print("  [battle] request 47 from 0x%08x echoes table %d, "
+                          "which this server does not seat it at -- 48 only"
+                          % (seen_charid[0] or 0, _sk31), flush=True)
                 elif _gmt == gamemsg.GS_LEAVE_BRIEFING and a.gs_battle_start:
                     sess.gs_battle_on[0] = time.time()
                     issue_supplies(sess, src)
@@ -4318,11 +5827,24 @@ def main():
                                                        seen_charid[0])
                     if _bnote:
                         print("  [arena] " + _bnote, flush=True)
+                    if seen_charid[0]:
+                        # 2026-10-03 (live, 04:26): the respawn (kind 25)
+                        # repeats THIS spawn and its pieces. Only the post-join
+                        # timer stored it, and that timer now skips a battle
+                        # already started -- so a death on Train Graveyard
+                        # respawned at the player's previous battle's Church
+                        # point with Church's pieces: sky only.
+                        _spawn_of[seen_charid[0]] = (
+                            _bpos, arenamaps.spawn_bmap(
+                                _bzone, _bpos, arenamaps.battle_bmap(
+                                    _bzone, _zone_pieces, _gs_bmap)))
+                        _spawn_zone[seen_charid[0]] = _bzone
                     for _k, _np in briefingroom.gs_battle_sequence(
                             a.gs_battle_start, spawn=_bpos,
                             seq_fn=lambda: next_gs_seq(sess), ident=seen_charid[0],
                             zone=_bzone,
-                            bmap=arenamaps.battle_bmap(_bzone, _zone_pieces, _gs_bmap)):
+                            bmap=arenamaps.spawn_bmap(_bzone, _bpos, arenamaps.battle_bmap(
+                                _bzone, _zone_pieces, _gs_bmap))):
                         s.sendto(_np, src)
                         time.sleep(0.05)
                         print("  SENT notify kind %d (%s) -- message %d, %d "
@@ -4678,6 +6200,9 @@ def main():
             # does NOT set [kelsvc+1092] bit 4 for a phantom reservation.
             _bt_phantom_join = False
             _bt_join_result = -1
+            if (a.battletable_verbs and _req_sel == tableverbs.BT_REQ_CANCEL
+                    and _ident):
+                unqueue(_ident, "cancelled")
             if a.battletable_verbs and _req_sel in tableverbs.BT_JOIN_REQS and _bt_body:
                 # sec 4dz: the JOIN rung names the table at body[12..13]; seat
                 # the character before the endpoint answer below goes out.
@@ -4708,6 +6233,15 @@ def main():
                             _jt["members"], _unit_of_cid,
                             _ident or seen_charid[0] or 0)[1]), flush=True)
                     _jres = -6
+                elif (_jt is not None and (_ident or 0) not in _jt["members"]
+                        and _briefing_running(_jkey)):
+                    # 2026-09-29 (Dirge report, a 3rd player joined a 2P
+                    # match): Start fans the 38 out only to the members seated
+                    # THEN, so a seat taken during the briefing never left the
+                    # lobby, yet the room counted it. In Progress from Start.
+                    print("  [battletable] JOIN table %d refused: its briefing "
+                          "is running" % _jkey, flush=True)
+                    _jres = -4
                 else:
                     _jres, _jkey = bt_store.reserve(
                         _jkey, _ident or 0, _jpw,
@@ -4748,12 +6282,30 @@ def main():
                           "on the fly (sec 4ee)" % _jkey, flush=True)
                 if _jres == 0 and _jkey:
                     _bt_echo_key = _jkey  # sec 4fl: echo 152 after the 21
+                    _jrec = bt_store.record(_jkey)
+                    if (a.bt_fill_start >= 0 and _jrec is not None
+                            and not (struct.unpack_from(
+                                "<I", _jrec, tablerecords.BT_OFF_FLAGS)[0]
+                                     & tablerecords.BT_FLAG_MISSION)
+                            and len([m for m in bt_store.members(_jkey) if m])
+                            >= min(_jrec[tablerecords.BT_OFF_MAX]
+                                   or tableverbs.BT_MAX_MEMBERS,
+                                   tableverbs.BT_MAX_MEMBERS)
+                            and not _briefing_running(_jkey)):
+                        _fill_start[_jkey] = time.time() + a.bt_fill_start
+                        print("  [fill-start] table %d FILLED by this join -- "
+                              "briefing in %.1f s" % (_jkey, a.bt_fill_start),
+                              flush=True)
                 elif _jres < 0:
                     # sec 4he: a REFUSED join (password / full / in progress)
                     # used to get the generic success 21, so the client sat
                     # "reserved" at a table the store never seated it at.
                     _bt_phantom_join = True
                     _bt_join_result = _jres
+                if _jres == -4:
+                    queue_join(_jkey, _ident or 0)
+                elif _jres == 0 and _ident:
+                    unqueue(_ident, "seated at table %d" % _jkey)
                 print("  [battletable] JOIN table %d by 0x%08x -> %d (%s)"
                       % (_jkey, _ident or 0, _jres,
                          {0: "seated", -1: "no such table", -2: "wrong password",
@@ -4780,10 +6332,19 @@ def main():
                     ptype=a.world_type, ident=_ident)
                 s.sendto(bl, src)
                 print("  SENT type-%d BATTLETABLE LIST (selector %d -> %d) "
-                      "%d table(s), stride %d -- the arm needs [kelsvc+12] == 15,"
+                      "%d table(s) [%s], stride %d -- the arm needs [kelsvc+12] == 15,"
                       " which phase 34's own request parks it in"
                       % (a.world_type, tablerecords.BATTLETABLE_LIST_REQ,
-                         tablerecords.BATTLETABLE_LIST_ANS, len(bt_tables), tablerecords.BT_REC_LEN),
+                         tablerecords.BATTLETABLE_LIST_ANS, len(bt_tables),
+                         # 2026-10-05: what each row SAYS (id cur/max map), so
+                         # a count that does not move on screen can be told
+                         # apart from one we never changed
+                         ", ".join("#%d %d/%d map %d" % (
+                             struct.unpack_from("<H", _r, tablerecords.BT_OFF_ID)[0],
+                             struct.unpack_from("<H", _r, tablerecords.BT_OFF_CUR)[0],
+                             _r[tablerecords.BT_OFF_MAX], _r[tablerecords.BT_OFF_MAP])
+                             for _r in bt_tables[:6]),
+                         tablerecords.BT_REC_LEN),
                       flush=True)
                 _served_list = True
             elif (a.battletable_verbs and _req_sel in tableverbs.BT_VERB_REQS
@@ -4812,6 +6373,41 @@ def main():
                           % (a.world_type, worldchannel.selector_name(_req_sel), _req_sel,
                              _req_sel + 1, _vnote, len(bt_store.tables),
                              len(bt_store.reservation)), flush=True)
+                    # 2026-10-01 (manual p.27/29/37): a battletable INVITATION
+                    # reaches the invitee as selector 129 (tableverbs
+                    # build_invite_push). Request 127 names no table: the
+                    # inviter's own reservation is the table.
+                    if _req_sel == tableverbs.BT_REQ_INVITE and len(_bt_body) >= 16:
+                        _inv = _ident or seen_charid[0] or 0
+                        _itgt = struct.unpack_from("<I", _bt_body, 12)[0]
+                        _online = {_ss.seen_charid[0] for _ss in list(sessions.values())
+                                   if _ss.seen_charid[0]
+                                   and not peer_idle(_ss, time.time())}
+                        _ik, _ito = tableverbs.invite_targets(bt_store, _inv, _itgt,
+                                                              _online)
+                        if _ik is None:
+                            print("  [invite] 0x%08x holds no reservation -- "
+                                  "nothing to invite to" % _inv, flush=True)
+                        elif _itgt == tableverbs.INVITE_ALL:
+                            print("  [invite] 0x%08x: invite-ALL to a group (body "
+                                  "[16..23] = %s) -- group membership is the POL "
+                                  "friend service's, not resolved here"
+                                  % (_inv, bytes(_bt_body[16:24]).hex()), flush=True)
+                        for _it in _ito:
+                            _is = session_of(_it)
+                            _ipw = (bt_store.tables.get(_ik) or {}).get("password", b"")
+                            if send_push(_is, tableverbs.build_invite_push(
+                                    _ik, _ipw, subchannel=(a.world_subchannel
+                                                           if a.world_subchannel >= 0
+                                                           else 7)),
+                                         _inv, "129 INVITATION to table %d for 0x%08x"
+                                         % (_ik, _it)):
+                                print("  [invite] 0x%08x invited 0x%08x to table %d"
+                                      % (_inv, _it, _ik), flush=True)
+                        if _ik is not None and not _ito and _itgt != tableverbs.INVITE_ALL:
+                            print("  [invite] 0x%08x -> 0x%08x: not online, or "
+                                  "already seated at table %d -- no push"
+                                  % (_inv, _itgt, _ik), flush=True)
                     # sec 4fl: the leader never sends 151 for their own table;
                     # echo the reservation AFTER the 25 (0x00bcb638 clears it
                     # on the way in) so R+2970/R+684 bit 4 hold the new key.
@@ -4898,6 +6494,15 @@ def main():
                          if _cwant and (_cwant & 0x3FFFFFFF) != (_cself & 0x3FFFFFFF)
                          else _wallet_key(seen_uid[0], _cself))
                 _cc = _stats.peek(_ckey) if _ckey else doc_stats.new_career()
+                # 2026-10-01, manual p.36: an Anonymous player's record is
+                # not shown to others. No client code hides it on its own
+                # (re-visibility), so another player's request gets an empty
+                # career; your own is always served.
+                if (_cwant and (_cwant & 0x3FFFFFFF) != (_cself & 0x3FFFFFFF)
+                        and _stats.is_private(_ckey)):
+                    _cc = doc_stats.new_career()
+                    print("  [stats] 0x%08x is Anonymous -- its career is not "
+                          "shown to 0x%08x" % (_cwant, _cself or 0), flush=True)
                 s.sendto(worldchannel.seal_world_body(
                     data, doc_stats.career_body(
                         _cc, subchannel=(a.world_subchannel
@@ -5115,6 +6720,15 @@ def main():
                             _lk = player_look.get(_uid)
                     if _lk is not None:
                         _f["f36"] = _lk & 0xFFFF
+                    if _uid in players:          # real players only, not sweep ids
+                        _f.update(peer_addr(_uid, src[0], seen_charid[0] or _ids[0]))
+                    # 2026-10-05 (live): the list left rank unset, so it shipped
+                    # 0 = "DGD-3" for a DGD-2; the career rank, as the peer
+                    # records carry it (--user-rank still wins when set)
+                    if "rank" not in _f and _uid in (_ids[0], seen_charid[0]) + tuple(players):
+                        _rk = rank_of_cid(_uid)
+                        if _rk is not None:
+                            _f["rank"] = _rk
                     return _f
                 _ul_recs = [peerrecords.build_peer_record(
                     _uid, name=(players.get(_uid, {}).get("name")
@@ -5184,12 +6798,14 @@ def main():
                             ptype=a.world_type, ident=_ident,
                             blob=peerrecords.build_peer_record(
                                 _pid, name=_pnm,
-                                zone=a.user_zone, rank=a.user_rank,
+                                zone=a.user_zone, rank=rank_of_cid(_pid),
                                 flags=peer_flags(_pid),
                                 # sec 4fu (look): another player's look, so
                                 # a zero record cannot win the peer table
                                 f36=(player_look.get(_pid)
-                                     if _pid != _self else None))[4:])
+                                     if _pid != _self else None),
+                                **(peer_addr(_pid, src[0], _self)
+                                   if _pid in players else {}))[4:])
                             # sec 4et (2026-09-11): [4:] DROPS the redundant
                             # leading id. build_peer_answer re-embeds `blob` at
                             # record+4 (it prepends ent_id itself), so passing a
@@ -5221,9 +6837,11 @@ def main():
                                        ptype=a.world_type, ident=_ident,
                                        blob=(peerrecords.build_peer_record(
                                            _miss, name=_rn, zone=a.user_zone,
-                                           rank=a.user_rank,
+                                           rank=rank_of_cid(_miss),
                                            flags=peer_flags(_miss),
-                                           f36=player_look.get(_miss))[4:]
+                                           f36=player_look.get(_miss),
+                                           **peer_addr(_miss, src[0],
+                                                       seen_charid[0]))[4:]
                                              if _rn else None))
                 s.sendto(pr, src)
                 print("  SENT type-%d PEER answer (selector %d -> %d) for entity "
@@ -5279,6 +6897,30 @@ def main():
                     # (the Cactuar Beginner's Machine). Answer with the 241 whose
                     # sub-33 arm clears the local mark (doc_novice_proof C), then
                     # record it and tell every client (selector 134 sub 11).
+                    if (_cmd in (lobbycmd.LOBBY_CMD_ANONYMOUS,
+                                 lobbycmd.LOBBY_CMD_PUBLIC) and _stats is not None):
+                        # 2026-10-01: Status -> Public / Anonymous. Keep it, and
+                        # tell every client (selector 134 sub 0 sets peer flag
+                        # 0x04, sub 1 clears it; the sender's own copy too).
+                        _vcid = _ident or seen_charid[0] or 0
+                        _vkey = _wallet_key(seen_uid[0], _vcid)
+                        _vpriv = _stats.set_private(
+                            _vkey, _cmd == lobbycmd.LOBBY_CMD_ANONYMOUS, rid=_vcid)
+                        _vn = 0
+                        for _vs in list(sessions.values()):
+                            if not _vs.seen_charid[0] or peer_idle(_vs, time.time()):
+                                continue
+                            if send_push(_vs, doc_novice.push_body(
+                                    0 if _vpriv else 1, 0,
+                                    (a.world_subchannel if a.world_subchannel >= 0
+                                     else 7)), _vcid,
+                                    "sub %d (record %s for 0x%08x)"
+                                    % (0 if _vpriv else 1,
+                                       "Anonymous" if _vpriv else "Public", _vcid)):
+                                _vn += 1
+                        print("  [stats] [%s] record set %s (command %d), told %d "
+                              "client(s)" % (_vkey, "ANONYMOUS" if _vpriv else
+                                             "PUBLIC", _cmd, _vn), flush=True)
                     if _cmd == doc_novice.CMD_GRADUATE and _novice is not None:
                         _gcid = (_ident or seen_charid[0] or 0)
                         s.sendto(worldchannel.seal_world_body(data, doc_npc.answer_body(
@@ -5410,6 +7052,8 @@ def main():
                                                      ptype=a.world_type,
                                                      ident=_ident), src)
                             _served_list = True
+                            # the relayed peer records carry the new look now
+                            _gear_look[_gcid] = (_gearstore.get(_gk) or {}).get("costume")
                         print("  %s type-%d GEAR selector %d -> %d: %s"
                               % ("SENT" if _gb is not None else "NOT SENT (generic "
                                  "answer instead)", a.world_type,
@@ -5556,11 +7200,17 @@ def main():
                         _self_cost = int(_sct, 0) & 0xFFFF
                 except (OSError, ValueError):
                     pass
+            # 2026-10-05: every per-character store keys on THIS id. Each
+            # lookup below used to re-check the request length and drop it to 0
+            # for a SHORT world-door request (a re-entry after a battle) --
+            # undoing the session fallback: live, Ruuko's world door served
+            # the bare account's wallet and career (rank 1, 0 RP, no medals),
+            # and every result then "awarded" the career's old medals again.
+            _wd_cid = _world_door_charid(data, sess) if _sel == 2 else 0
             if (_self_cost is None and a.self_costume_auto and _store is not None
                     and _sel == 2 and seen_uid[0]
                     and len(data) >= framing.BODY_OFF + 84):
-                _sel_cid = struct.unpack_from(
-                    "<I", data, framing.BODY_OFF + 80)[0] & 0x3FFFFFFF
+                _sel_cid = _wd_cid & 0x3FFFFFFF
                 _sl_roster = _store.roster(_skey(seen_uid[0]))
                 for _si in range(doc_charastore.MAX_SLOTS):
                     if sess.chara_ids.get(_si) == _sel_cid and _sl_roster[_si]:
@@ -5583,7 +7233,7 @@ def main():
             _self_name = None
             if (a.self_name and _store is not None and _sel == 2 and seen_uid[0]
                     and len(data) >= framing.BODY_OFF + 84):
-                _nc = struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0] & 0x3FFFFFFF
+                _nc = _wd_cid & 0x3FFFFFFF
                 _nr = _store.roster(_skey(seen_uid[0]))
                 for _si in range(doc_charastore.MAX_SLOTS):
                     if sess.chara_ids.get(_si) == _nc and _nr[_si]:
@@ -5600,7 +7250,7 @@ def main():
             # Management was keyed as the bare account ("member:15"), saw 0
             # units, and every Create was refused as "already a unit".
             if _sel == 2 and len(data) >= framing.BODY_OFF + 84:
-                _wdc = struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0] & 0x3FFFFFFF
+                _wdc = _wd_cid & 0x3FFFFFFF
                 if _wdc and not seen_charid[0]:
                     seen_charid[0] = _wdc
                     print("  [charid] 0x%08x from the world-door request "
@@ -5608,7 +7258,7 @@ def main():
             _world_self_id = None
             if (a.world_self_charaid and _sel == 2
                     and len(data) >= framing.BODY_OFF + 84):
-                _wsi = struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0] & 0x3FFFFFFF
+                _wsi = _wd_cid & 0x3FFFFFFF
                 if _wsi:
                     _world_self_id = _wsi
                     print("  [world-self-charaid] selector 2: self-record id <- "
@@ -5620,8 +7270,7 @@ def main():
             # later request carries at record+4, which keys its 145s.
             _shop_gil = _shop_bag = None
             if _shop is not None and _sel == 2:
-                _lc = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
-                       if len(data) >= framing.BODY_OFF + 84 else 0)
+                _lc = (_wd_cid & 0x3FFFFFFF)
                 _lk = _wallet_key(seen_uid[0], _lc)
                 _shop_gil, _shop_bag = _shop.login_fields(_lk)
                 print("  [shop] selector 2 [%s]: gil %d at body[52], bag %d "
@@ -5647,8 +7296,7 @@ def main():
             # repacker 0x005a2598 reads it there).
             _gear_login = None
             if a.issue_gear == "standard" and _sel == 2:
-                _gc = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
-                       & 0x3FFFFFFF if len(data) >= framing.BODY_OFF + 84 else 0)
+                _gc = (_wd_cid & 0x3FFFFFFF)
                 _female, _armor = False, 0
                 if _store is not None and seen_uid[0]:
                     _gr = _store.roster(_skey(seen_uid[0]))
@@ -5688,8 +7336,7 @@ def main():
             # changed them (doc_gear.GearStore, lobby commands 17/18). The
             # starter pair stays in the bag; --self-costume(-file) still win.
             if _gearstore is not None and _sel == 2:
-                _gcl = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
-                        if len(data) >= framing.BODY_OFF + 84 else 0)
+                _gcl = (_wd_cid & 0x3FFFFFFF)
                 _glk = _wallet_key(seen_uid[0], _gcl)
                 if _gearstore.get(_glk) is not None:
                     _gm, _gsu, _gco = _gearstore.login(_glk, _gear_login, _self_cost)
@@ -5718,8 +7365,7 @@ def main():
             # world door, keyed like its shop wallet (doc_unit.py).
             _unit_login = None
             if _units is not None and _sel == 2:
-                _uc = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
-                       if len(data) >= framing.BODY_OFF + 84 else 0)
+                _uc = (_wd_cid & 0x3FFFFFFF)
                 _ulk = _wallet_key(seen_uid[0], _uc)
                 _unit_login = _units.enlisted(_ulk)
                 print("  [units] selector 2 [%s]: enlisted unit 0x%x at "
@@ -5728,8 +7374,7 @@ def main():
             # like its shop wallet -- medal mask, rank points and rank.
             _career_login = None
             if _stats is not None and _sel == 2:
-                _cc = (struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
-                       if len(data) >= framing.BODY_OFF + 84 else 0)
+                _cc = (_wd_cid & 0x3FFFFFFF)
                 _clk = _wallet_key(seen_uid[0], _cc)
                 _career_login = _stats.peek(_clk)
                 print("  [stats] selector 2 [%s]: rank %d, %d rank points, medal "
@@ -5741,7 +7386,7 @@ def main():
             _novice_login = False
             if (_novice is not None and a.novice == "on" and _sel == 2
                     and len(data) >= framing.BODY_OFF + 84):
-                _nvc = struct.unpack_from("<I", data, framing.BODY_OFF + 80)[0]
+                _nvc = _wd_cid
                 _nvk = _wallet_key(seen_uid[0], _nvc)
                 _novice_login = _novice.is_novice(_nvk)
                 print("  [novice] selector 2 [%s]: %s (body[129] bit 0x40 %s)"
@@ -5817,7 +7462,22 @@ def main():
                     # close_battle dissolves its table (live: the quit
                     # Wastelands table stayed listed, its room ran on).
                     _rr = battle_of(seen_charid[0])
-                    if (_rr is not None and not _rr.over
+                    if (_rr is not None and _rr.over and a.post_battle_briefing > 0
+                            and seen_charid[0] in _rr.members
+                            and seen_charid[0] not in _rr.left):
+                        # the post-battle briefing room's TRANSPORTER: this
+                        # player is back in the lobby (the client ran its own
+                        # reset). No penalty: the battle was over. The last
+                        # one out closes the table now.
+                        _rr.left.add(seen_charid[0])
+                        print("  [battle] 0x%08x took the transporter out of "
+                              "table %d's briefing room (%d still in it)"
+                              % (seen_charid[0], _rr.key,
+                                 len([m for m in _rr.members if m not in _rr.left])),
+                              flush=True)
+                        if all(m in _rr.left for m in _rr.members):
+                            _rr.reset_at = time.time()
+                    elif (_rr is not None and not _rr.over
                             and seen_charid[0] in _rr.arrived
                             and _rr.mission is not None
                             and len(_rr.present()) <= 1):
@@ -5946,6 +7606,26 @@ def main():
                               "last -- a retransmit, 241 only (sec 4he)"
                               % (time.time() - _ls), flush=True)
                 if _start_now:
+                    # 2026-10-01: manual p.29 -- "Start Immediately" is the
+                    # LEADER's command. The client only hides the row; a seated
+                    # member's command 3 started the table for everyone.
+                    _me3 = _ident or seen_charid[0] or 0
+                    _tk3 = bt_store.table_of(_me3) if _me3 else None
+                    if (_tk3 is not None
+                            and not bt_store.is_leader(_tk3, _me3, seen_uid[0])):
+                        _start_now = False
+                        print("  [cmd] command 3 (START) from 0x%08x, who is not "
+                              "table %d's leader -- refused, 241 only"
+                              % (_me3, _tk3), flush=True)
+                    elif _tk3 is not None and _briefing_running(_tk3):
+                        # the table FILLED and went to the briefing room by
+                        # itself (--bt-fill-start): a Start after that would
+                        # start it a second time
+                        _start_now = False
+                        print("  [cmd] command 3 (START) at table %d, whose "
+                              "briefing is already running -- 241 only"
+                              % _tk3, flush=True)
+                if _start_now:
                     print("  [cmd] command %d is START (start_onlinebattle) -- "
                           "pushing BATTLE READY (selector %d) behind the 241 "
                           "(sec 4fm)" % (lobbycmd.LOBBY_CMD_START, worldchannel.GS_READY_SELECTOR),
@@ -5982,7 +7662,7 @@ def main():
                         # back to the session's charid, as start-all does.
                         _me38 = _ident or seen_charid[0] or 0
                         _tk = bt_store.table_of(_me38)
-                        _rec38 = bt_store.record(_tk) if _tk else None
+                        _rec38 = bt_store.record(_tk) if _tk is not None else None
                         # 2026-09-13: a Start right after a Solo quest pick is
                         # that quest -> cut 38's record as a MISSION (one use).
                         _qp = _quest_pick.pop(sess.key, None) if _start_now else None
@@ -6036,8 +7716,14 @@ def main():
                         _rd = briefingroom.gs_ready_roster(
                             _rd, _me38, a.gs_connect_id,
                             bt_store.members(_tk) if _tk else (),
-                            rec=advertise.rec_for(_rec38, _gs_endpoint, src[0]))
+                            rec=advertise.rec_for(_rec38, _gs_endpoint, src[0]),
+                            addr=battle_addr(src[0]))
                     if _rd is not None:
+                        _pm_me = _ident or seen_charid[0] or 0
+                        _pm_tk = bt_store.table_of(_pm_me) if _pm_me else None
+                        if _pm_tk is not None:
+                            push_member_peers(_pm_me, src, bt_store.members(_pm_tk),
+                                              why="leader")
                         s.sendto(_rd, src)
                         # sec 4fn: a fresh briefing room -> the once-per-38 state
                         # (bot push, join timer) starts over.
@@ -6051,8 +7737,10 @@ def main():
                               "answer selector %d -- the sole writer of "
                               "[chan+2148] = 1. Watch for the client's first "
                               "type-0x82 (its game-server hello) and for "
-                              "br_main / the team prompt (sec 4dx)"
-                              % (a.world_type, worldchannel.GS_READY_SELECTOR, _sel),
+                              "br_main / the team prompt (sec 4dx); record flags "
+                              "0x%08x (0x200 = individual)"
+                              % (a.world_type, worldchannel.GS_READY_SELECTOR, _sel,
+                                 _rec_flags(_rec38) if a.gs_ready_roster else 0),
                               flush=True)
                         # sec 4eb (live 09-11): 38's routine 0x00bc0260 does
                         # `[chan+204] = 0`, which DROPS the armed bit message 27
@@ -6089,63 +7777,8 @@ def main():
                                       "at any table -- nobody to fan 38 out to"
                                       % (_lead or 0), flush=True)
                             else:
-                                gs_tables.pop(_sk, None)
-                                # 2026-09-23: the briefing countdown's end =
-                                # the record's Briefing Time, else the knob
-                                _brec = bt_store.record(_sk)
-                                _rsec = (float(_brec[tablerecords.BT_OFF_BRIEFING])
-                                         * a.gs_briefing_minute
-                                         if _brec and len(_brec) > tablerecords.BT_OFF_BRIEFING
-                                         else 0.0)
-                                # 2026-09-28: a SOLO table has nobody to wait
-                                # for, so it keeps the old start (the post-join
-                                # timer). Holding it for a 5:00 Briefing Time
-                                # read as "stuck in briefing" (Beginner's Course
-                                # I/II, live 09-28: three tries, left at ~4:20).
-                                if not _others:
-                                    _rsec = 0.0
-                                _bsec = _rsec or a.gs_auto_team_after
-                                # 2026-09-24: the client counts wire+111 minutes
-                                # down from this 38 (lobby 0x00ada55c) and
-                                # does nothing at zero -- the start is ours, at
-                                # the zero it shows. 0 = None: no countdown drawn.
-                                if _rsec and a.gs_briefing_clock:
-                                    gs_table_state(_sk)["brief_end"] = (
-                                        time.time() + _rsec + 1.0)
-                                    print("  [start-all] table %d: briefing "
-                                          "countdown %.0f s -- the battle "
-                                          "starts when it reaches 0"
-                                          % (_sk, _rsec), flush=True)
-                                if a.gs_auto_team_after >= 0:
-                                    gs_table_state(_sk)["auto_at"] = (
-                                        gs_table_state(_sk)["brief_end"]
-                                        or time.time() + _bsec + 2.0)
-                                    print("  [start-all] table %d: anyone "
-                                          "without a team is auto-teamed (and "
-                                          "a one-sided table rebalanced) in "
-                                          "%.0f s (end of the briefing)"
-                                          % (_sk, gs_table_state(_sk)["auto_at"]
-                                             - time.time()), flush=True)
-                                print("  [start-all] leader 0x%08x START at table "
-                                      "%d -> other seated: %s"
-                                      % (_lead, _sk, ["0x%x" % m for m in _others]),
-                                      flush=True)
-                                for _m in _others:
-                                    _ms = session_of(_m)
-                                    if _ms is None or _ms is sess:
-                                        print("  [start-all] seated member "
-                                              "0x%08x has no live session -- "
-                                              "it stays in the lobby" % _m,
-                                              flush=True)
-                                        continue
-                                    try:
-                                        push_battle_ready(_ms, _sk)
-                                    except Exception:
-                                        import traceback
-                                        print("  [start-all] push to 0x%08x "
-                                              "FAILED:\n%s"
-                                              % (_m, traceback.format_exc()),
-                                              flush=True)
+                                begin_briefing(_sk, _lead, _others,
+                                               skip_sess=sess)
                 if _sel in _pending_ack_after:
                     pa = worlddoor.build_world_answer(
                         data, selector=a.pending_ack_selector, seq=a.lobby_seq,
@@ -6191,8 +7824,16 @@ def main():
         # charamake: the request parks the nest at a state and the server owes the
         # paired even code.  Per the sec 4ao ladder the code gated on state 11 is
         # 18 (handler 0x00587f00).
+        # 2026-10-06 (live): ANY datagram with body[1] == 17 matched -- in a
+        # battle the enciphered game-server traffic does, 1 in 256 -- and
+        # deleted slot body[4] (member 30's only character went mid-battle,
+        # one row written, no menu open). Only the real message: 40 bytes
+        # (cli --delete-answer, sec 4ao), body 05 11, from a player who is not
+        # in a battle.
         if (a.delete_answer and sess.ka_template is not None
-                and len(data) >= framing.BODY_OFF + 2 and data[framing.BODY_OFF + 1] == 17):
+                and len(data) == 40
+                and data[framing.BODY_OFF] == 0x05 and data[framing.BODY_OFF + 1] == 17
+                and battle_of(seen_charid[0]) is None):
             dl = handshake.build_lobby_advance(sess.ka_template, selector=18, seq=a.lobby_seq,
                                      inner_ip=_lip, empty_records=True)
             if dl is not None:
@@ -6226,10 +7867,47 @@ def main():
             # character's record and the select list updates in place
             # (build_charamake_answer). Without a store: the old empty ACK.
             _new_rec = None
+            _refused = None
             if _store is not None and seen_uid[0]:
                 _c = doc_charastore.parse_register(data)
                 if _c is not None and _c.get("name"):
-                    _slot = _store.add(_skey(seen_uid[0]), _c)
+                    # 2026-10-01: SE's name rules (doc_charastore.register):
+                    # a bad or taken name is never stored, and a second
+                    # character with an existing name no longer overwrites it.
+                    _slot, _refused = _store.register(_skey(seen_uid[0]), _c)
+                    if _refused:
+                        print("  [chara] REGISTER '%s' REFUSED: CER-%d (%s)"
+                              % (_c["name"], _refused,
+                                 {doc_charastore.CER_NAME_LENGTH: "3 to 15 characters",
+                                  doc_charastore.CER_NAME_CHARS: "letters, digits, - and _",
+                                  doc_charastore.CER_NAME_TAKEN: "name already in use"}
+                                 .get(_refused, "?")), flush=True)
+                        _c = None
+                if (_c is not None and _c.get("name") and isinstance(_slot, int)
+                        and a.chara_id_source == "content"):
+                    # 2026-10-05: the new character takes one of its member's
+                    # DoC Content IDs (the client keeps a loadout only for one)
+                    _ck = _skey(seen_uid[0])
+                    try:
+                        _ids = []
+                        if isinstance(_ck, str) and _ck.startswith("member:"):
+                            _conn = docdb.accounts().connect()
+                            try:
+                                _ids = docdb.accounts().member_content_id_list(
+                                    _conn, int(_ck[7:]), doc_charastore.DOC_CONTENT_CODE,
+                                    active_only=True)
+                            finally:
+                                _conn.close()
+                        _cid = _store.assign_content_id(_ck, _slot, _ids)
+                        print("  [chara] '%s' (%s slot %d): Content ID %s"
+                              % (_c["name"], _ck, _slot,
+                                 ("%d (0x%08x)" % (_cid, _cid)) if _cid
+                                 else "none free of %r -- the derived id" % (_ids,)),
+                              flush=True)
+                    except Exception as _ex:   # never fail a REGISTER on this
+                        print("  [chara] Content ID lookup for '%s' FAILED (%s) -- "
+                              "the derived id" % (_c["name"], _ex), flush=True)
+                if _c is not None and _c.get("name"):
                     refresh_roster(seen_uid[0])
                     print("  [chara] REGISTERED '%s' (voice %d, gender %d) -> "
                           "slot %s for 0x%08x, PERSISTED" %
@@ -6238,10 +7916,19 @@ def main():
                     if isinstance(_slot, int) and 0 <= _slot < doc_charastore.MAX_SLOTS:
                         _new_rec = charrecords.build_used_record(
                             _slot, _c["name"], _c,
-                            char_id=charrecords.chara_id_for(a.chara_id_base, seen_uid[0],
-                                                 _skey(seen_uid[0]), _slot),
+                            char_id=charrecords.chara_id_of(
+                                a.chara_id_base, seen_uid[0], _skey(seen_uid[0]), _slot,
+                                _store.roster(_skey(seen_uid[0]))[_slot]),
                             chr_code=a.chara_chrcode)
-            if _new_rec is not None:
+            if _refused:
+                # 2026-10-01: SE's own refusal (charrecords.build_charamake_refusal):
+                # the client shows CER-<code> and stays on the creation screen.
+                # The burst below is identical copies with nothing between --
+                # any other mode-2 reply would rewrite [nest+20].
+                cm = charrecords.build_charamake_refusal(sess.ka_template, data,
+                                                         _refused, seq=a.lobby_seq,
+                                                         inner_ip=_lip)
+            elif _new_rec is not None:
                 cm = charrecords.build_charamake_answer(sess.ka_template, data, _new_rec,
                                             seq=a.lobby_seq, inner_ip=_lip)
             else:
@@ -6485,6 +8172,13 @@ def main():
             _online = players_connected(exclude=sess)
             print("  [server list] %d other player(s) connected -> entry+10"
                   % _online, flush=True)
+            if a.lobby_capacity > 0 and _online >= a.lobby_capacity:
+                # 2026-10-01, manual p.25: a lobby whose player count is over
+                # its limit cannot be joined. The client draws a row of 1000+
+                # as "server is full" and does not enter it.
+                print("  [server list] FULL (%d of --lobby-capacity %d) -> "
+                      "entry+10 = 1000" % (_online, a.lobby_capacity), flush=True)
+                _online = 1000
             for x in a.frag3_servers.split(","):
                 x = x.strip()
                 if not x:

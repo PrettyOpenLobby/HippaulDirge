@@ -97,6 +97,18 @@ GS_ITEM_USE_REQ = 21      # 2026-09-23: USE ITEM (item id at body+8) -> message 
 # arena state: zeros -> 100 -> 0, body+8 = 70 -> 70 (an offline run of the client's own code (doc_magic_mp_proof)).
 GS_MAGIC_REQ = 60
 GS_MAGIC_ANS = 61
+#: 2026-10-01: SE's "This team cannot accept any more members." (kelerr),
+#: the code answer 32 carries (negated) to refuse a full team
+CER_TEAM_FULL = 44301
+#: 2026-10-01 (retail build, re-battle): request 46 reports the player's new
+#: battle STATUS word; notify kind 43 is the server's echo the client acts on
+GS_STATUS_REQ = 46
+GS_KIND_STATUS = 43
+STATUS_RERAISE = 0x08          # a Phoenix Down's status 3
+STATUS_LIMIT_BREAK = 0x20      # L1+R1 / the Limit Breaker item
+RESTRICT_LIMIT_BREAK = 0x04    # battletable wire+116 "Limit Break" ban
+STATUS_BOMB = 0x40             # 2026-10-05: a lit Bomb Fragment (RequestBomb)
+RESTRICT_BOMB = 0x10           # battletable wire+116 "Bomb Fragments" ban
 GS_REQ_ANSWERS = {31: 32, 33: 34, 36: 37, 47: 48, 56: 57, 58: 59, 60: 61,
                   # sec 4he: 38 -> 39 (arm 0x00bc5174: body[4] >= 0 posts
                   # facade 0x400, ev2045's reload-and-respawn path), 45 -> 46
@@ -294,6 +306,13 @@ def mission_npc_report(data):
     if data is None or len(data) < 88 or data[1] != 4:
         return None
     n = data[87]
+    # 2026-10-05 (MEASURED, Iron Curtain): a base mission's report carries
+    # its bases (count at datagram[85]) as 12-byte entries AFTER the enemies;
+    # the length check rejected every such report, so no enemy death counted
+    nb = data[85] if 0 < data[85] <= 4 else 0
+    if nb and n and len(data) in (88 + 12 * (n + nb), 88 + 12 * (n + nb) + 8):
+        out = [struct.unpack_from("<IH", data, 88 + 12 * k) for k in range(n)]
+        return out if all(i & 0x40000000 for i, _h in out) else None
     if len(data) == 88 + 12 * n + 8:
         # 2026-09-28: some reports carry one 8-byte trailer
         # after the list ({u32 ammo item, u32 count}); they were dropped and
@@ -304,6 +323,18 @@ def mission_npc_report(data):
     if len(data) != 88 + 12 * n:
         return None
     return [struct.unpack_from("<IH", data, 88 + 12 * k) for k in range(n)]
+
+
+def mission_npc_positions(data):
+    """2026-09-24 (ported 10-05): {npc id: (x, y, z)} from the same 1 Hz
+    report (mission_npc_report's 12-byte entries, s16 x / y / z at +6), or
+    {} when the datagram is not one."""
+    rep = mission_npc_report(data)
+    if not rep:
+        return {}
+    return {struct.unpack_from("<I", data, 88 + 12 * k)[0]:
+            struct.unpack_from("<hhh", data, 88 + 12 * k + 6)
+            for k in range(len(rep))}
 
 
 #: 2026-09-28: a mission NPC's kind 27 (control -> the player) goes out this
@@ -343,7 +374,7 @@ def build_gs_team_leave(ident, seq=0):
     return build_gs_notify(1, bytes(4), seq=seq, ident=ident)
 
 
-def build_gs_add_chara(ident, team, slot=0, seq=0, self_ident=0):
+def build_gs_add_chara(ident, team, slot=0, seq=0, self_ident=0, addr=None):
     """Notify kind 31 = add chara: record at body[20]: +0 u32 id, +16 u32,
     +20 u16, +22 byte = TEAM in the HIGH nibble (15 = none -> 0xff) and the
     roster SLOT in the LOW nibble, +23 bit0 -> 0x00bc35a8.  Own id is skipped
@@ -356,6 +387,11 @@ def build_gs_add_chara(ident, team, slot=0, seq=0, self_ident=0):
     struct.pack_into("<I", rec, 0, ident & 0xFFFFFFFF)
     t = 0xF if team is None else (team & 0xF)
     rec[22] = (t << 4) | (slot & 0xF)
+    if addr is not None:
+        # 2026-10-05 (retail 0x00bdc5e8, MEASURED offline): +16 IPv4 / +20
+        # port in NETWORK order = the unit's address for an id the console
+        # has none for (and the cache kind 36 / 38 rebuild from)
+        struct.pack_into(">IH", rec, 16, addr[0] & 0xFFFFFFFF, addr[1] & 0xFFFF)
     return build_gs_notify(31, bytes(4) + bytes(rec), seq=seq, ident=self_ident)
 
 

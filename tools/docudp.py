@@ -346,6 +346,7 @@ _OWNERS = {
     'capsule_ring': 'fielditems',
     'capsule_scoreboard_payload': 'fielditems',
     'chara_id_for': 'charrecords',
+    'chara_id_of': 'charrecords',
     'cksum': 'framing',
     'datetime': 'deps',
     'describe': 'framing',

@@ -1,4 +1,7 @@
 """Maps and places: the lobby spawn descriptor and map-picker mask (selector 13), the lobby zone, and which arena zone, pieces and spawn each map uses."""
+import json
+import math
+import os
 
 WORLD_SPAWN_SELECTOR_ANS = 13  # phase 30's answer -- and it carries the SPAWN
 
@@ -72,7 +75,13 @@ LOBBY_MAP_HOLES = (11,)
 # Area (its オンラインテストマップ z200 exists only in the prototype install,
 # bzd034) and 17/18/19 Base 1-3 (no base zone ships). A table on one of them
 # played in the Jungle. Name them in --lobby-map-mask to show them again.
-LOBBY_MAP_HIDDEN = (13, 17, 18, 19)
+#
+# 2026-10-06 (after the mode / map audit): also hide the maps our
+# 20060124_3 arena data cannot stage -- 6 Training Grounds (2 BT starts, no
+# team layout), 12 Deepground 2 (z216: no situation at all), 15 Bridge (1 BT
+# start, no bases / items), 16 Shinra Manor (one start per team: everyone on
+# one spot, the fall-through-the-map table). Back when real layouts are found.
+LOBBY_MAP_HIDDEN = (6, 12, 13, 15, 16, 17, 18, 19)
 LOBBY_MAP_MASK_ALL = ((1 << len(LOBBY_MAP_NAMES)) - 1) & ~sum(
     1 << i for i in LOBBY_MAP_HOLES + LOBBY_MAP_HIDDEN)
 
@@ -249,12 +258,16 @@ ZONE_PIECES_DEFAULT = ("201:1,3;203:4,1;204:1,0;205:3,1;208:2,0;"
 # landed on an invisible catch plane in the sky piece's collision), 2 units
 # above the floor. The same picker without the visibility test reproduces the
 # live Church point exactly (738.9, -102.0, 1427.0).
+# 2026-09-29: 212 (Train Graveyard) moved off the picker's (100, -1.9, 0.1),
+# which put players INSIDE A BOX (Dirge report). The new point is the flat
+# corridor both players crossed most in a live match (captured positions,
+# 00:26-00:32Z, floor y 0), 2 units up; the seat ring (+-15) stays on it.
 ZONE_SPAWNS_DEFAULT = (
     "208:738.9,-102,1427.0;203:-1016.1,-2,911.1;204:-629.7,-8,152.7;"
     "205:-620.9,398,-300.3;"
     "202:1.2,-2.5,-1266.2;206:1.2,-1.9,1.5;207:266.7,-2.0,-497.5;"
     "209:165.8,-2.0,57.9;210:-1625.0,37.2,167.2;211:18.3,81.0,-693.1;"
-    "212:100.0,-1.9,0.1;213:-20.5,-1.9,-51.7;214:-459.1,-1.4,-861.1;"
+    "212:30.0,-2.0,-100.0;213:-20.5,-1.9,-51.7;214:-459.1,-1.4,-861.1;"
     "216:-104.7,-2.0,574.8;230:474.2,138.0,1420.8;231:-1080.0,-2.0,686.6;"
     "232:-2815.1,602.2,511.5;233:-2723.3,-2.0,-1680.1;"
     "234:-743.7,-2.0,-1138.6;235:264.5,-2.0,-490.1;236:2130.0,-2.0,-1350.0;"
@@ -286,6 +299,77 @@ def battle_bmap(zone, zone_pieces, default=(0, 0)):
     """Kind 2's (M0, M1) for arena `zone`: its --zone-pieces entry, else the
     --gs-battle-map default."""
     return tuple(zone_pieces.get(zone, default))
+
+
+#: 2026-10-06: per arena zone, per map piece, vertex counts on an x/z grid
+#: (tools/doc_extract_pieces.py; the game's own level data, not shipped)
+PIECES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "doc_map_pieces.json")
+PIECE_RADIUS = 300.0          # OURS: the ground around a spawn that must be loaded
+PIECE_MINOR = 0.02            # a second piece under 2 % of the first is noise
+_pieces = {}
+
+
+def load_pieces(path=None):
+    path = path or PIECES_PATH
+    if path not in _pieces:
+        try:
+            with open(path, encoding="utf-8") as f:
+                _pieces[path] = json.load(f)
+        except (OSError, ValueError):
+            _pieces[path] = {}
+    return _pieces[path]
+
+
+def spawn_bmap(zone, pos, fallback, data=None, radius=PIECE_RADIUS):
+    """2026-10-06: the (M0, M1) map pieces kind 2 / kind 25 must name for a
+    (re)spawn at `pos`. The client loads exactly those two of the zone's
+    mNNN pieces and streams the rest in only when the player crosses a
+    trigger, so one pair per zone left a spawn outside both on unloaded
+    ground (live: Jungle team 1 at (2590, -1240) lies only in m004; we sent
+    (1, 3)). Static RE: scratchpad re-capdrop/. The piece with the most
+    vertices within `radius` (x/z) first; the runner-up second unless it is
+    noise, then the zone's usual piece. `fallback` (battle_bmap) without
+    data for the zone."""
+    fallback = tuple(fallback)
+    if pos is None:
+        return fallback
+    data = load_pieces() if data is None else data
+    zp = (data.get("zones") or {}).get(str(zone))
+    if not zp:
+        return fallback
+    cell = float(data.get("cell", 100.0))
+    x, z = float(pos[0]), float(pos[2])
+    gx0, gz0 = int(math.floor(x / cell)), int(math.floor(z / cell))
+
+    def scores(r):
+        reach = int(math.ceil(r / cell)) + 1
+        out = {}
+        for piece, cells in zp.items():
+            n = 0
+            for dx in range(-reach, reach + 1):
+                for dz in range(-reach, reach + 1):
+                    c = cells.get("%d,%d" % (gx0 + dx, gz0 + dz))
+                    if c and math.hypot((gx0 + dx + 0.5) * cell - x,
+                                        (gz0 + dz + 0.5) * cell - z) <= r:
+                        n += c
+            if n:
+                out[int(piece)] = n
+        return out
+
+    score = scores(radius)
+    if not score:
+        return fallback
+    ranked = sorted(score, key=lambda p: (-score[p], p))
+    m0 = ranked[0]
+    if len(ranked) > 1 and score[ranked[1]] >= PIECE_MINOR * score[m0]:
+        return (m0, ranked[1])
+    # the spawn sits in one piece: load its nearest neighbour with it (Jungle
+    # team 1: m004 + the middle m003, not the far west m001)
+    wide = {p: n for p, n in scores(radius * 4).items() if p != m0}
+    if wide:
+        return (m0, max(sorted(wide), key=lambda p: wide[p]))
+    return (m0, next((p for p in fallback if p and p != m0), 0))
 
 
 # reasons battle_map_arena can refuse -- named so a test can assert on the

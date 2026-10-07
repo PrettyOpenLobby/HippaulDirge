@@ -52,7 +52,7 @@ def is_kind20(p):
             and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 20)
 
 
-def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1):
+def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1, maximum=4):
     """-> (log text, seconds after START of the first kind 20 to A, to B)."""
     log_path = os.path.join(os.environ.get("TEMP", HERE),
                             "doc_briefing_clock_e2e_%s.log" % tag)
@@ -89,7 +89,7 @@ def run(tag, extra=(), solo=False, step=True, span=11.0, b_team=1):
             return got
 
         rec = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,
-                                                   maximum=4, map_idx=0, mode=1,
+                                                   maximum=maximum, map_idx=0, mode=1,
                                                    comment="e2e"))
         rec[D.BT_OFF_BRIEFING] = 1          # Briefing Time: 1 minute
         ca.sendto(E.world_req(E.A_CID, D.BT_REQ_CREATE, bytes(rec)), dst)
@@ -139,17 +139,35 @@ def fmt(t):
 
 
 def main():
+    # 2026-10-01, manual p.30: "when every member is ready, or the time limit
+    # runs out" -- the default (--briefing-start ready)
     print("run 1: two players, opposite teams at once, 6 s briefing")
     text, ta, tb, lp = run("2p")
     check("log: the Start announced the briefing countdown",
           "briefing countdown 6 s" in text, lp)
     check("kind 20 reached both clients", ta is not None and tb is not None,
           "A %s, B %s" % (fmt(ta), fmt(tb)))
-    check("kind 20 NOT before the countdown ends (>= %.0f s)" % BRIEF_S,
-          ta is not None and ta >= BRIEF_S and tb is not None and tb >= BRIEF_S,
-          "A %s, B %s" % (fmt(ta), fmt(tb)))
-    check("kind 20 soon after it (< %.0f s)" % (BRIEF_S + 3),
+    check("everyone ready: kind 20 BEFORE the countdown ends (manual p.30)",
+          ta is not None and ta < BRIEF_S - 2 and tb is not None
+          and tb < BRIEF_S - 2, "A %s, B %s" % (fmt(ta), fmt(tb)))
+
+    # TWIN: the 09-29 rule (--briefing-start full) waits out the countdown
+    # for a table that is not full
+    print("run 1c: TWIN -- --briefing-start=full, two of four seats")
+    text, ta, tb, lp = run("2p_fullrule", extra=("--briefing-start=full",))
+    check("TWIN (full rule): kind 20 NOT before the countdown ends (>= %.0f s)"
+          % BRIEF_S, ta is not None and ta >= BRIEF_S and tb is not None
+          and tb >= BRIEF_S, "A %s, B %s" % (fmt(ta), fmt(tb)))
+    check("TWIN (full rule): kind 20 soon after it (< %.0f s)" % (BRIEF_S + 3),
           ta is not None and ta < BRIEF_S + 3, fmt(ta))
+
+    # 2026-09-29: a table FULL of ready players (2 of a 2-player
+    # limit) starts without waiting out the countdown
+    print("run 1b: two players at a FULL 2-player table")
+    text, ta, tb, lp = run("2p_full", maximum=2)
+    check("FULL table: kind 20 reached both, BEFORE the countdown ends",
+          ta is not None and tb is not None and ta < BRIEF_S - 2
+          and tb < BRIEF_S - 2, "A %s, B %s" % (fmt(ta), fmt(tb)))
 
     print("run 2: TWIN -- --gs-no-briefing-clock (the old start)")
     text, ta, tb, lp = run("2p_twin", extra=("--gs-no-briefing-clock",))

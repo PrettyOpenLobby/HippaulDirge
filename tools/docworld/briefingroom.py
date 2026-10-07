@@ -62,7 +62,7 @@ def gs_battle_sequence(spec, spawn=None, seq_fn=None, ident=0, zone=0,
     return out
 
 
-def gs_ready_roster(pkt, ident, gs_id, members=(), kind=0, rec=None):
+def gs_ready_roster(pkt, ident, gs_id, members=(), kind=0, rec=None, addr=None):
     """Fill selector 38's body.  sec 4eb: body[12..131] IS THE BATTLETABLE
     RECORD -- the arm hands body+12 to 0x00be0308, whose converter 0x0058b0b0
     is the browser record's twin (wire+24 key, +28 participants, +109 max,
@@ -93,8 +93,20 @@ def gs_ready_roster(pkt, ident, gs_id, members=(), kind=0, rec=None):
     struct.pack_into("<H", b, off + gamemsg.GS_READY_SESSION_OFF, gs_id & 0xFFFF)
     struct.pack_into("<H", b, off + gamemsg.GS_READY_COUNT_OFF, count)
     for i, cid in enumerate(ids):
-        struct.pack_into("<I", b, off + gamemsg.GS_READY_ROSTER_OFF
-                         + gamemsg.GS_READY_ROSTER_STRIDE * i, cid & 0xFFFFFFFF)
+        e = off + gamemsg.GS_READY_ROSTER_OFF + gamemsg.GS_READY_ROSTER_STRIDE * i
+        struct.pack_into("<I", b, e, cid & 0xFFFFFFFF)
+        if addr is not None:
+            # 2026-10-05 (static RE, retail 38 handler 0x00bd2ab0): the
+            # briefing room WIPES every unit and rebuilds one per roster
+            # entry, its address taken from entry +16 (IPv4) and +20 (port)
+            # -- not from the peer record. Zeros left every battle unit
+            # unaddressed: one peer per console, the rest dropped. NETWORK
+            # order (inet_aton + big-endian port, like selector 104):
+            # MEASURED by running 0x00bd2ab0 on savestate RAM -- the unit then
+            # holds 01 00 00 d7 cb 00 71 52, the live socket's own form, and
+            # the gate 0x00be7dd8 ACCEPTS; '<IH' made it stream to
+            # 203.0.113.82:215 (proof38.py, 10-05).
+            struct.pack_into(">IH", b, e + 16, addr[0] & 0xFFFFFFFF, addr[1] & 0xFFFF)
     b[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = bytes(2)
     b[framing.CKSUM_OFF:framing.CKSUM_OFF + 2] = struct.pack("<H", framing.cksum(b))
     return bytes(b)

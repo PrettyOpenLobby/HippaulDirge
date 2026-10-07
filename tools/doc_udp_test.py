@@ -493,6 +493,30 @@ def main():
     pkt, note = D.battletable_verb(st, req(125), D.request_body(req(125), None), 125, 0x7777, 0)
     check("dissolve answers 126 and drops the table",
           body(pkt)[1] == 126 and st.get(key) is None and st.table_of(0x7777) is None)
+    # 2026-10-01 (manual p.29): Adjust Rules is leader-only, refused while
+    # the battle runs and below the seated count; a departing leader hands
+    # the Leader column (t["leader"]) to the next member, not just leader_cid.
+    _lt = D.BattletableStore()
+    _lk = _lt.create(D.build_battletable_record(table_id=0, maximum=8), 0xA1, 0xA1)
+    _lt.reserve(_lk, 0xB2)
+    _lt.reserve(_lk, 0xC3)
+    _r6 = D.build_battletable_record(table_id=_lk, maximum=6)
+    check("TWIN: rules change by a seated NON-leader is refused, record kept",
+          not _lt.update(_lk, _r6, 0xB2)
+          and _lt.record(_lk)[D.BT_OFF_MAX] == 8)
+    check("rules change by the leader is taken",
+          _lt.update(_lk, _r6, 0xA1) and _lt.record(_lk)[D.BT_OFF_MAX] == 6)
+    check("rules change below the seated count (3) is refused",
+          not _lt.update(_lk, D.build_battletable_record(table_id=_lk, maximum=2), 0xA1))
+    _lt.set_in_progress(_lk, True)
+    check("rules change while In Progress is refused",
+          not _lt.update(_lk, _r6, 0xA1))
+    _lt.set_in_progress(_lk, False)
+    _lt.cancel(0xA1)
+    check("leader leaves -> next member leads, and the row's Leader moves too",
+          _lt.leader_cid(_lk) == 0xB2 and _lt.tables[_lk]["leader"] == 0xB2
+          and struct.unpack_from("<I", _lt.record(_lk), D.BT_OFF_LEADER)[0] == 0xB2
+          and _lt.is_leader(_lk, 0xB2) and not _lt.is_leader(_lk, 0xA1))
     st2 = D.BattletableStore()
     check("reserving an unknown key fails before auto-create", st2.reserve(59600, 0x1)[0] == -1)
     st2.add_record(D.build_battletable_record(table_id=59600, leader=0x2, cur=0, maximum=8))
@@ -532,6 +556,37 @@ def main():
     check("served record carries the situation id at wire +34 (sec 4gc)",
           struct.unpack_from("<H", _ss.record(_ssk), D.BT_OFF_SITUATION)[0]
           == 1100)
+    # 2026-10-06: an INDIVIDUAL (BT) table loads the BT set, Res_bt1 (1000);
+    # the team set's fences closed SE's BT start nodes off (Train Graveyard)
+    _iw = bytearray(wire)
+    struct.pack_into("<I", _iw, D.BT_OFF_FLAGS,
+                     struct.unpack_from("<I", _iw, D.BT_OFF_FLAGS)[0] | D.BT_FLAG_INDIVIDUAL)
+    _ssi = D.BattletableStore(situation=1100)
+    _ski = _ssi.create(bytes(_iw), 0x3, 0x4)
+    check("an individual (BT) table is stamped situation 1000, not the team 1100",
+          struct.unpack_from("<H", _ssi.record(_ski), D.BT_OFF_SITUATION)[0] == 1000)
+    check("TWIN: the same store's team table keeps 1100",
+          struct.unpack_from("<H", _ssi.record(_ssi.create(wire, 0x5, 0x6)),
+                             D.BT_OFF_SITUATION)[0] == 1100)
+    # 2026-10-06 (Kalm "jail"): a situation the arena lacks builds every fence;
+    # the arena's own 1100 / 1000, else its 9100 / 9000
+    _AD = D.arenadata
+    if _AD.ARENA_STARTS.get(203) and _AD.ARENA_STARTS.get(201):
+        check("situation_for: Kalm (only 9xxx) -> 9100 team / 9000 BT; Jungle keeps 1100 / 1000",
+              (_AD.situation_for(203, False), _AD.situation_for(203, True),
+               _AD.situation_for(201, False), _AD.situation_for(201, True))
+              == (9100, 9000, 1100, 1000))
+        _ssm = D.BattletableStore(situation=1100)
+        _ssm.situation_for = lambda rec, ind: _AD.situation_for(
+            {0: 201, 2: 203}.get(rec[D.BT_OFF_MAP], 201), ind)
+        _mw = bytearray(wire)
+        _mw[D.BT_OFF_MAP] = 2                                   # Kalm
+        _skm = _ssm.create(bytes(_mw), 0x7, 0x8)
+        _s1 = struct.unpack_from("<H", _ssm.record(_skm), D.BT_OFF_SITUATION)[0]
+        _ssm.tables[_skm]["rec"][D.BT_OFF_MAP] = 0              # leader picks Jungle
+        _s2 = struct.unpack_from("<H", _ssm.record(_skm), D.BT_OFF_SITUATION)[0]
+        check("a Kalm team table carries 9100; moved to Jungle it re-picks 1100",
+              (_s1, _s2) == (9100, 1100), "%r" % ((_s1, _s2),))
     check("dissolve drops the table and its reservation (sec 4gc)",
           _ss.dissolve(_ssk) and _ss.table_of(0x1) is None
           and not _ss.records())
@@ -771,6 +826,19 @@ def main():
           not D.gs_real_ready({_A: 0}, [_A, _B])[0])
     check("real ready: not with both on the same team",
           not D.gs_real_ready({_A: 1, _B: 1}, [_A, _B])[0])
+    # 2026-09-29 (Dirge report): a mission is co-op -- one side is ready
+    check("real ready (co-op): both on the same team IS ready",
+          D.gs_real_ready({_A: 1, _B: 1}, [_A, _B], coop=True)[0])
+    check("TWIN: real ready (co-op): still not until everyone has a team",
+          not D.gs_real_ready({_A: 1}, [_A, _B], coop=True)[0])
+    # 2026-09-29: an 'early' table (mission / full) does not wait
+    # out the countdown; any other table still does
+    check("dist due: an EARLY table goes at ready + settle, before brief_end",
+          D.gs_dist_due({"ready_at": 100.0, "dist": False, "brief_end": 400.0,
+                         "early": True}, 5.0) == 105.0)
+    check("TWIN: dist due: the same table not early waits for brief_end",
+          D.gs_dist_due({"ready_at": 100.0, "dist": False, "brief_end": 400.0},
+                        5.0) == 400.0)
     # sec 4ft LIVE 09-13: the leader's command 3 carries ident 0 -- the
     # fan-out must find the table by the session's charid instead.
     _fs = D.BattletableStore()
@@ -974,6 +1042,26 @@ def main():
           min(_m15 + _m6) > 0x1000 + (0xFFFF << 2) + 3
           and all(x & 0xC0000000 == 0 for x in _m15 + _m6)
           and D.chara_id_for(0x1000, _u, "member:16383", 3) < 0x9000 + 0x40000 + 0x10000)
+    # 2026-10-05: a stored POL Content ID is served as the character id
+    _cs = D.doc_charastore
+    check("chara_id_of: a stored Content ID wins; none / 0 / junk / bit 30 fall "
+          "back to the derived id",
+          D.chara_id_of(0x1000, _u, "member:15", 0, {"cid": 30000057}) == 30000057
+          and D.chara_id_of(0x1000, _u, "member:15", 0, {}) == _m15[0]
+          and D.chara_id_of(0x1000, _u, "member:15", 0, None) == _m15[0]
+          and D.chara_id_of(0x1000, _u, "member:15", 0, {"cid": "x"}) == _m15[0]
+          and D.chara_id_of(0x1000, _u, "member:15", 0, {"cid": 0x40000001}) == _m15[0])
+    _ast = _cs.CharaStore(None)
+    _ast.data = {"member:15": [{"name": "Malk", "slot": 0}, {"name": "Two", "slot": 1}],
+                 "member:16": [{"name": "Held", "slot": 0, "cid": 30000058}]}
+    _a1 = _ast.assign_content_id("member:15", 0, ["30000058", "30000057"])
+    _a2 = _ast.assign_content_id("member:15", 1, ["30000058", "30000057"])
+    _a3 = _ast.assign_content_id("member:15", 0, ["30000099"])
+    check("assign_content_id: the first id nobody holds; none left -> 0; an "
+          "assigned id never moves; an empty slot gets nothing",
+          _a1 == 30000057 and _a2 == 0 and _a3 == 30000057
+          and _ast.assign_content_id("member:15", 3, ["30000099"]) == 0
+          and _ast.content_ids_held() == 2, "%r %r %r" % (_a1, _a2, _a3))
     check("chara_id_for(base=0) is off, as --chara-id-base 0 was",
           D.chara_id_for(0, _u, "member:15", 0) == 0)
 
@@ -1405,10 +1493,13 @@ def main():
           "(11 the hole, 13 Test Area, 17/18/19 Base 1-3)",
           not (set(_MZ) & {11, 13, 17, 18, 19}))
     _shown = [i for i in range(len(D.LOBBY_MAP_NAMES)) if D.LOBBY_MAP_MASK_ALL >> i & 1]
+    # 2026-10-06: minus the maps our arena data cannot stage (audit):
+    # 6 Training Grounds, 12 Deepground 2, 15 Bridge, 16 Shinra Manor
     check("the picker shows EXACTLY the maps with an arena -- 11 / 13 / 17-19 "
-          "hidden (09-23), none shown that would play in the Jungle",
-          set(_shown) == set(_MZ) and not set(_shown) & {11, 13, 17, 18, 19},
-          "shown-but-unmapped %s" % sorted(set(_shown) - set(_MZ)))
+          "hidden (09-23), 6 / 12 / 15 / 16 hidden (10-06, no usable layout)",
+          set(_shown) == set(_MZ) - {6, 12, 15, 16}
+          and not set(_shown) & {6, 11, 12, 13, 15, 16, 17, 18, 19},
+          "shown %s" % sorted(_shown))
     check("TWIN: the old mask (only 11 cleared) shows unmapped maps",
           {i for i in range(28) if (((1 << 28) - 1) & ~(1 << 11)) >> i & 1}
           - set(_MZ) == {13, 17, 18, 19})
@@ -1514,16 +1605,15 @@ def main():
             _rej = True
         check("--zone-pieces rejects %r" % _bad, _rej)
 
+    # 2026-10-06: the pieces AT the spawn (spawn_bmap), the zone's
+    # --zone-pieces pair as its fallback
     def _pieces_follow_zone(src):
-        return (src.count("bmap=battle_bmap(_bzone") == 2
+        return (src.count("bmap=spawn_bmap(") == 2
                 and "bmap=_gs_bmap)" not in src)
-    check("both kind-2 pushes take M0/M1 from the arena zone's --zone-pieces",
-          _pieces_follow_zone(_src))
+    check("both kind-2 pushes take M0/M1 from the spawn's pieces, else the "
+          "arena zone's --zone-pieces", _pieces_follow_zone(_src))
     check("TWIN: the same gate FAILS on the pre-fix bmap=_gs_bmap shape",
-          not _pieces_follow_zone(_src.replace(
-              "bmap=battle_bmap(_bzone, _zone_pieces, _gs_bmap)",
-              "bmap=_gs_bmap").replace(
-              "bmap=battle_bmap(_bzone,\n", "bmap=_gs_bmap)#")))
+          not _pieces_follow_zone(_src.replace("bmap=spawn_bmap(", "bmap=_gs_bmap)#")))
 
     # --- 2026-09-24: the Lifestream archive audit fixes ---------------------
     import doc_missions as DM
@@ -1603,10 +1693,11 @@ def main():
            ("TBT", "TDM", "TBS", "TCP", "TLD", "TFL", "BT")]
           == [(3, 5), (4, 5), (6, 12), (7, 8), (11,), (9, 10), (0, 1, 2)])
     _ids = [i for i, _, _ in DSH.DEFAULT_STOCK]
-    check("Flash Materia is not in the launch shop (a later update added it); "
-          "the four launch materia are",
-          0x6F34001B not in _ids
-          and {0x6F340017, 0x6F340018, 0x6F340019, 0x6F34001A} <= set(_ids))
+    check("2026-10-05: Flash Materia is sold (Feb 16 2006 update, 100 gil) "
+          "beside the four launch materia, but is NOT in the launch starter kit",
+          0x6F34001B in _ids and DSH.Shop(None).prices[0x6F34001B] == 100
+          and {0x6F340017, 0x6F340018, 0x6F340019, 0x6F34001A} <= set(_ids)
+          and 0x6F34001B not in {i for i, _q in DSH.STARTER_KIT})
     check("2026-09-26: the shop sells no ammunition, consumables or kits (the "
           "2006 guides), frames at 200, suits at 300",
           not [i for i in _ids if i >> 16 in (0x6230, 0x6932, 0x6430)]
@@ -1633,7 +1724,12 @@ def main():
           D.base_gimmicks(201) == (26, 23) and D.base_gimmicks(204) is None
           and D.base_gimmicks(203) is None and D.base_gimmicks(208) is None
           and D.base_gimmicks(230) == (1, 0))
-    # 2026-09-24: team start points (the client never picks one by team)
+    # 2026-09-24: team start points (the client never picks one by team).
+    # These are the FALLBACK without doc_arena_starts.json: run them with the
+    # per-situation extract switched off (restored below).
+    _as = D.arenadata.ARENA_STARTS
+    _as_saved = dict(_as)
+    _as.clear()
     if not D.BASE_POSITIONS:
         # no doc_arena_table.json beside the code (README): the arena data is
         # not shipped, so these checks run on made-up positions of its shape
@@ -1654,9 +1750,103 @@ def main():
     check("a base-derived start: 150 units from the own base, toward the enemy",
           abs(_dist(_m0, _c70) - 150.0) < 0.01 and abs(_dist(_m1, _c69) - 150.0) < 0.01
           and _dist(_m0, _c69) < _dist(_c70, _c69))
-    check("TWIN: no base data (Kalm) or no team -> no team start",
-          D.team_start(203, 0) is None and D.team_start(201, None) is None
+    check("TWIN: no base data and no start nodes (Wastelands) or no team -> no "
+          "team start", D.team_start(204, 0) is None and D.team_start(201, None) is None
           and D.team_start(201, 5) is None)
+    check("hand fallback: the Lab binds rows 14 / 12, Train Graveyard no base",
+          D.arenadata.BASE_GIMMICKS[206] == (14, 12)
+          and D.arenadata.BASE_GIMMICKS[212] is None)
+    # 2026-10-05: doc_arena_starts.json keys starts and bases by SITUATION
+    # (type-2 nodes by team byte; type 8 are MP points). Made-up positions.
+    _as.update({
+        213: {1100: {"starts": {0: [(1.0, 0.0, 1.0), (2.0, 0.0, 2.0)],
+                                1: [(9.0, 0.0, 9.0)]},
+                     "bases": [(0, 1, (8.0, 0.0, 8.0)), (1, 0, (3.0, 0.0, 3.0))]},
+              1000: {"starts": {0: [(5.0, 0.0, 5.0), (6.0, 0.0, 6.0),
+                                    (7.0, 0.0, 7.0)], 1: []}, "bases": []}},
+        201: {1100: {"starts": {}, "bases": [(23, 1, (0.0, 0.0, 0.0)),
+                                             (26, 0, (1.0, 0.0, 1.0))]},
+              1104: {"starts": {}, "bases": [(24, 1, (0.0, 0.0, 0.0)),
+                                             (28, 0, (1.0, 0.0, 1.0))]}}})
+    try:
+        check("team start = the situation's own team node, one per seat",
+              D.team_start(213, 0, None, 1) == (2.0, 0.0, 2.0)
+              and D.team_start(213, 0, 1100, 2) == (1.0, 0.0, 1.0)
+              and D.team_start(213, 1, 1100, 5) == (9.0, 0.0, 9.0)
+              and D.arenadata.team_start_count(213, 0) == 2)
+        check("individual start = the 1000 list, one per seat",
+              D.arenadata.bt_start(213, None, 4) == (6.0, 0.0, 6.0)
+              and D.arenadata.bt_start(201, None, 0) is None)
+        check("bases by situation, team = the owner byte: Jungle 1100 26/23, "
+              "1104 28/24; Shinra 1/0 with its spots",
+              D.base_gimmicks(201) == (26, 23) and D.base_gimmicks(201, 1104) == (28, 24)
+              and D.base_gimmicks(213) == (1, 0)
+              and D.base_spots(213) == ((3.0, 0.0, 3.0), (8.0, 0.0, 8.0)))
+        check("TWIN: a situation the arena lacks has no base (not the hand rows)",
+              D.base_gimmicks(213, 1105) is None and D.base_spots(213, 1105) is None
+              and D.base_gimmicks(213, 1000) is None)
+    finally:
+        _as.clear()
+        _as.update(_as_saved)
+    # 2026-10-05: a mission starts at its controller's OWN start node (type 2),
+    # even where the generic spawn has more enemy points within the radius
+    # (the Beginner's Courses: generic spawn outside the gates, live)
+    _ms = D.arenadata.MISSION_SPAWNS
+    _ms_saved = _ms.get("299")
+    _ms["299"] = {"3001": {"pool": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
+                                    [500.0, 0.0, 500.0]],
+                           "player": [[490.0, 0.0, 480.0], [480.0, 0.0, 490.0]]},
+                  "3002": {"pool": [[0.0, 0.0, 0.0]], "player": []}}
+    try:
+        _gen = (5.0, 0.0, 5.0)
+        check("mission start = the controller's own start node, one per seat "
+              "(not the generic spawn with more enemies near it)",
+              D.arenadata.mission_player_spawn(299, 3001, _gen) == (490.0, 0.0, 480.0)
+              and D.arenadata.mission_player_spawn(299, 3001, _gen, seat=1)
+              == (480.0, 0.0, 490.0)
+              and D.arenadata.mission_player_spawn(299, 3001, _gen, seat=2)
+              == (490.0, 0.0, 480.0))
+        check("TWIN: a controller with no start node keeps the generic spawn",
+              D.arenadata.mission_player_spawn(299, 3002, _gen) == _gen
+              and D.arenadata.mission_player_spawn(299, 3999, _gen) == _gen)
+    finally:
+        if _ms_saved is None:
+            _ms.pop("299", None)
+        else:
+            _ms["299"] = _ms_saved
+    # 2026-10-05: the arena's spawn groups pick each enemy (fixed first, then
+    # the mission's target, then the rest; an undrawable group stays empty)
+    _pool = [[1000.0, 0.0, 0.0], [200.0, 0.0, 0.0], [300.0, 0.0, 0.0],
+             [400.0, 0.0, 0.0], [500.0, 0.0, 0.0]]
+    _grps = [[1, [[7, 100]]],            # fixed, far
+             [0xFFFF, [[5, 80]]],        # random, nearest
+             [0xFFFF, [[9, 50]]],        # random, the target
+             [1, [[99, 100]]],           # fixed but undrawable
+             None]
+    _pick = lambda g: None if g[1][0][0] == 99 else g[1][0][0]
+    _plan = D.arenadata.mission_enemy_plan(_pool, _grps, (0.0, 0.0, 0.0), 3, _pick,
+                                           prefer=lambda t: t == 9, near=10.0)
+    check("spawn groups: the fixed enemy first, then the mission's target, then "
+          "the nearest random one; the undrawable node stays empty",
+          _plan == [((1000.0, 0.0, 0.0), 7), ((300.0, 0.0, 0.0), 9),
+                    ((200.0, 0.0, 0.0), 5)], "%r" % (_plan,))
+    _grps2 = [[1, [[5, 100]]], [1, [[5, 100]]], [1, [[9, 100]]], [0xFFFF, [[5, 80]]],
+              [0xFFFF, [[5, 80]]]]
+    _plan2 = D.arenadata.mission_enemy_plan(_pool, _grps2, (0.0, 0.0, 0.0), 1, _pick,
+                                            prefer=lambda t: t == 9, near=10.0)
+    check("spawn groups: a FIXED target beats nearer fixed non-targets (Sniper "
+          "Threat fielded only soldiers)", _plan2 == [((300.0, 0.0, 0.0), 9)],
+          "%r" % (_plan2,))
+    check("TWIN: no groups (an older extract) -> no plan (the row's own types)",
+          D.arenadata.mission_enemy_plan(_pool, [], (0.0, 0.0, 0.0), 3, _pick) == []
+          and D.arenadata.mission_enemy_plan(_pool, _grps[:2], (0, 0, 0), 3, _pick) == [])
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _td:
+        _old = os.path.join(_td, "starts.json")
+        with open(_old, "w") as _f:
+            _f.write('{"213": {"0": [2.3, 0.0, -63.1], "1": [1.0, 0.0, 1.0]}}')
+        check("TWIN: the old type-8 {zone: {link: pos}} file is not read as starts",
+              D.arenadata.load_arena_starts(_old) == {})
 
     # --- 2026-09-24: TEAM CAPSULE battles (kinds 10/11/21/46/47/48, P2P 118/119)
     check("the Mako Capsule is 0x6B300000; 118/119 are battle types, answered "
@@ -1698,6 +1888,38 @@ def main():
     D.capsule_pickup(_cr, 0xB, _slot)
     D.capsule_hold(_cr, 106.0)
     check("one each: no hold", _cr.cap_hold is None)
+    # 2026-10-06: the (re)spawn's map pieces come from WHERE it is (the client
+    # loads only M0/M1; live, Jungle team 1 stood in m004 with (1, 3) loaded)
+    _pd = {"cell": 100.0, "zones": {"201": {
+        "1": {"3,-6": 900}, "3": {"9,-12": 500}, "4": {"25,-13": 2000, "24,-13": 40},
+        "5": {"21,-9": 300}}}}
+    _am = D.arenamaps
+    check("spawn_bmap: a point only in m004 loads m004 + its nearest neighbour",
+          _am.spawn_bmap(201, (2590.0, -15.0, -1240.0), (1, 3), data=_pd) == (4, 5),
+          "%r" % (_am.spawn_bmap(201, (2590.0, -15.0, -1240.0), (1, 3), data=_pd),))
+    check("spawn_bmap: a point in m001 keeps m001 first",
+          _am.spawn_bmap(201, (381.0, -12.0, -560.0), (1, 3), data=_pd)[0] == 1)
+    check("TWIN: no piece data for the zone -> the zone's pair unchanged",
+          _am.spawn_bmap(211, (2590.0, -15.0, -1240.0), (1, 6), data=_pd) == (1, 6)
+          and _am.spawn_bmap(201, None, (1, 3), data=_pd) == (1, 3))
+    # 2026-10-06: a KO'd carrier drops what it holds (the client sends no 118)
+    _ck = D.BattleRoom(10, [0xA, 0xB], {0xA: 0, 0xB: 1},
+                       D.BattleRules(mode="TCP", capsules=2), now=0.0)
+    _ck.field = {0: (D.MAKO_CAPSULE, (0, 0, 0)), 1: (D.MAKO_CAPSULE, (5, 0, 5))}
+    D.capsule_pickup(_ck, 0xB, 0)
+    D.capsule_pickup(_ck, 0xB, 1)
+    _m, _n = D.fielditems.capsule_ko_drop(_ck, 0xB, (100.0, -5.0, 200.0))
+    check("KO drop: per capsule 21 + quiet 10 to the victim, 10 to the others; "
+          "both back on the field at the death spot, holder at 0",
+          [(k, i, to) for k, _, i, to in _m] == [(21, 0xB, "self"), (10, 0xB, "self"),
+                                                 (10, 0xB, "others")] * 2
+          and len(_ck.field) == 2 and _ck.holders[0xB] == 0
+          and all(v[1] == (100.0, -5.0, 200.0) for v in _ck.field.values())
+          and _m[1][1][:4] == struct.pack("<I", D.fielditems.FIELD_QUIET)
+          and _m[2][1][:4] == bytes(4), _n)
+    check("TWIN: a KO'd player holding nothing drops nothing",
+          D.fielditems.capsule_ko_drop(_ck, 0xA, (0.0, 0.0, 0.0)) == ([], None)
+          and len(_ck.field) == 2)
     _cr2 = D.BattleRoom(9, [0xA, 0xB], {0xA: 0, 0xB: 1},
                         D.BattleRules(mode="TCP", capsules=1), now=0.0)
     _cr2.field = {0: (D.MAKO_CAPSULE, (0, 0, 0))}
@@ -1780,6 +2002,28 @@ def main():
           D.base_report(_r24) == [(0, 8000, 0), (1, 7562, 0)])
     check("TWIN: a short / non-base report parses to nothing",
           D.base_report(_r24[:70]) == [] and D.base_report(bytes(64)) == [])
+    # 2026-10-05 (captured live, Iron Curtain table 17): a MISSION report
+    # lists its 2 enemies first (count at body+63), the base after them
+    _ic = bytes.fromhex(
+        "180011000000000001000000930000001e000000d0100400e7b3f2c322f5c743138fd6c2"
+        "45f5693f00000000a9d7cfbe02088e2df903010000000b0000010002000100400000c1fd"
+        "4a01fbfe010100400000e0fd270112ff000000000000000000000000")
+    _ic_raw = bytes.fromhex("04047c0038c9320098ee2658c101683a63268fedac136e80") + _ic
+    check("a base mission's report: the base AFTER the 2 enemies (HP 0 = fallen), "
+          "not the first enemy read as a base",
+          D.base_report(_ic) == [(0, 0, 0)], "%r" % (D.base_report(_ic),))
+    check("...and its enemy list still reads (it was rejected by length)",
+          D.gamemsg.mission_npc_report(_ic_raw) == [(0x40000100, 0), (0x40000101, 0)])
+    # 2026-10-05: enemy drops land where the report last placed the enemy
+    # (s16 world units: this one died beside the base at (-625, 284, -344))
+    _icp = D.gamemsg.mission_npc_positions(_ic_raw)
+    check("mission_npc_positions: both enemies' s16 positions, keyed by id",
+          _icp.get(0x40000100) == (-575, 330, -261) and len(_icp) == 2, "%r" % (_icp,))
+    check("TWIN: a datagram that is not a report has no positions",
+          D.gamemsg.mission_npc_positions(_ic_raw + b"\0") == {})
+    check("TWIN: a PvP report (no enemies) still reads its bases from +64",
+          D.base_report(_r24) == [(0, 8000, 0), (1, 7562, 0)]
+          and _r24[63] == 0)
     check("Jungle bases: Ifrit (team 0) = gimmick 26, the RED one (live)",
           D.base_gimmicks(201) == (26, 23))
     _br = D.BattleRoom(14, [0xA, 0xB], {0xA: 0, 0xB: 1},
@@ -1836,12 +2080,13 @@ def main():
     check("TWIN: 5 s of a 10 s hold does not win", not _oc.over)
     _poses[0xC] = _on + (18.0,)
     D.base_occupy_tick(_oc, _poses, 18.0, 100.0, 10.0)
-    check("TWIN: a pose older than 2 s is not 'there' (stale 0x83 at +20)",
-          D.base_occupy_tick(_oc, _poses, 20.5, 100.0, 10.0) and not _oc.occupy)
-    _poses[0xC] = _on + (21.0,)
-    D.base_occupy_tick(_oc, _poses, 21.0, 100.0, 10.0)
-    _poses[0xC] = _on + (31.0,)
-    D.base_occupy_tick(_oc, _poses, 31.0, 100.0, 10.0)
+    check("TWIN: a pose older than BASE_POSE_FRESH_S (4 s) is not 'there' "
+          "(stale pose at +22.5)",
+          D.base_occupy_tick(_oc, _poses, 22.5, 100.0, 10.0) and not _oc.occupy)
+    _poses[0xC] = _on + (23.0,)
+    D.base_occupy_tick(_oc, _poses, 23.0, 100.0, 10.0)
+    _poses[0xC] = _on + (33.0,)
+    D.base_occupy_tick(_oc, _poses, 33.0, 100.0, 10.0)
     check("10 s unbroken on the spot: over, team 0 wins, 0xC is the occupier",
           _oc.over and _oc.winner_slot() == 0 and _oc.occupier == 0xC
           and "occupied" in _oc.why)
@@ -1881,6 +2126,15 @@ def main():
     check("the 7th (co-op total) wins it: over with the objective, verdict w",
           _mr.over and _mr.why.startswith(D.doc_missions.WHY_OBJECTIVE)
           and D.doc_missions.verdict(16, _mr.over, _mr.why, 0) == "w")
+    # 2026-10-05: mission capsules go on SE's capsule generators
+    import doc_field as _dfield
+    if _dfield.load():
+        check("capsule spots: the Trooper 3rd exam's 201:3001 has exactly the 3 "
+              "its objective asks; Collector's Mind's Church 3003 has 10",
+              len(_dfield.capsule_spots(201, 3001)) == 3
+              and len(_dfield.capsule_spots(*D.doc_missions.CAPSULE_SITUATIONS[16])) == 10)
+        check("TWIN: a situation without capsule generators has no spots (ring)",
+              _dfield.capsule_spots(203, 3003) == [])
     _mr27 = D.BattleRoom(13, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"),
                          mission=27, now=0.0)
     _mr27.field = {i: (D.MAKO_CAPSULE, (0, 0, i)) for i in range(15)}
@@ -1889,6 +2143,34 @@ def main():
     D.capsule_mission_check(_mr27)
     check("TWIN: 'as many as possible' (27) never ends on a count",
           D.capsule_count(_mr27) == 15 and not _mr27.over)
+    # 2026-10-05: a kill mission counts only the enemy it names
+    _dh = D.doc_missions.mission_setup(3)[2]    # Commander, Commander, Beast
+    _kr = D.BattleRoom(15, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"),
+                       mission=3, now=0.0)
+    _nb = D.doc_npc_spawn.ARENA_ID_BASE
+    _ty = {_nb: _dh[2], _nb + 1: _dh[0], _nb + 2: _dh[0], _nb + 3: _dh[0]}
+    _kr.npc_hp_update([(_nb, 100)], 0xA, 1.0, types=_ty)
+    _kr.npc_hp_update([(_nb, 0)], 0xA, 2.0, types=_ty)
+    check("a Beast Soldier's death does not count toward 'defeat 3 Commanders'",
+          _kr.npc_kills == 0 and _kr.kills[0xA] == 0)
+    for _i in (1, 2, 3):
+        _kr.npc_hp_update([(_nb + _i, 100)], 0xA, 3.0 + _i, types=_ty)
+        _kr.npc_hp_update([(_nb + _i, 0)], 0xA, 3.5 + _i, types=_ty)
+    # 2026-10-05: one enemy's death arrives twice -- request 30 AND the 1 Hz
+    # report -- and counted twice (Course I "cleared" on 3 real kills)
+    _dc = D.BattleRoom(16, [0xA], {0xA: 0}, D.BattleRules(mode="TBT"),
+                       mission=3, now=0.0)
+    _dc.kill(0xA, _nb + 1, 1.0, npc_type=_dh[0])          # request 30
+    _dc.npc_hp_update([(_nb + 1, 100)], 0xA, 1.5, types=_ty)
+    _dc.npc_hp_update([(_nb + 1, 0)], 0xA, 2.0, types=_ty)  # the 1 Hz report
+    _dc.kill(0xA, _nb + 1, 2.5, npc_type=_dh[0])          # a resent 30
+    check("one enemy's death counts ONCE (request 30 + the 1 Hz report)",
+          _dc.npc_kills == 1 and _dc.kills[0xA] == 1, "%d" % _dc.npc_kills)
+    _dc.kill(0xA, _nb + 2, 3.0, npc_type=_dh[0])
+    check("TWIN: a second enemy's death still counts", _dc.npc_kills == 2)
+    check("TWIN: the third Commander wins it",
+          _kr.npc_kills == 3 and _kr.over
+          and _kr.why.startswith(D.doc_missions.WHY_OBJECTIVE))
 
     # --- sec 4he (2026-09-23): the P2P battle layer, the room, the rules --
     def p2p(ptype, mode, sender, target, payload, flags=0x08):
@@ -1953,6 +2235,37 @@ def main():
              + struct.pack("<II", 0x190b827b, 0xFFFFFFFF))
     check("unreadable 80-byte mode-4 with the '0'..'4' slot table is a SHOT",
           len(m4s) == 80 and D.p2p_battle_type_mode4(m4s, None, _me, _mem) == 112)
+    # 2026-10-03 (live, the leader's 155 lost shots): EMPTY slots are ff ff
+    _emp = bytes([0x14, 0x30, 6, 0x31, 0xff, 0xff, 0xff, 0xff, 0x17, 0x34, 2, 0x30,
+                  0x21, 0x43, 0, 0, 0x43, 3, 0xff, 0x3f, 0x27, 0, 0, 0])
+    m4e = m4(_emp + struct.pack("<6f", 107.5, -12.3, 12.3, 92.6, -14.9, 13.9)
+             + struct.pack("<II", 0x190b827b, 0xFFFFFFFF))
+    check("unreadable 80-byte SHOT with EMPTY (ff ff) slots 2+3 is a SHOT",
+          D.p2p_battle_type_mode4(m4e, None, _me, _mem) == 112)
+    check("TWIN: the old '01234' test rejected that live shot",
+          _emp[1:10:2] != b"01234")
+    check("TWIN: a slot labelled out of order is not a SHOT",
+          D.p2p_battle_type_mode4(m4(bytes([0x14, 0x30, 6, 0x32]) + _emp[4:]
+                                     + struct.pack("<6f", 1, 2, 3, 4, 5, 6)
+                                     + bytes(8)), None, _me, _mem) is None)
+    # 2026-10-03 (live, the leader's): P2P 96 and 121 by body, bytes as captured
+    m96 = m4(bytes.fromhex(
+        "4d 0d 35 44 28 ec c7 c2 d1 3f ce 44 f1 ff 0a bf 00 00 00 00 16 fa 56 3f"
+        " 80 04 00 00 0b 30 03 31 02 32 ff ff ff ff 01 30 00 00 00 00"))
+    check("unreadable 68-byte {pos, .., slot table at +28} is P2P 96",
+          len(m96) == 68 and D.p2p_battle_type_mode4(m96, None, _me, _mem) == 96)
+    m121 = m4(bytes.fromhex("6465fb01c5bb5a439895ddbfeb9330c2a93900000b000000"))
+    check("unreadable 48-byte opening 64 65 fb 01 is P2P 121",
+          len(m121) == 48 and D.p2p_battle_type_mode4(m121, None, _me, _mem) == 121)
+    m42 = m4(bytes.fromhex(
+        "2a 00 1b 00 00 00 00 00 00 00 00 00 05 00 15 00 00 00 00 00 70 75 73 73"
+        " 79 63 61 74 20 64 67 20 73 6f 6c 64 69 65 72 73 00 00 00 00"))
+    check("TWIN: a real 68-byte GS 42 (chat text) is NOT a 96",
+          D.p2p_battle_type_mode4(m42, None, _me, _mem) is None)
+    check("TWIN: a 48-byte 1 Hz-ish body (06 00 00 00 ..) is NOT a 121",
+          D.p2p_battle_type_mode4(m4(bytes.fromhex(
+              "060000000100000000000000d7777f4477fb5ac12ac2acc4")),
+              None, _me, _mem) is None)
     check("TWIN: a readable header is p2p_battle_type()'s, not the body namer's",
           D.p2p_battle_type_mode4(m4d, {"plain": m4d}, _me, _mem) is None)
     check("TWIN: no battle room, no naming",
@@ -2024,8 +2337,9 @@ def main():
     check("TWIN: a full bag gets NO grant (message 27 would double it)",
           S_.supply_grant({0x62300000: 36, 0x62300001: 18, 0x62300002: 60},
                           M_.STANDARD_SUPPLIES) == [])
-    check("supplies: Beginner's Course I = 300 handgun + 3 Potions; PvP = standard",
-          M_.supplies(39) == ((0x62300000, 300), (0x69320000, 3))
+    check("supplies: Beginner's Course I = 300 handgun + 3 Potions + 1 Phoenix "
+          "Down (2006 wiki); PvP = standard",
+          M_.supplies(39) == ((0x62300000, 300), (0x69320000, 3), (0x69320004, 1))
           and M_.supplies(None) == M_.STANDARD_SUPPLIES
           and M_.supplies(16) == M_.STANDARD_SUPPLIES)
     # 2026-09-26: the RESPAWN REFILL rides kind 25 at payload[20..43]

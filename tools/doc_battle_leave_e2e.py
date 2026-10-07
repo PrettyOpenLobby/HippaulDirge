@@ -121,7 +121,7 @@ def drain(sock):
     return got
 
 
-def into_battle(ca, dst, map_idx):
+def into_battle(ca, dst, map_idx, session=1):
     rec = bytearray(D.build_battletable_record(table_id=0, leader=0, cur=1,
                                                maximum=6, map_idx=map_idx,
                                                mode=1, comment="e2e"))
@@ -132,10 +132,11 @@ def into_battle(ca, dst, map_idx):
                         struct.pack("<II", D.LOBBY_CMD_START, 0)), dst)
     time.sleep(0.6)
     drain(ca)
-    ca.sendto(gs_req(A_CID, 31, arg=0, session=1), dst)
+    # the console echoes the table key selector 38 gave it (body+2)
+    ca.sendto(gs_req(A_CID, 31, arg=0, session=session), dst)
     time.sleep(4.0)                      # the post-join timer: kind 2 + 20
     drain(ca)
-    ca.sendto(gs_req(A_CID, 47, session=1), dst)
+    ca.sendto(gs_req(A_CID, 47, session=session), dst)
     time.sleep(1.0)
     drain(ca)
 
@@ -166,7 +167,7 @@ def drive_dissolve(ca, dst):
     ca.sendto(world_req(A_CID, D.BT_REQ_DISSOLVE, struct.pack("<H", 1)), dst)
     time.sleep(1.5)
     drain(ca)
-    into_battle(ca, dst, 7)
+    into_battle(ca, dst, 7, session=2)
     # the restart orphan (live): CONFIG of a key the store never had
     ca.sendto(world_req(A_CID, D.BT_REQ_CONFIG, struct.pack("<H", 9) + bytes(2)), dst)
     time.sleep(0.8)
@@ -174,7 +175,38 @@ def drive_dissolve(ca, dst):
             and p[D.BODY_OFF + 1] == D.BT_RESERVATION_CLEAR_SEL]
 
 
+def kind2s(pkts):
+    return [p for p in pkts if len(p) >= D.BODY_OFF + 16
+            and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 35
+            and struct.unpack_from("<I", p, D.BODY_OFF + 12)[0] == 2]
+
+
+def drive_orphan(ca, dst):
+    """2026-10-05 (live 01:38): a console still in a briefing room the
+    restarted server never had retransmits its 31 (and its 47 on the way
+    out), echoing that table's key 3 at body+2."""
+    ca.sendto(gs_req(A_CID, 31, arg=0, session=3), dst)
+    time.sleep(3.5)                      # past --gs-battle-after-join=2
+    got = drain(ca)
+    ca.sendto(gs_req(A_CID, 47, session=3), dst)
+    time.sleep(1.0)
+    got += drain(ca)
+    return got
+
+
 def main():
+    text, got = run("orphan", drive_orphan)
+    lines = text.splitlines()
+    has = lambda s: any(s in ln for ln in lines)
+    check("[orphan] no traceback", "Traceback" not in text)
+    check("[orphan] a 31 echoing a table this server never had arms NO battle start",
+          has("echoes table 3, which this server does not seat it at")
+          and not has("battle start armed"))
+    check("[orphan] no kind 2 (battle spawn) reached the console", not kind2s(got),
+          "%d kind 2" % len(kind2s(got)))
+    check("[orphan] its 47 got the 48 only", has("-- 48 only")
+          and not has("ROOM OPENED"))
+
     text, (before, after) = run("leave", drive_leave)
     lines = text.splitlines()
     has = lambda s: any(s in ln for ln in lines)

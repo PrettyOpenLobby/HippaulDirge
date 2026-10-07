@@ -75,7 +75,7 @@ WHAT IS INFERRED, and why:
     located; --unit-fee defaults to 0, so the client deducts nothing unless
     the server admin sets one. With --shop the server wallet pays the same fee.
 
-NOT DONE: the banned emblem word check (SE 43148) -- the 6-bit alphabet is not
+NOT DONE: the banned emblem word check (SE 43147) -- the 6-bit alphabet is not
 decoded, so letters are stored and logged raw.
 
 2026-09-24 UNIT BATTLES: record_battle() pays each unit the rank points its
@@ -117,11 +117,20 @@ ENLIST_ID = 16
 
 LOGIN_UNIT_OFF = 60                # world-door body[60..67] -> R+720
 
-# SE's own refusal codes (the client's own error table)
-ERR_GIL = 43016                    # not enough gil
-ERR_ALREADY = 43146                # that group is already registered as a unit
-ERR_BADWORD = 43148                # emblem word cannot be registered
-ERR_NOUNIT = 43150                 # could not find specified unit
+# SE's own refusal codes (the client's own error table, data/etc/kelerr.bin).
+# 2026-10-01: re-read with doc_kelerr.py, which pairs each code with the
+# sentence in ITS OWN record; the old values (43146 / 43148 / 43150) came from
+# the one-record-late map and would have shown "cannot buy or sell while
+# trading" / "cannot modify weapons while trading" / "battletable requirements
+# not met".
+ERR_GIL = 43016                    # "An error has occurred." (amount refused)
+ERR_NOT_AUTH = 43134               # "You are not authorized to use that command."
+ERR_ALREADY = 43143                # "That group is already registered as a unit."
+ERR_BADWORD = 43147                # "That word cannot be registered."
+ERR_NOUNIT = 43149                 # "Could not find specified unit."
+#: the POL group roles (openlobby accounts.GROUP_CLASS_*): manual p.28, only a
+#: group's master or sub-master may register it as a unit
+GROUP_MASTER, GROUP_SUBMASTER, GROUP_MEMBER = 5, 4, 3
 
 CLASSES = ("Squad", "Platoon", "Company", "Battalion", "Regiment", "Brigade",
            "Division", "Corps", "Army")
@@ -245,6 +254,27 @@ class Units:
         if row and (int(row[1] or 0) & KIND_GROUP):
             return row[0]
         return None
+
+    def group_role(self, uid, key):
+        """2026-10-01: the class `key`'s POL member holds in group `uid` (5
+        master, 4 sub-master, 3 member), None when not in it, or "unknown"
+        when it cannot be looked up (no groups, no member key, no database)
+        -- a lookup that fails never refuses."""
+        if not self.groups or not key or not str(key).startswith("member:"):
+            return "unknown"
+        try:
+            mid = int(str(key).split(":", 1)[1].split("/", 1)[0])
+            import docdb
+            acc = docdb.accounts()
+            conn = acc.connect()
+            try:
+                return acc.group_class_of(conn, uid & 0xFFFFFFFF, member_id=mid)
+            finally:
+                conn.close()
+        except Exception as e:                  # noqa: BLE001 -- best effort
+            print("[unit] WARN group role lookup for %s in %#x failed (%r)"
+                  % (key, uid, e), flush=True)
+            return "unknown"
 
     def unit(self, uid):
         return self.data["units"].get(hexid(uid))
@@ -392,6 +422,10 @@ class Units:
             base, sym, letters = emblem_parts(req["emblem"])
             cls = min(int(req["cls"] or 0), len(CLASSES) - 1)
             area = min(int(req["area"] or 0), AREAS - 1)
+            _role = self.group_role(uid, key)
+            if _role != "unknown" and _role not in (GROUP_MASTER, GROUP_SUBMASTER):
+                return refuse(ERR_NOT_AUTH, "%s is not the group's master or "
+                              "sub-master (class %s)" % (key, _role))
             if cmd == CMD_REGISTER and h in units:
                 return refuse(ERR_ALREADY, "%s is already a unit" % h)
             if cmd == CMD_MODIFY and h not in units:
@@ -416,6 +450,10 @@ class Units:
             u = units.get(h)
             if u is None:
                 return refuse(ERR_NOUNIT, "%s is not a unit" % h)
+            _role = self.group_role(uid, key)
+            if _role != "unknown" and _role not in (GROUP_MASTER, GROUP_SUBMASTER):
+                return refuse(ERR_NOT_AUTH, "%s is not the group's master or "
+                              "sub-master (class %s)" % (key, _role))
             del units[h]
             for k in [k for k, v in self.data["enlist"].items() if v == h]:
                 del self.data["enlist"][k]
@@ -426,6 +464,9 @@ class Units:
             u = units.get(h)
             if u is None:
                 return refuse(ERR_NOUNIT, "%s is not a unit" % h)
+            _role = self.group_role(uid, key)
+            if _role is None:
+                return refuse(ERR_NOT_AUTH, "%s is not a member of the group" % key)
             self.data["enlist"][key] = h
             if key not in u.setdefault("members", []):
                 u["members"].append(key)
@@ -550,7 +591,7 @@ if __name__ == "__main__":
     b, note = us.body_for(CMD_REGISTER, req(CMD_REGISTER, G, em, 1, 2), k1)
     assert hdr(b) == (0, 0), note
     assert emblem_parts(em) == (3, 5, [1, 2, 3, 4])
-    # again -> SE 43146 with the failure bit
+    # again -> SE 43143 with the failure bit
     b, note = us.body_for(CMD_REGISTER, req(CMD_REGISTER, G, em, 1, 2), k1)
     assert hdr(b) == (FLAG_FAIL, ERR_ALREADY) and "REFUSED" in note
     # enlist -> body[16] = the id; login field follows
@@ -572,7 +613,7 @@ if __name__ == "__main__":
     assert struct.unpack_from("<I", b, AREA_COUNT)[0] == 4
     assert [struct.unpack_from("<BxxxI", b, AREA_ROWS + 8 * i) for i in range(4)] \
         == [(0, 0), (1, 0), (2, 1), (3, 0)]
-    # modify an unknown unit -> 43150; modify ours -> Area IV
+    # modify an unknown unit -> 43149; modify ours -> Area IV
     b, _ = us.body_for(CMD_MODIFY, req(CMD_MODIFY, 0x99, em, 0, 0), k1)
     assert hdr(b) == (FLAG_FAIL, ERR_NOUNIT)
     b, _ = us.body_for(CMD_MODIFY, req(CMD_MODIFY, G, em, 1, 3), k1)
@@ -649,7 +690,13 @@ if __name__ == "__main__":
     assert Units(None, groups=True).group_name(fid) is None, "a friend is no group"
     assert Units(None, groups=False).group_name(gid) is None, "off: not asked"
     ug = Units(docdb.store("units"), groups=True)
+    # 2026-10-01 (manual p.28): only the group's master / sub-master registers
+    # it. k2's member is not in the group -> SE's "not authorized" (43134)
     b, note = ug.body_for(CMD_REGISTER, req(CMD_REGISTER, gid, 0x12, 0, 0), k2)
+    assert hdr(b) == (FLAG_FAIL, ERR_NOT_AUTH) and ug.unit(gid) is None, note
+    k_owner = "member:%d/0x00041058" % mid
+    assert ug.group_role(gid, k_owner) == GROUP_MASTER
+    b, note = ug.body_for(CMD_REGISTER, req(CMD_REGISTER, gid, 0x12, 0, 0), k_owner)
     assert hdr(b) == (0, 0) and ug.unit(gid)["name"] == "Deepground", note
     for _s in ("units", "shop"):
         docdb.store(_s).clear()

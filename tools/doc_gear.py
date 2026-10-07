@@ -161,6 +161,12 @@ SUIT_HP_TABLE = (210, 240, 250, 270, 340, 100, 200, 360)   # block +0x3fc
 #: of the category are unnamed placeholders ("服N") with filler grades past
 #: the table; they take their class's named suit.
 SUIT_DURABILITY = {0x00: 3, 0x14: 0, 0x28: 1, 0x29: 1, 0x3C: 2, 0x50: 4}
+#: 2026-10-05: armor look -> HP the retail SERVER sent, where it differs from
+#: the grade lookup. source: 2006 player wiki (dc.jpn.org, Tips "各スーツの性能"):
+#: Soldier 270 / Snipe 210 / Speed 240 / Magic 250 agree with the table, the
+#: Toughness Suit measured 360 (grade 4 gives 340). Possibly the Feb 16 2006
+#: suit rebalance; the client never reads HP, so only the server value counts.
+SUIT_HP_MEASURED = {4: 360}
 
 
 def suit_hp(item):
@@ -170,7 +176,7 @@ def suit_hp(item):
         return None
     n = item & 0xFFFF
     grade = SUIT_DURABILITY.get(n, SUIT_DURABILITY[look * SUIT_STEP])
-    return SUIT_HP_TABLE[grade]
+    return SUIT_HP_MEASURED.get(look, SUIT_HP_TABLE[grade])
 
 
 def mask_model(item):
@@ -404,7 +410,7 @@ if __name__ == "__main__":
     del full["bag"]["0x00000000"]
     assert settle_soldier_mask(full, False, 50)[0] == MASK_DG_M and MASK_DUE not in full
     # 2026-09-24: suit HP = the retail durability table
-    assert [suit_hp(suit_for_armor(t)) for t in range(5)] == [270, 210, 240, 250, 340]
+    assert [suit_hp(suit_for_armor(t)) for t in range(5)] == [270, 210, 240, 250, 360]
     assert suit_hp(0x63310029) == 240 and suit_hp(0x63310004) == 270   # placeholder -> class
     assert suit_hp(0x63300000) is None and suit_hp(NO_ITEM) is None      # a mask / empty slot
     # and re-derived from the game's own data/bgd/bgd.bin (patch 20060124_3)

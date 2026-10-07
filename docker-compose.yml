@@ -94,7 +94,6 @@ services:
       - "--peer-push"
       - "--user-costume=0x1012"
       - "--world-self-charaid"
-      - "--bt-start-ready"
       - "--peer-answer"
       # relay the other consoles' avatars into each session (raw, wu, off)
       - "--peer-relay=${POL_DOC_PEER_RELAY:-raw}"

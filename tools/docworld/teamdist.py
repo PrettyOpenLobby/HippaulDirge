@@ -2,15 +2,20 @@
 
 
 
-def gs_real_ready(teams, members):
+def gs_real_ready(teams, members, coop=False):
     """sec 4ft: (ready, why) for the REAL distribution of a table: at least two
-    seated members, every one of them on a team, and both sides occupied."""
+    seated members, every one of them on a team, and both sides occupied.
+    2026-09-29: coop (a MISSION table) drops the both-sides rule -- partners
+    on one team are the normal case (live: two players on team 1 were told
+    to stand on OPPOSITE teams and held for the whole countdown)."""
     members = [m for m in members if m]
     if len(members) < 2:
         return False, "%d seated member(s), need 2" % len(members)
     missing = [m for m in members if m not in teams]
     if missing:
         return False, "no team yet for %s" % ", ".join("0x%x" % m for m in missing)
+    if coop:
+        return True, "all %d seated players are on a team (co-op)" % len(members)
     if len({teams[m] for m in members}) < 2:
         return False, "everyone is on team %d -- stand on OPPOSITE teams" \
             % teams[members[0]]
@@ -34,6 +39,10 @@ def gs_dist_due(g, settle):
         # 2026-09-23: not ready yet -- wake for the auto-team deadline
         return g.get("auto_at")
     _be = g.get("brief_end")
+    if g.get("early"):
+        # 2026-09-29: a mission starts once everyone is ready, a
+        # table FULL of ready players too; the countdown is only a maximum
+        return g["ready_at"] + settle
     if _be and g["ready_at"] >= _be:
         return g["ready_at"]     # the countdown is over: no one can still move
     return max(g["ready_at"] + settle, _be or 0.0)

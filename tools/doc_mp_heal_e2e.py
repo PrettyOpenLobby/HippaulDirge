@@ -130,6 +130,10 @@ def run(twin):
         time.sleep(0.3)
         cb.sendto(gs_req(B_CID, 47, seq=2), dst)
         time.sleep(2.0)                     # the GO burst (--gs-battle-go-after 1)
+        # 2026-10-05: a real console starts its 1 Hz report (request 24) at
+        # GO; without it the server re-sends the GO burst (whose kind 3 resets MP)
+        ca.sendto(gs_req(A_CID, 24, arg=1, seq=3), dst)
+        cb.sendto(gs_req(B_CID, 24, arg=1, seq=3), dst)
         ga = drain(ca)
         drain(cb)
         k28 = [p[D.BODY_OFF + 22] if len(p) > D.BODY_OFF + 22 else 0

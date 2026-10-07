@@ -124,6 +124,12 @@ LOBBY_CMD_RETURN = 4       # 0x00bd1fb8: RETURN TO LOBBY (its poll runs the full
                            # reset 0x00bd2a38, selector 39's arm). Live,
                            # a player quit the Wastelands arena with
                            # it and the room ran on for 600 s.
+# 2026-10-01 (retail lobby, re-visibility/rt_vis_proof.py): the Status
+# window's Public / Anonymous row. The client sets / clears its own bit 0x04
+# (setSelfFlags 0x00be5e60 / clearSelfFlags 0x00be5ec0) as it sends; the 241
+# arm for both is the no-op 0x00bd0ff4. The setting itself is ours to keep.
+LOBBY_CMD_ANONYMOUS = 6
+LOBBY_CMD_PUBLIC = 7
 LOBBY_CMD_START = 3        # 0x00bd1db8 (kelsvc vt+604): netclient bit 0x40 =
                            # start_onlinebattle -> the LEADER's "start the
                            # battle" request (sec 4fm). Its 241 result arm is a

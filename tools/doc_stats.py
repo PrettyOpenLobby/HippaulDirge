@@ -361,6 +361,15 @@ CAREER_REC_LEN = 268
 LOGIN_MEDAL_MASK_OFF = 56
 LOGIN_RP_OFF = 68
 LOGIN_RANK_OFF = 131
+#: 2026-10-01: the Status window's "Public / Anonymous" setting (manual p.36
+#: 公開設定). The client sends lobby command 6 (Anonymous) / 7 (Public) and
+#: flips its own copy at once; the self record keeps it at R+0x2fa bit 0x04 =
+#: world-door body[129] (the byte that also carries the reservation 0x01 and
+#: the novice mark 0x40), a peer's at user-record wire+30. MEASURED on the
+#: retail lobby (re-visibility/rt_vis_proof.py). No client code hides another
+#: player's record on that bit: the server must (selector 140).
+LOGIN_FLAGS_OFF = 129
+PRIVATE_BIT = 0x04
 MEDAL_BASE = 16                  # group-60 index of medal id 0
 MEDAL_IDS = 24
 # 2026-09-13 MEASURED (an offline run of the client's own code (doc_statuspage2_rows) runs the page
@@ -440,6 +449,8 @@ def apply_login(body, c):
     struct.pack_into("<I", body, LOGIN_MEDAL_MASK_OFF, medal_mask(c))
     struct.pack_into("<i", body, LOGIN_RP_OFF, min(max(0, int(c["rp"])), RP_MAX))
     body[LOGIN_RANK_OFF] = clamp_rank(c["rank"])
+    if c.get("private"):
+        body[LOGIN_FLAGS_OFF] |= PRIVATE_BIT
     return body
 
 
@@ -455,46 +466,105 @@ def apply_login(body, c):
 #   +16 u32  GIL, the NEW TOTAL, same rule against R+744 (world door body[52]).
 #            WARNING: The zero record we used to send set BOTH to 0 on screen.
 #   +20 u32  OR'd into R+732 = the MEDAL-EARNED mask (bit n = medal id n)
-#   +30..44  15 award-holder ROSTER SLOTS; 0xFF (>= 32) = nobody. WARNING: 0 names
-#            roster slot 0 -- so zeros hand all 15 to the first player.
+#   +2 / +6 / +24 / +26  u16 the RESULTS SCREEN's rank-point counts: Enemies
+#            Defeated, Times KO'd, Teammate KO'd, Kill Streak Bonus
+#            (results_rp; the client multiplies them by its own weights)
+#   +28 u8   BATTLE TYPE: bit4 = team battle (the team RP rows), bit5 = a
+#            mission's "Reward" page (bit5+bit6 = "S..D Rank Reward"), neither
+#            = individual BT. bit1 / bit2 / bit3 = the win banner "%s Wins by
+#            Kill Count" / "by Mako Capsule Count" / "%s's Base Captured"
+#   +29 u8   WINNER: BT = the winner's roster slot; team = the team (0/1)
+#   +30..43  14 award-holder ROSTER SLOTS; 0xFF (>= 32) = nobody. WARNING: 0 names
+#            roster slot 0 -- so zeros hand them all to the first player.
 #            MEASURED: holder h IS MEDAL ID h (label table
 #            0x00afca68 = group 60 [16+h]: 0 BT Conquest .. 12 Base Attack,
-#            13 / 14 Reserved -- the launch client's table is 0x00b1ac08, the
-#            same 24 ids; every battle medal (MODE_MEDALS) is an id <= 12, so
+#            13 Reserved); every battle medal (MODE_MEDALS) is an id <= 12, so
 #            all of them have a holder slot, and 15..23 (tournament / weekly)
-#            are not battle medals). The arm turns slot n into roster[n]'s character id at
-#            block+632+4h; the Results window names it (0x00ac0500), picking
-#            which medals to list from a per-mode table (0x00afa348).
-#   +48 u8   RANK, written to R+763 only if 1..254
-#   +50 u16  "Score"
-#   +52 u32 / +56 u32  item REWARD id / quantity (added to the bag)
-#   +64/+128/+192/+256  four u16[32] per-roster-slot columns, TRANSPOSED into
-#            16-byte player records (block+120+16n: +0 charid, +4 col +64,
-#            +6 col +128, +8 col +256, +10 col +192, +12 bit 0 team). The
-#            Results board (0x00ac1168) ranks the players by ONE column per
-#            page: +64 = "Enemies Defeated" (0xdc15), +256 = s16 "Rank
-#            Points" (43:5), +192 = a per-mode label (0xdc56.., not in our
-#            string table). Nothing on that board reads +128; we send KOs
-#            there (the label order Enemies / KO'd / NPCs / Total suggests
-#            it) -- UNPROVEN. Roster = selector 38's order, self LAST.
+#            are not battle medals. The arm turns slot n into roster[n]'s
+#            character id at block+632+4h.
+#   +44 u8   RANK, written to R+763 only if 1..254
+#   +46 u16  "Score"
+#   +48 u32 / +52 u32  item REWARD id / quantity (added to the bag)
+#   +60/+124/+188/+252  four u16[32] per-roster-slot columns, TRANSPOSED into
+#            16-byte player records (block+120+16n: +0 charid, +4 col +60,
+#            +6 col +124, +8 col +252 (s16 rank points), +10 col +188,
+#            +12 team). Roster = selector 38's order, self LAST.
+#   +316..327  the MODE BLOCK, the team rows' counts (mode_block)
+#   +328 u8  players in the battle -> "Battle Scale Bonus Factor"
+# 2026-10-01: these are the RETAIL offsets, MEASURED by an offline run of the
+# retail arm 0x00BC9610 (doc_capsule_church_slot07_20260924.p2s, every byte
+# 0..399 set alone; re-rp/retail_kind4_map.py). The 09-13 map above was the
+# pre-retail build: from +44 on everything sat 4 bytes later (rank +48,
+# score +50, item +52/+56, columns +64.., block +320, count +332) and there
+# were 15 holder slots -- on the retail client our rank landed in "Score"
+# and the item id in its quantity.
 # ---------------------------------------------------------------------------
 RESULT_LEN = 400
 RES_OUTCOME, RES_RP_TOTAL, RES_GIL_TOTAL, RES_MEDALS = 0, 8, 16, 20
-RES_HOLDERS, RES_HOLDER_COUNT = 30, 15
-RES_RANK, RES_SCORE, RES_ITEM, RES_ITEM_QTY = 48, 50, 52, 56
-RES_COLUMNS = (64, 128, 192, 256)       # kills, KOs, mode value, rank points
+RES_KILLS, RES_KOS, RES_TEAM_KOS, RES_STREAK = 2, 6, 24, 26
+RES_TYPE, RES_WINNER = 28, 29
+RES_TYPE_KILLS, RES_TYPE_CAPSULES, RES_TYPE_BASE = 0x02, 0x04, 0x08
+RES_TYPE_TEAM, RES_TYPE_REWARD = 0x10, 0x20
+RES_HOLDERS, RES_HOLDER_COUNT = 30, 14
+RES_RANK, RES_SCORE, RES_ITEM, RES_ITEM_QTY = 44, 46, 48, 52
+RES_COLUMNS = (60, 124, 188, 252)       # kills, KOs, mode value, rank points
+RES_MODE_BLOCK, RES_MODE_BLOCK_LEN, RES_PLAYERS = 316, 12, 328
 RES_SLOTS = 32
 OUTCOME_CODES = {"w": 1, "l": 0, "d": 2, "void": 2}
 
 
+def mode_block(mode, block=None):
+    """The 12-byte MODE BLOCK (record +316) for mode byte `mode`, from the
+    same keys results_rp reads, so the screen's rows are the rows we paid."""
+    b = block or {}
+    g = lambda k: int(b.get(k, 0) or 0) & 0xFFFF
+    out = bytearray(RES_MODE_BLOCK_LEN)
+    if mode == 1:
+        struct.pack_into("<H", out, 0, g("team_kills"))
+    elif mode == 2:
+        struct.pack_into("<H", out, 0, g("survivors"))
+    elif mode == 3:
+        out[0] = g("base_flags") & 0xFF
+        out[1] = 1 if g("base_attack") else 0
+        struct.pack_into("<HH", out, 2, g("own_base_hp"), g("enemy_base_left"))
+    elif mode == 4:
+        struct.pack_into("<HHIH", out, 0, g("carriers_killed"),
+                         g("capsule_obtained"),
+                         int(b.get("hold_ms", 0) or 0) & 0xFFFFFFFF,
+                         g("capsules_end"))
+    elif mode == 5:
+        struct.pack_into("<HHH", out, 0, g("leaders_killed"),
+                         g("leader_points_lost"), g("leader_points_earned"))
+    elif mode == 6:
+        struct.pack_into("<6H", out, 0, g("flag_carriers_killed"),
+                         g("flags_returned"), g("flags_taken"),
+                         g("flag_obtained"), g("flag_points_earned"),
+                         g("flag_points_lost"))
+    return bytes(out)
+
+
 def result_record(outcome, rp_total, gil_total, mask, rank, score=0,
-                  item=(0, 0), holders=None, columns=None):
-    """The 400-byte kind-4 record. `outcome` is 'w' / 'l' / 'd' (or 'void').
-    `holders` = {medal id 0..14 (group-60 index - MEDAL_BASE): roster slot};
-    `columns` = one (kills, kos, mode value, rank points) per roster slot, in
-    the RECIPIENT's roster order (selector 38: the others, then itself)."""
+                  item=(0, 0), holders=None, columns=None, counts=None,
+                  rtype=0, winner=None, mode=None, block=None, players=0):
+    """The 400-byte kind-4 record (the RETAIL layout, see above). `outcome`
+    is 'w' / 'l' / 'd' (or 'void'). `holders` = {medal id 0..13
+    (group-60 index - MEDAL_BASE): roster slot}; `columns` = one (kills,
+    kos, mode value, rank points) per roster slot, in the RECIPIENT's roster
+    order (selector 38: the others, then itself). `counts` = (kills, kos,
+    team_kos, streak) for the recipient's own rank-point rows, `rtype` the
+    +28 battle-type bits, `winner` the +29 byte, `mode` / `block` the mode
+    block, `players` the battle-scale count."""
     rec = bytearray(RESULT_LEN)
     rec[RES_OUTCOME] = OUTCOME_CODES.get(outcome, 2)
+    for off, v in zip((RES_KILLS, RES_KOS, RES_TEAM_KOS, RES_STREAK),
+                      counts or ()):
+        struct.pack_into("<H", rec, off, max(0, min(int(v), 0xFFFF)))
+    rec[RES_TYPE] = rtype & 0xFF
+    if winner is not None:
+        rec[RES_WINNER] = winner & 0xFF
+    if mode is not None:
+        rec[RES_MODE_BLOCK:RES_MODE_BLOCK + RES_MODE_BLOCK_LEN] = mode_block(mode, block)
+    rec[RES_PLAYERS] = max(0, min(int(players or 0), 0xFF))
     struct.pack_into("<I", rec, RES_RP_TOTAL, max(0, min(int(rp_total), RP_MAX)))
     struct.pack_into("<I", rec, RES_GIL_TOTAL,
                      max(0, min(int(gil_total), 0x7FFFFFFF)))
@@ -505,13 +575,17 @@ def result_record(outcome, rp_total, gil_total, mask, rank, score=0,
             rec[RES_HOLDERS + h] = slot
     for n, row in enumerate((columns or [])[:RES_SLOTS]):
         for col, v in zip(RES_COLUMNS, row):
-            if col == 256:              # rank points gained: signed
+            if col == RES_COLUMNS[3]:   # rank points gained: signed
                 struct.pack_into("<h", rec, col + 2 * n,
                                  max(-0x8000, min(int(v), 0x7FFF)))
             else:
                 struct.pack_into("<H", rec, col + 2 * n,
                                  max(0, min(int(v), 0xFFFF)))
-    rec[RES_RANK] = clamp_rank(rank)
+    # 2026-10-05 (live + offline run of the retail gate 0x00ABE6BC, scratchpad
+    # re-promo/): 0 = no promotion. The Rank page shows only for +44 in 1..15
+    # and the arm writes 1..254 to R+763, so clamping 0 up to 1 printed
+    # "Promotion: DG Drone 3rd Class" and demoted the client's rank copy
+    rec[RES_RANK] = 0 if not rank else clamp_rank(rank)
     struct.pack_into("<H", rec, RES_SCORE, max(0, min(int(score), 0xFFFF)))
     struct.pack_into("<II", rec, RES_ITEM, item[0] & 0xFFFFFFFF,
                      item[1] & 0xFFFFFFFF if item[0] else 0)
@@ -548,6 +622,7 @@ def new_career(name="", rid=0):
             "quests_open": [],
             "kills": 0, "kos": 0, "heals": 0, "mvp": 0, "fa_bases": 0,
             "play_secs": 0, "medals": {}, "medal_set": MEDAL_SET,
+            "private": False,
             "history": []}
 
 
@@ -656,6 +731,93 @@ def award_medals(mode, rows, winner):
     return out
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-01: SE's OWN rank-point formula, the one the retail Results screen
+# computes (lobby_rel F = 0x00ABF890, weights at 0x00B16AD0, the 7-way mode
+# switch at 0x00B1DDB0, the medal RP table at 0x00B1AC68). MEASURED by
+# emulation: a Python copy matched the client's function on 570 random inputs
+# (scratchpad re-rp/rp_ref.py). The client draws its breakdown from the counts
+# we send and caps its running total at the total we send, so the server has
+# to pay exactly this or the screen and the career disagree.
+# Index = the table's mode byte (wire+110, BT_MODE_NAMES): 0/1 Team Kill (and
+# individual BT), 2 Survival, 3 Base, 4 Capsule, 5 Leader, 6 Flag.
+# (enemies defeated, times KO'd, teammate KO'd, kill streak, team won, team lost)
+RESULT_WEIGHTS = {0: (4, -2, -3, 2, 10, -5), 1: (4, -2, -3, 2, 10, -5),
+                  2: (4, -2, -3, 4, 20, -10), 3: (2, -1, -3, 0, 20, -10),
+                  4: (2, -1, -3, 0, 20, -10), 5: (3, -1, -3, 0, 30, -15),
+                  6: (2, -1, -3, 0, 20, -10)}
+#: medal id (group-60 index - MEDAL_BASE) -> the rank points its Results page
+#: adds; ids not listed add nothing
+MEDAL_RP = {0: 40, 1: 15, 2: -10}
+MEDAL_RP.update({i: 15 for i in range(3, 13)})
+
+
+def _tdiv(n, d):
+    """C's signed division (truncates toward zero), as the client's `div`."""
+    q = abs(n) // abs(d)
+    return q if (n >= 0) == (d >= 0) else -q
+
+
+def _s32(v):
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v & 0x80000000 else v
+
+
+def battle_scale(players):
+    """The "Battle Scale Bonus Factor" in thousandths: 1.0 for two players,
+    +0.1 for each one more, at most 2.0."""
+    return min(1000 + 100 * max(int(players) - 2, 0), 2000)
+
+
+def results_rp(mode, team_battle, outcome, kills=0, kos=0, team_kos=0,
+               streak=0, players=2, base_hp=0, block=None):
+    """The rank points the Results screen's breakdown adds up to, before the
+    medal pages (medals_rp). `mode` = the mode byte; `team_battle` = the
+    record's team flag (rec+28 bit 4; False = individual BT, whose screen has
+    no win / loss row); `outcome` 'w' / 'l' / 'd'. `block` holds the mode's
+    own counts, all optional: team_kills (1), survivors (2), base_flags /
+    base_attack / own_base_hp / enemy_base_left (3, with the table's base HP),
+    carriers_killed / hold_ms / capsule_obtained / capsules_end (4),
+    leaders_killed / leader_points_lost / leader_points_earned (5),
+    flag_carriers_killed / flags_returned / flags_taken / flag_obtained /
+    flag_points_earned / flag_points_lost (6). May be negative."""
+    b = block or {}
+    g = lambda k: int(b.get(k, 0) or 0)
+    pm = lambda n, m, cap=0x7FFFFFFF: min(_tdiv(_s32(n * m), 1000), cap)
+    w = RESULT_WEIGHTS.get(mode, RESULT_WEIGHTS[1])
+    tot = 0
+    for wt, n in zip(w[:4], (kills, kos, team_kos, streak)):
+        tot += int(n) * wt
+    if mode == 1:
+        tot += pm(g("team_kills"), 300)
+    elif mode == 2:
+        tot += g("survivors") * 3
+    elif mode == 3:
+        tot += (8 * (g("base_attack") != 0) + 5 * (g("base_flags") & 1)
+                + pm(int(base_hp) - g("enemy_base_left"), 3))
+        if g("base_flags") & 4:
+            tot += pm(g("own_base_hp"), 3)
+    elif mode == 4:
+        tot += (g("carriers_killed") * 5 + pm(g("hold_ms") // 1000, 10, 100)
+                + 5 * (g("capsule_obtained") != 0) + g("capsules_end") * 3)
+    elif mode == 5:
+        tot += (g("leaders_killed") * 5 + g("leader_points_earned")
+                + pm(g("leader_points_lost"), -200))
+    elif mode == 6:
+        tot += (g("flag_carriers_killed") * 2 + g("flags_returned") * 5
+                + g("flags_taken") * 3
+                + (g("flag_carriers_killed") * 5 if g("flag_obtained") & 1 else 0)
+                + g("flag_points_earned") * 5 - g("flag_points_lost"))
+    if team_battle:
+        tot += w[4] if outcome == "w" else (w[5] if outcome == "l" else 0)
+    return _tdiv(_s32(tot * battle_scale(players)), 1000)
+
+
+def medals_rp(medals):
+    """What the Results screen's medal pages add for these group-60 indexes."""
+    return sum(MEDAL_RP.get(int(m) - MEDAL_BASE, 0) for m in medals)
+
+
 def battle_rp(outcome, kills, seconds):
     if seconds < RP_MIN_SECONDS:
         return 0
@@ -753,8 +915,19 @@ class Stats:
         for r in rows:
             key = r["key"]
             c = self.career(key, r.get("name"), r.get("id"))
-            outcome = ("d" if winner is None
-                       else "w" if r.get("team") == winner else "l")
+            rank_before = c["rank"]
+            # 2026-10-04: a MISSION is pass/fail -- there is no draw. A player
+            # who quit or ran out the clock without clearing it (winner is None)
+            # must report a LOSS, not a draw: the client shows a mission DRAW as
+            # "cleared", so a quit was displaying "mission success" + a bogus
+            # promotion while the server correctly kept the exam open (live
+            # 10-04, DG Drone 2nd exam). Only team battles have a draw.
+            if mode == "MISSION":
+                outcome = "w" if (winner is not None
+                                  and r.get("team") == winner) else "l"
+            else:
+                outcome = ("d" if winner is None
+                           else "w" if r.get("team") == winner else "l")
             kills, kos = max(0, int(r.get("kills", 0))), max(0, int(r.get("kos", 0)))
             c["battles"] += 1
             c["kills"] += kills
@@ -787,11 +960,23 @@ class Stats:
                             c["quests_open"].remove(quest)
             else:
                 c[{"BT": "bt", "TBT": "tbt", "FA": "fa"}[mode]][outcome] += 1
-                rp = battle_rp(outcome, kills, seconds)
+                if "mode_idx" in r:
+                    # 2026-10-01: SE's own formula, the Results screen's --
+                    # its breakdown, then each medal page's rank points
+                    rp = results_rp(r["mode_idx"], mode != "BT", outcome,
+                                    kills, kos, r.get("team_kos", 0),
+                                    r.get("streak", 0),
+                                    r.get("players", len(rows)),
+                                    r.get("base_hp", 0), r.get("block"))
+                    rp += medals_rp(awards.get(key, []))
+                else:
+                    rp = battle_rp(outcome, kills, seconds)
                 gil = BATTLE_GIL[outcome]
             cg = coin_gil(r.get("coins"))
             gil += cg
-            c["rp"] = min(c["rp"] + rp, RP_MAX)
+            # the screen's total may be negative (no floor in the client);
+            # a career's rank points never go below 0
+            c["rp"] = max(0, min(c["rp"] + rp, RP_MAX))
             medals = awards.get(key, []) + promo
             self._grant_medals(c, awards.get(key, []))
             summ = {"mode": mode, "outcome": outcome, "rp": rp, "gil": gil,
@@ -800,6 +985,11 @@ class Stats:
                     "kills": kills, "kos": kos, "quest": quest,
                     "when": int(when if when is not None else self.clock())}
             c["history"] = (c["history"] + [summ])[-HISTORY_MAX:]
+            # the result record's own inputs (not kept in the history)
+            summ = dict(summ, promoted=c["rank"] > rank_before,
+                        team_kos=r.get("team_kos", 0),
+                        streak=r.get("streak", 0), mode_idx=r.get("mode_idx"),
+                        block=r.get("block"), players=r.get("players", len(rows)))
             self._week_tally(key, summ["when"], rp=rp, kills=kills,
                              team_w=int(outcome == "w" and mode in TEAM_WIN_MODES),
                              solo_w=int(outcome == "w" and mode in SOLO_WIN_MODES))
@@ -935,6 +1125,18 @@ class Stats:
         the wallet key masks them), or None."""
         suffix = "/0x%08x" % (cid & 0x3FFFFFFF)
         return next((k for k in self.data["chars"] if k.endswith(suffix)), None)
+
+    def set_private(self, key, private, name=None, rid=None):
+        """Lobby command 6 (True, "Anonymous") / 7 (False, "Public")."""
+        c = self.career(key, name, rid)
+        if bool(c.get("private")) != bool(private):
+            c["private"] = bool(private)
+            self.save()
+        return c["private"]
+
+    def is_private(self, key):
+        c = self.data["chars"].get(key) if key else None
+        return bool(c and c.get("private"))
 
     def viewer_fields(self, key):
         """(rank 1..16, ranking points) for the POL Viewer profile, or None."""
@@ -1136,18 +1338,43 @@ if __name__ == "__main__":
     assert struct.unpack_from("<III", rr, 8)[0] == 150
     assert struct.unpack_from("<I", rr, 16)[0] == 20250
     assert struct.unpack_from("<I", rr, 20)[0] == 0x201
-    assert rr[30:45] == b"\xff" * 15 and rr[48] == 4
-    assert struct.unpack_from("<H", rr, 50)[0] == 15
+    # 2026-10-01: the RETAIL layout (14 holder slots, rank +44, score +46)
+    assert rr[30:44] == b"\xff" * 14 and rr[44] == 4 and rr[48] == 0
+    assert struct.unpack_from("<H", rr, 46)[0] == 15
     assert result_record("w", 0, 0, 0, 1)[0] == 1
+    # no promotion = +44 0 (the gate hides the Rank page); a promotion keeps it
+    assert result_record("w", 0, 0, 0, 0, rtype=RES_TYPE_REWARD)[RES_RANK] == 0
+    assert result_record("w", 0, 0, 0, 2, rtype=RES_TYPE_REWARD)[RES_RANK] == 2
     # holders: medal id h -> roster slot at +30+h; columns land per slot
     rr = result_record("w", 0, 0, 0, 1, holders={0: 1, 5: 2, 15: 3, 6: 40},
                        columns=[(3, 1, 0, 45), (0, 2, 0, -10), (7, 0, 2, 70)])
-    assert rr[30] == 1 and rr[35] == 2 and rr[36] == 0xFF, rr[30:45].hex()
+    assert rr[30] == 1 and rr[35] == 2 and rr[36] == 0xFF, rr[30:44].hex()
     assert rr[31:35] == b"\xff" * 4          # medal 15 has no slot; slot 40 > 31
-    assert struct.unpack_from("<3H", rr, 64) == (3, 0, 7)
-    assert struct.unpack_from("<3H", rr, 128) == (1, 2, 0)
-    assert struct.unpack_from("<3H", rr, 192) == (0, 0, 2)
-    assert struct.unpack_from("<3h", rr, 256) == (45, -10, 70)
+    assert struct.unpack_from("<3H", rr, 60) == (3, 0, 7)
+    assert struct.unpack_from("<3H", rr, 124) == (1, 2, 0)
+    assert struct.unpack_from("<3H", rr, 188) == (0, 0, 2)
+    assert struct.unpack_from("<3h", rr, 252) == (45, -10, 70)
+    # the rank-point counts, battle type, winner, mode block, player count
+    rr = result_record("w", 0, 0, 0, 1, counts=(5, 2, 1, 3),
+                       rtype=RES_TYPE_TEAM | RES_TYPE_KILLS, winner=1, mode=3,
+                       block={"base_flags": 5, "base_attack": 1,
+                              "own_base_hp": 900, "enemy_base_left": 0},
+                       players=6)
+    assert struct.unpack_from("<H", rr, 2)[0] == 5
+    assert struct.unpack_from("<H", rr, 6)[0] == 2
+    assert struct.unpack_from("<2H", rr, 24) == (1, 3)
+    assert rr[28] == 0x12 and rr[29] == 1 and rr[328] == 6
+    assert rr[316:322] == bytes([5, 1]) + struct.pack("<HH", 900, 0)
+    # SE's formula (re-rp/rp_ref.py, emulator-matched): BT duel 3 kills, 1 KO,
+    # 2 players: 4*3 - 2 = 10, no win row, scale 1.0
+    assert results_rp(0, False, "w", kills=3, kos=1, players=2) == 10
+    # TBT win, 2 kills, team 9 kills, 6 players: (8 + 2 + 10) * 1.4 = 28
+    assert results_rp(1, True, "w", kills=2, players=6,
+                      block={"team_kills": 9}) == 28
+    # a KO-heavy loss goes negative (no floor on the screen)
+    assert results_rp(1, True, "l", kos=6, players=2) == -17
+    assert battle_scale(30) == 2000 and battle_scale(1) == 1000
+    assert medals_rp([MEDAL_BASE + 0, MEDAL_BASE + 2, MEDAL_BASE + 20]) == 30
     # the board for one recipient: others in room order, self LAST; a shared
     # medal names the recipient, a sole one its winner
     _sm = {0x11: {"kills": 3, "kos": 0, "rp": 45, "medals": [M_SLAYER, M_SURVIVOR]},

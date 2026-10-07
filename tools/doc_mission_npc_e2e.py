@@ -2,7 +2,9 @@
 """LOOPBACK end-to-end for the MISSION NPC control handoff (2026-09-28), through
 the real docudp main():
 
-  Beginner's Course I (quest 39, 5 kills) -> GO -> kind 15 Add Npc x2 + kind 27
+  Map Exercise - Battlefield Ruins (quest 38: two DG Soldiers in 231:3001;
+  until 2026-10-05 this ran on Beginner's Course I, which now fields all five
+  of its stationed soldiers at once) -> GO -> kind 15 Add Npc x2 + kind 27
   x2 (control -> the player). The test plays the client's 1 Hz report (request
   24, mode 4, the NPC list in the clear from datagram+88).
 
@@ -39,7 +41,7 @@ PORT = int(os.environ.get("DOC_E2E_PORT", "41577"))
 TMP = os.environ.get("TEMP", HERE)
 CID = 0x000410DC
 NPC0 = 0x40000100
-COURSE_I = 39
+COURSE_I = 38      # a two-enemy mission (the name is the test's history)
 
 
 def report(entries, trailer=False):
@@ -72,6 +74,12 @@ def kind_of(p):
 def k27_ids(pkts):
     return [struct.unpack_from("<I", p, D.BODY_OFF + 16)[0]
             for p in pkts if kind_of(p) == 27]
+
+
+def k22_ids(pkts):
+    """The NPC id of every kind 22 (extinct: {u32 id} at body[16])."""
+    return [struct.unpack_from("<I", p, D.BODY_OFF + 16)[0]
+            for p in pkts if kind_of(p) == 22]
 
 
 def k15_ids(pkts):
@@ -173,6 +181,13 @@ def main():
         t15 = [t for t, p in after if NPC0 + 2 in k15_ids([p])]
         t27 = [t for t, p in after if NPC0 + 2 in k27_ids([p])]
         check("REPLACEMENT 0x102: one kind 15", len(t15) == 1, "%d" % len(t15))
+        # 2026-10-05: the dead 0x100 is RELEASED (kind 22) before 0x102 arrives
+        t22 = [t for t, p in after if NPC0 in k22_ids([p])]
+        check("dead 0x100: ONE kind 22 (extinct), before 0x102's kind 15",
+              len(t22) == 1 and t15 and t22[0] <= t15[0],
+              "%d kind 22, %r / %r" % (len(t22), t22[:1], t15[:1]))
+        check("TWIN: no kind 22 for the living 0x101",
+              NPC0 + 1 not in k22_ids([p for _t, p in after]))
         check("REPLACEMENT 0x102: its first kind 27 comes >= 0.25 s AFTER the 15",
               t15 and t27 and t27[0] - t15[0] >= 0.25,
               "gap %s" % (round(t27[0] - t15[0], 3) if t15 and t27 else None))
@@ -211,6 +226,17 @@ def main():
           "NPC 0x40000102 is in the 1 Hz report now" in text)
     check("logged: three enemy kills in all",
           "-> 3 enemy kill(s)" in text)
+    # 2026-10-05: each death rolls the DG Soldier's own table (e102: chance
+    # 100, weights sum 100 -> always one item) and lays it on the field
+    _drops = text.count("[drops] enemy 0x4000010")
+    check("logged: each of the 3 deaths dropped an item (e102 always drops)",
+          _drops == 3 and text.count(") dropped 0x") == 3,
+          "%d drop line(s)" % _drops)
+    check("TWIN: no drop for an enemy that did not die (0x40000103+)",
+          "[drops] enemy 0x40000103" not in text)
+    _k10 = [p for _t, p in got if kind_of(p) == 10]
+    check("a kind 10 (field item) reached the player for the drops",
+          len(_k10) >= 3, "%d kind 10" % len(_k10))
     print("\n%s  (log: %s)" % ("ALL PASS" if not FAILS else
                                "%d FAIL(S): %s" % (len(FAILS), FAILS), log_path))
     return 1 if FAILS else 0

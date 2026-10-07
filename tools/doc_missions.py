@@ -170,6 +170,8 @@ OBJECTIVES = {
     31: ("kill", 30, 0), 32: ("kill", 50, 0), 33: ("kill", 100, 0),
     34: ("kill", 50, 0), 35: ("kill", 50, 0),
     36: ("kill", 2, 3),    # Defeat the DG Soldier and Beast Soldier
+    # 2026-10-05: EX-POTION's Drone table says 50 for 38; our client's own
+    # group-49 line says "Defeat 100 DG soldiers", and the client wins
     37: ("kill", 50, 0), 38: ("kill", 100, 0),
     39: ("kill", 5, 0),    # Beginner's Course I
     40: ("kill", 3, 0),    # Beginner's Course II
@@ -192,85 +194,432 @@ WHY_QUIT = "player quit"          # docudp: the solo player returned to the lobb
 #      Collector's Mind (Lv.2/Lv.3) = 16/24/25, Pest Control = 19,
 #      Green Encounter = 27, Forest of Grudge = 30, The Consequence of
 #      Betrayal = 36, Dual Horn Battlefield = 18.
-#   2. The client: each arena's situation model sets = bzd table 20, record
-#      4 + (sit - 3000) (records 0..3 = PvP sets), SE patch 20060124_3; the
-#      kind-15 NPC TYPE is an INDEX into that list (live). Controller
-#      spawn counts (doc_mission_spawns.json) back several matches up:
-#      Jungle 3000 has 10 spawn points = the Drone 2nd exam's 10 Beast
-#      Soldiers.
-# MODEL CODES (the client has no name table):
-#   e102 = DG soldier (live)            e030 = Beast Soldier / hound (live;
-#          Jungle 3000 = exam 1 "10 Beast Soldiers" = e030 alone, x10 spawns)
-#   e028 = DG Sniper (+ w005, a rifle) -- Wastelands 3004 is the only set
-#          with sniper + DG soldier + beast, the archive's Sniper Threat mix
-#   e015 = DG Commander -- in every commander-exam arena's set
-#   e038 / e040 = Bizarre Bugs -- Jungle Elite's distractors (Jungle 3003),
-#          and e038 is in the Sewers' bug sets
-#   e042 = SOLDIER -- beside e102 in Kalm 3005, the Double Attack set
-#   e019 e020 e039 e069 = the Wastelands beasts: Dual Horn, its Guard /
-#          Crimson hounds, and Green Encounter's two Cactuar kinds. Which is
-#          which is a GUESS.
+#   2. The client (2026-10-05, retail patch 20060124_3, MEASURED): a
+#      situation LOADS the models of zNNN/brd.bin "Res_<sit>" (ev2045_sub
+#      mdlResLoad -> loadchr_bzd); that is SITUATION_SETS. The kind-15 NPC
+#      TYPE indexes the zone's CHARACTER table (bzd.bin table 0, 524-byte
+#      records: model at +0x20, weapon after it, name +0x9a = group 54) --
+#      that is CHARDEF, and npc_type() picks the type. A type whose model the
+#      set does not load gets a name plate, HP bar and lock-on but NO BODY
+#      (live 10-05, the Dual Horn). The 09-23 reading -- type = index into
+#      bzd table 20's list -- only ever worked by coincidence (z201 3001,
+#      index 3 = e102 in both).
+# MODEL CODES = the in-game names (group 54 via CHARDEF +0x9a):
+#   e102 DG Soldier   e015 DG Commander   e028 DG Sniper (+ w005)
+#   e037 SOLDIER      e030 Beast Soldier  e020 Dual Horn
+#   e019 / e039 Guard Hound   e069 Cactuar / Cactuar King   e038 Bizarre Bug
+#   e040 Epiolnis     e041 Sahagin        e042 Red Saucer   e046 Bull Head
+#   e047 Sweeper      e026 Twin Sentry
 # confidence: "live" = played and won; "high" = archive map + a unique set;
 # "low" = a guess worth a look. "capsule" / "base" missions get enemies but
 # CANNOT be won yet (no capsule / base report is decoded).
 SITUATION_SETS = {
-    (201, 3000): ["e030", "w010"],
-    (201, 3001): ["e030", "w010", "w003", "e102"],
-    (201, 3002): ["w003", "w004", "e036", "o099", "g056", "e102"],
-    (201, 3003): ["e038", "e040", "e015", "w003"],
-    (201, 3004): ["w003", "e102"],
-    (203, 3001): ["w003", "o099", "e030", "w010", "e102"],
-    (203, 3003): ["o099", "w003", "e037", "e102"],
-    (203, 3004): ["o099", "w003", "e102"],
-    (203, 3005): ["o099", "w003", "e042", "e030", "w010", "e102"],
-    (204, 3000): ["o099", "e015", "w003", "e030", "w010"],
-    (204, 3002): ["o099", "e019", "e039", "e069"],
-    (204, 3003): ["o099", "e019", "e020", "e039"],
-    (204, 3004): ["o099", "e030", "w010", "e028", "w005", "w003", "e102"],
-    (204, 3005): ["o099", "e020", "e019"],
-    (204, 3007): ["o099", "w003", "e102"],
-    (205, 3002): ["e038", "e042", "e046"],
-    (205, 3003): ["e042", "e102", "o099", "w003"],
-    (205, 3004): ["e102", "w003"],
-    (208, 3001): ["w003", "e030", "w010", "e042", "e015"],
-    (208, 3002): ["w003", "w010", "e015", "e042", "e102"],
-    (208, 3003): ["w003", "e030", "w010", "e042", "e102"],
-    (208, 3006): ["w003", "e102"],
+    (201, 3000): ['e030', 'w010'],
+    (201, 3001): ['e030', 'w010', 'w003', 'e102'],
+    (201, 3002): ['w003', 'w004', 'e036', 'o099', 'g056', 'e102'],
+    (201, 3003): ['e038', 'e040', 'e015', 'w003'],
+    (201, 3004): ['w003', 'e102'],
+    (201, 3005): [],
+    (203, 3000): ['w003', 'o099', 'e037', 'e015', 'e102'],
+    (203, 3001): ['w003', 'o099', 'e030', 'w010', 'e102'],
+    (203, 3002): ['o099', 'w003', 'e030', 'w010', 'e102'],
+    (203, 3003): ['o099', 'w003', 'e037', 'e102'],
+    (203, 3004): ['o099', 'w003', 'e102'],
+    (203, 3005): ['o099', 'w003', 'e042', 'e030', 'w010', 'e102'],
+    (204, 3000): ['o099', 'e015', 'w003', 'e030', 'w010'],
+    (204, 3001): ['o099', 'e019', 'e039', 'e015', 'w003', 'w004'],
+    (204, 3002): ['o099', 'e019', 'e039', 'e069'],
+    (204, 3003): ['o099', 'e019', 'e020', 'e039'],
+    (204, 3004): ['o099', 'e030', 'w010', 'e028', 'w005', 'w003', 'e102'],
+    (204, 3005): ['o099', 'e020', 'e019'],
+    (204, 3006): ['o099', 'e019', 'e039', 'e069'],
+    (204, 3007): ['o099', 'w003', 'e102'],
+    (204, 3008): ['o099', 'e028', 'w005', 'w003', 'g048', 'e102'],
+    (205, 3000): ['e038', 'e042'],
+    (205, 3001): ['e026', 'e046', 'e042', 'e102', 'w003'],
+    (205, 3002): ['e038', 'e042', 'e046'],
+    (205, 3003): ['e042', 'e102', 'o099', 'w003'],
+    (205, 3004): ['e102', 'w003'],
+    (208, 3000): ['w003', 'e030', 'w010', 'e042', 'e015'],
+    (208, 3001): ['w003', 'w010', 'e015', 'e042', 'e102'],
+    (208, 3002): ['w003', 'e030', 'w010', 'e042', 'e102'],
+    (208, 3003): ['e042'],
+    (208, 3004): ['e015', 'w010', 'w003', 'e030'],
+    (208, 3005): ['w003', 'e102'],
+    (212, 3000): ['w003', 'e102'],
+    (212, 3001): ['w003', 'e015', 'e102'],
+    (212, 3002): ['w003', 'e102', 'e015'],
+    (212, 3003): ['e042'],
+    (212, 3004): ['e015', 'w010', 'w003', 'e030'],
+    (212, 3006): ['w003', 'e030', 'w010', 'e042', 'e015'],
+    (231, 3000): ['w003', 'e102'],
+    (231, 3001): ['w003', 'e102'],
+    (231, 3002): ['w003', 'e039', 'e102'],
 }
+#: 2026-10-05: NOT a cap -- the brd u32 beside each code is a bitmask of the
+#: 8 model variant sub-files the loader reads (static RE, loadchr 0x49cdc8;
+#: e102 = 2 = variant 1). Kept as the raw brd data.
+SITUATION_CAPS = {
+    (201, 3000): {'e030': 1},
+    (201, 3001): {'e030': 1, 'e102': 2},
+    (201, 3002): {'e036': 1, 'e102': 2},
+    (201, 3003): {'e038': 1, 'e040': 1, 'e015': 2},
+    (201, 3004): {'e102': 2},
+    (201, 3005): {},
+    (203, 3000): {'e037': 1, 'e015': 2, 'e102': 2},
+    (203, 3001): {'e030': 1, 'e102': 2},
+    (203, 3002): {'e030': 1, 'e102': 2},
+    (203, 3003): {'e037': 1, 'e102': 2},
+    (203, 3004): {'e102': 2},
+    (203, 3005): {'e042': 1, 'e030': 1, 'e102': 2},
+    (204, 3000): {'e015': 2, 'e030': 1},
+    (204, 3001): {'e019': 1, 'e039': 1, 'e015': 2},
+    (204, 3002): {'e019': 1, 'e039': 1, 'e069': 1},
+    (204, 3003): {'e019': 1, 'e020': 1, 'e039': 1},
+    (204, 3004): {'e030': 1, 'e028': 1, 'e102': 2},
+    (204, 3005): {'e020': 1, 'e019': 1},
+    (204, 3006): {'e019': 1, 'e039': 1, 'e069': 1},
+    (204, 3007): {'e102': 2},
+    (204, 3008): {'e028': 1, 'e102': 2},
+    (205, 3000): {'e038': 1, 'e042': 1},
+    (205, 3001): {'e026': 1, 'e046': 1, 'e042': 1, 'e102': 2},
+    (205, 3002): {'e038': 1, 'e042': 1, 'e046': 1},
+    (205, 3003): {'e042': 1, 'e102': 2},
+    (205, 3004): {'e102': 2},
+    (208, 3000): {'e030': 1, 'e042': 1, 'e015': 2},
+    (208, 3001): {'e015': 2, 'e042': 1, 'e102': 2},
+    (208, 3002): {'e030': 1, 'e042': 1, 'e102': 2},
+    (208, 3003): {'e042': 1},
+    (208, 3004): {'e015': 2, 'e030': 1},
+    (208, 3005): {'e102': 2},
+    (212, 3000): {'e102': 2},
+    (212, 3001): {'e015': 2, 'e102': 2},
+    (212, 3002): {'e102': 2, 'e015': 2},
+    (212, 3003): {'e042': 1},
+    (212, 3004): {'e015': 2, 'e030': 1},
+    (212, 3006): {'e030': 1, 'e042': 1, 'e015': 2},
+    (231, 3000): {'e102': 2},
+    (231, 3001): {'e102': 2},
+    (231, 3002): {'e039': 1, 'e102': 2},
+}
+CHARDEF = {
+    201: (
+        ('e040', ()),   # type 0  Epiolnis
+        ('o099', ()),   # type 1  -
+        ('e038', ()),   # type 2  Bizarre Bug
+        ('e102', ('w003',)),   # type 3  DG Soldier
+        ('e030', ()),   # type 4  Beast Soldier
+        ('e047', ()),   # type 5  Sweeper
+        ('e036', ('w004',)),   # type 6  -
+        ('e030', ()),   # type 7  Beast Soldier
+        ('e015', ('w003',)),   # type 8  DG Commander
+        ('e030', ()),   # type 9  Beast Soldier
+        ('e102', ('w003',)),   # type 10  DG Soldier
+        ('e036', ('w004',)),   # type 11  DG General
+        ('e102', ('w003',)),   # type 12  DG Soldier
+        ('e102', ('w003',)),   # type 13  DG Soldier
+        ('e102', ('w003',)),   # type 14  DG Soldier
+        ('e102', ('w003',)),   # type 15  DG Soldier
+        ('e102', ('w003',)),   # type 16  DG Soldier
+        ('e102', ('w003',)),   # type 17  DG Soldier
+    ),
+    203: (
+        ('e047', ()),   # type 0  Sweeper
+        ('e026', ()),   # type 1  Twin Sentry
+        ('e042', ()),   # type 2  Red Saucer
+        ('e046', ()),   # type 3  Bull Head
+        ('e041', ()),   # type 4  Sahagin
+        ('e015', ('w003',)),   # type 5  DG Commander
+        ('e102', ('w003',)),   # type 6  DG Soldier
+        ('e036', ('w004',)),   # type 7  DG General
+        ('e037', ()),   # type 8  SOLDIER
+        ('e102', ('w003',)),   # type 9  DG Soldier
+        ('e030', ()),   # type 10  Beast Soldier
+        ('e102', ('w003',)),   # type 11  DG Soldier
+        ('e046', ()),   # type 12  Bull Head
+        ('e026', ()),   # type 13  Twin Sentry
+        ('e037', ()),   # type 14  SOLDIER
+        ('e015', ('w003',)),   # type 15  DG Commander
+        ('e036', ('w004',)),   # type 16  DG General
+        ('e047', ()),   # type 17  Sweeper
+        ('e102', ('w003',)),   # type 18  DG Soldier
+        ('e041', ()),   # type 19  Sahagin
+        ('e102', ('w003',)),   # type 20  DG Soldier
+        ('e102', ('w003',)),   # type 21  DG Soldier
+        ('e030', ()),   # type 22  Beast Soldier
+        ('e030', ()),   # type 23  Beast Soldier
+        ('e102', ('w003',)),   # type 24  DG Soldier
+        ('e102', ('w003',)),   # type 25  DG Soldier
+        ('e102', ('w003',)),   # type 26  DG Soldier
+        ('e102', ('w003',)),   # type 27  DG Soldier
+        ('e102', ('w003',)),   # type 28  DG Soldier
+        ('e102', ('w003',)),   # type 29  DG Soldier
+        ('e102', ('w003',)),   # type 30  DG Soldier
+        ('e042', ()),   # type 31  Red Saucer
+        ('e030', ()),   # type 32  Beast Soldier
+        ('e102', ('w003',)),   # type 33  DG Soldier
+        ('e102', ('w003',)),   # type 34  DG Soldier
+        ('e102', ('w003',)),   # type 35  DG Soldier
+        ('e102', ('w003',)),   # type 36  DG Soldier
+        ('o099', ()),   # type 37  -
+    ),
+    204: (
+        ('o099', ()),   # type 0  -
+        ('e020', ()),   # type 1  Dual Horn
+        ('e020', ()),   # type 2  Dual Horn
+        ('e020', ()),   # type 3  Dual Horn
+        ('e039', ()),   # type 4  Guard Hound
+        ('e019', ()),   # type 5  Guard Hound
+        ('e015', ('w003',)),   # type 6  DG Commander
+        ('e028', ('w005',)),   # type 7  DG Sniper
+        ('e028', ('w005',)),   # type 8  DG Sniper
+        ('e102', ('w003',)),   # type 9  DG Soldier
+        ('e102', ('w003',)),   # type 10  DG Soldier
+        ('e020', ()),   # type 11  Dual Horn
+        ('e030', ()),   # type 12  Beast Soldier
+        ('e015', ('w003',)),   # type 13  DG Commander
+        ('e015', ('w003',)),   # type 14  DG Commander
+        ('e015', ('w003',)),   # type 15  DG Commander
+        ('e015', ('w003',)),   # type 16  DG Commander
+        ('e102', ('w003',)),   # type 17  DG Soldier
+        ('e102', ('w003',)),   # type 18  DG Soldier
+        ('e039', ()),   # type 19  Guard Hound
+        ('e019', ()),   # type 20  Guard Hound
+        ('e039', ()),   # type 21  Guard Hound
+        ('e019', ()),   # type 22  Guard Hound
+        ('e102', ('w003',)),   # type 23  DG Soldier
+        ('e102', ('w003',)),   # type 24  DG Soldier
+        ('e069', ()),   # type 25  Cactuar
+        ('e069', ()),   # type 26  Cactuar King
+        ('e069', ()),   # type 27  Cactuar
+        ('e069', ()),   # type 28  Cactuar King
+    ),
+    205: (
+        ('e038', ()),   # type 0  Bizarre Bug
+        ('e046', ()),   # type 1  Bull Head
+        ('e042', ()),   # type 2  Red Saucer
+        ('e046', ()),   # type 3  Bull Head
+        ('e046', ()),   # type 4  Bull Head
+        ('e026', ()),   # type 5  Twin Sentry
+        ('e102', ('w003',)),   # type 6  DG Soldier
+        ('e102', ('w003',)),   # type 7  DG Soldier
+        ('e102', ('w003',)),   # type 8  DG Soldier
+        ('e000', ()),   # type 9  -
+        ('e102', ('w003',)),   # type 10  DG Soldier
+        ('e102', ('w003',)),   # type 11  DG Soldier
+        ('e042', ()),   # type 12  Red Saucer
+        ('e038', ()),   # type 13  Bizarre Bug
+        ('e102', ('w003',)),   # type 14  DG Soldier
+        ('e102', ('w003',)),   # type 15  DG Soldier
+        ('o099', ()),   # type 16  -
+    ),
+    208: (
+        ('e042', ()),   # type 0  Red Saucer
+        ('e030', ()),   # type 1  Beast Soldier
+        ('e015', ('w003',)),   # type 2  DG Commander
+        ('e102', ('w003',)),   # type 3  DG Soldier
+        ('e102', ('w003',)),   # type 4  DG Soldier
+        ('e037', ()),   # type 5  SOLDIER
+        ('e102', ('w003',)),   # type 6  DG Soldier
+        ('e030', ()),   # type 7  Beast Soldier
+        ('e030', ()),   # type 8  Beast Soldier
+        ('e042', ()),   # type 9  Red Saucer
+        ('e047', ()),   # type 10  Sweeper
+        ('e030', ()),   # type 11  Beast Soldier
+        ('e015', ('w003',)),   # type 12  DG Commander
+        ('e030', ()),   # type 13  Beast Soldier
+        ('e015', ('w003',)),   # type 14  DG Commander
+        ('e015', ('w003',)),   # type 15  DG Commander
+        ('e102', ('w003',)),   # type 16  DG Soldier
+        ('e102', ('w003',)),   # type 17  DG Soldier
+        ('e102', ('w003',)),   # type 18  DG Soldier
+        ('e030', ('w003',)),   # type 19  Beast Soldier
+        ('e102', ('w003',)),   # type 20  DG Soldier
+        ('e102', ('w003',)),   # type 21  DG Soldier
+        ('e015', ('w003',)),   # type 22  DG Commander
+        ('e102', ('w003',)),   # type 23  DG Soldier
+        ('e102', ('w003',)),   # type 24  DG Soldier
+        ('e015', ('w003',)),   # type 25  DG Commander
+        ('e042', ()),   # type 26  Red Saucer
+        ('e000', ()),   # type 27  -
+        ('o099', ()),   # type 28  -
+        ('e047', ()),   # type 29  Sweeper
+    ),
+    212: (
+        ('o099', ()),   # type 0  -
+        ('e026', ()),   # type 1  Twin Sentry
+        ('e042', ()),   # type 2  Red Saucer
+        ('e046', ()),   # type 3  Bull Head
+        ('e041', ()),   # type 4  Sahagin
+        ('e015', ('w003',)),   # type 5  DG Commander
+        ('e102', ('w003',)),   # type 6  DG Soldier
+        ('e015', ('w003',)),   # type 7  DG General
+        ('e037', ()),   # type 8  SOLDIER
+        ('e102', ('w003',)),   # type 9  DG Soldier
+        ('e030', ()),   # type 10  Beast Soldier
+        ('e102', ('w003',)),   # type 11  DG Soldier
+        ('e015', ('w003',)),   # type 12  DG Commander
+        ('e015', ('w003',)),   # type 13  DG Commander
+        ('e102', ('w003',)),   # type 14  DG Soldier
+        ('e102', ('w003',)),   # type 15  DG Soldier
+        ('e102', ('w003',)),   # type 16  DG Soldier
+        ('e102', ('w003',)),   # type 17  DG Soldier
+        ('e102', ('w003',)),   # type 18  DG Soldier
+        ('e015', ('w003',)),   # type 19  DG Commander
+    ),
+    231: (
+        ('o099', ()),   # type 0  -
+        ('e026', ()),   # type 1  Twin Sentry
+        ('e042', ()),   # type 2  Red Saucer
+        ('e046', ()),   # type 3  Bull Head
+        ('e041', ()),   # type 4  Sahagin
+        ('e015', ('w003',)),   # type 5  DG Commander
+        ('e102', ('w003',)),   # type 6  DG Soldier
+        ('e036', ('w004',)),   # type 7  DG General
+        ('e037', ()),   # type 8  SOLDIER
+        ('e102', ('w003',)),   # type 9  DG Soldier
+        ('e030', ()),   # type 10  Beast Soldier
+        ('e102', ('w003',)),   # type 11  DG Soldier
+        ('e102', ('w003',)),   # type 12  DG Soldier
+        ('e102', ('w003',)),   # type 13  DG Soldier
+        ('e102', ('w003',)),   # type 14  DG Soldier
+        ('e019', ()),   # type 15  Guard Hound
+        ('e039', ()),   # type 16  Guard Hound
+    ),
+}
+
+
+#: 2026-10-05: each CHARDEF row's MAX HP (bzd table 0 +0x30, u16; static RE
+#: scratchpad re-headshot/). Kind 15 carries the NPC's HP and we sent a flat
+#: 100 for every enemy (--npc-spawn-hp): live, Dual Horn Duel's Dual Horn
+#: (22000 here) fell like a soldier. Same zones and order as CHARDEF.
+CHARDEF_HP = {
+    201: (3000, 1000, 45, 800, 280, 4760, 800, 320, 1450, 80, 680, 2500, 600, 400, 200, 150, 180, 200),
+    203: (4500, 250, 45, 90, 1000, 1500, 380, 3500, 550, 200, 90, 100, 100, 800, 650, 1600, 3500, 2000, 80, 150, 640, 640, 500, 90, 100, 165, 165, 60, 100, 100, 6000, 100, 1500, 100, 150, 180, 330, 1000),
+    204: (1000, 18000, 10000, 22000, 100, 300, 1800, 450, 130, 70, 70, 11000, 100, 620, 1800, 620, 1750, 800, 400, 50, 300, 80, 480, 100, 100, 120, 60, 120, 100),
+    205: (90, 250, 70, 200, 190, 1800, 150, 150, 1700, 5000, 450, 450, 70, 180, 100, 100, 1000),
+    208: (91, 100, 1650, 330, 350, 850, 300, 90, 540, 91, 800, 100, 1200, 10, 1000, 1400, 550, 450, 270, 100, 100, 100, 1650, 100, 350, 750, 91, 1000, 1000, 800),
+    212: (1000, 250, 45, 90, 1000, 1500, 100, 2000, 550, 200, 90, 100, 980, 980, 400, 270, 220, 220, 220, 1000),
+    231: (1000, 250, 45, 90, 1000, 1500, 120, 3500, 550, 200, 90, 120, 500, 500, 500, 300, 10000),
+}
+
+
 # quest -> (zone, situation, enemy codes spawned at once, confidence)
 # (a dead enemy is replaced 5 s later, so a "defeat N" count is reachable)
 MISSION_SETUP = {
-    1: (201, 3000, ["e030", "e030"], "high"),        # Jungle: 10 Beast Soldiers
-    3: (208, 3001, ["e015", "e015", "e030"], "high"),  # Church: 3 Commanders + beasts
-    5: (208, 3003, ["e102", "e102", "e030"], "low"),   # Church base: not winnable
+    # 2026-10-05: 2 at once (1 was mostly searching; 3 swarmed the player,
+    # live 18:40Z; the situation has 12 fixed Beast Soldier spawn groups)
+    1: (201, 3000, ["e030"] * 2, "high"),            # Jungle: 10 Beast Soldiers
+                                                     # (one at a time: e030 cap 1)
+    # 2026-10-05: 3 / 5 / 7 / 18 / 26 / 27 / 29 / 31 moved -- their situation's
+    # brd set did not load the model they asked for (208:3003 loads e042 only,
+    # 208 has no Res_3006, e020 is the Dual Horn, e037 is the SOLDIER)
+    3: (208, 3004, ["e015", "e015", "e030"], "high"),  # Church: 3 Commanders + beasts
+    # 2026-10-05: the 2006 player wiki (Mission page): the base at A7 is
+    # defended by DG Commanders, sniped from inside the church
+    5: (208, 3001, ["e015", "e015", "e102"], "low"),  # Church base (3001 has the
+                                                     # base AND its capture zone)
     6: (204, 3000, ["e015", "e015"], "high"),        # Wastelands: 5 Commanders
-    7: (208, 3002, ["e015"], "high"),                # Church: 12 Commanders, one at a time
-    18: (204, 3002, ["e019", "e039", "e069"], "low"),  # Dual Horn + hounds
-    19: (205, 3002, ["e038", "e038", "e046"], "low"),  # Sewer: Bizarre Bugs
-    20: (201, 3003, ["e015", "e015", "e038"], "high"),  # Jungle: soldiers + bugs
-    21: (204, 3004, ["e028", "e028", "e102", "e030"], "high"),  # snipers + others
+    7: (208, 3001, ["e015"], "high"),                # Church: 12 Commanders, one at a time
+    # 2026-10-05: the wiki and two 2006 blogs: the Dual Horn comes with blue
+    # and red wolves (Guard Hounds), shot for ammo drops; only the Dual Horn
+    # counts (KILL_TARGETS)
+    18: (204, 3003, ["e020", "e019", "e039"], "high"),  # "defeat ONE Dual Horn"
+    # 2026-10-05 (archive "Pest Control": only the sewer's insects): no Bull Head
+    19: (205, 3002, ["e038"], "high"),               # Sewer: Bizarre Bugs
+    # archive: "as many DG Soldiers", the bugs a distraction; no Jungle set
+    # loads e102 with e038, so Commanders stand in for the soldiers
+    20: (201, 3003, ["e015", "e015", "e038"], "low"),  # Jungle: soldiers + bugs
+    21: (204, 3004, ["e028", "e102", "e102", "e030"], "high"),  # sniper + others
+                                                     # (e028 cap 1, e102 cap 2)
     23: (203, 3003, ["e102", "e102"], "low"),        # Kalm capsules: not winnable
-    26: (204, 3005, ["e019", "e020"], "low"),        # 5 Dual Horns
-    27: (204, 3003, ["e020", "e039"], "low"),        # Cactuars: capsules
+    # 2026-10-05: + a hound (wiki: wolves alongside; fc2 blog: "1 red dog")
+    26: (204, 3005, ["e020", "e019"], "high"),       # 5 Dual Horns, one at a time
+    # 2026-10-05: 3006 (not 3002) is the Wastelands' Cactuar set -- every
+    # e069 spawn group is there; 3002's groups are hounds + soldiers it never
+    # loads
+    27: (204, 3006, ["e069"], "low"),                # Green Encounter: Cactuar; capsules
     28: (205, 3003, ["e102", "e102"], "high"),       # Sewer capsules: not winnable
-    29: (203, 3005, ["e102", "e102", "e042"], "high"),  # Kalm: DG Soldiers + SOLDIER
-    30: (201, 3002, ["e102", "e102"], "low"),        # Jungle base: not winnable
-    31: (208, 3006, ["e102", "e102"], "high"),       # Map Exercise Church
+    29: (203, 3003, ["e102", "e102", "e037"], "high"),  # Kalm: DG Soldiers + SOLDIER
+    # 2026-10-05: wiki: soldiers at the cave, a General at the base
+    30: (201, 3002, ["e102", "e102", "e036"], "low"),  # Jungle base
+    31: (208, 3005, ["e102", "e102"], "high"),       # Map Exercise Church
     32: (201, 3004, ["e102", "e102"], "high"),       # Map Exercise Jungle
     33: (204, 3007, ["e102", "e102"], "high"),       # Map Exercise Wastelands
     34: (205, 3004, ["e102", "e102"], "high"),       # Map Exercise Sewers
     35: (203, 3004, ["e102", "e102"], "high"),       # Map Exercise Kalm
-    36: (203, 3001, ["e102", "e030"], "high"),       # Kalm: soldier + beast soldier
-    39: (201, 3001, ["e102", "e102"], "live"),       # Beginner's Course I
-    40: (201, 3001, ["e102", "e102", "e030"], "live"),  # Course II + hound
+    # 2026-10-05: wiki + fc2 blog: fast targets plus small red/pink guard
+    # robots -- 3005 is the Kalm set that also loads the Red Saucer (e042);
+    # only the soldier and beast soldier count (KILL_TARGETS)
+    36: (203, 3005, ["e102", "e030", "e042"], "high"),  # Kalm: soldier + beast + robots
+    # 2026-10-05: the archive puts both Beginner's Courses in the Battlefield
+    # Ruins (they were served, and won live, in the Jungle). Course I: 5
+    # DG Soldiers; Course II: 3 DG Soldiers "while avoiding the Guard Hound"
+    # -- 231:3002 is the Ruins set that loads the hound (e039)
+    # Course I: "We have stationed special DG Soldiers" -- all 5 at once, one
+    # per 231:3001 pool point (the archive: "Defeat 5 DG Soldiers")
+    39: (231, 3001, ["e102"] * 5, "high"),          # Beginner's Course I
+                                                     # (types: MISSION_TYPES)
+    40: (231, 3002, ["e039", "e102", "e102", "e102"], "high"),  # Course II:
+                                                     # the hound + 3 moving soldiers
+    # 2026-09-29: the missions that had NO enemies (archive + table 20; each
+    # situation is one of its arena's that HAS spawn nodes)
+    4: (201, 3001, ["e102", "e102", "e030"], "high"),  # Trooper 3rd: capsules,
+                                                       # DG Soldiers + Beast Soldiers
+    # 2026-10-05: 203:3001 -- the all-DG-Soldier set with 8 capsule generators
+    # (3003 has none; capsules sat on a ring around the start)
+    25: (203, 3001, ["e102", "e102"], "high"),       # Collector's Mind Lv.3:
+                                                        # "a lot of DG Soldiers"
+    37: (212, 3001, ["e102", "e102"], "high"),       # Map Exercise Train Graveyard
+    # 2026-10-05: 231:3000, the Ruins' plain soldier set (3001 is Course I's
+    # head-only range)
+    38: (231, 3000, ["e102", "e102"], "high"),       # Map Exercise Battlefield Ruins
+    # base assaults: the archive names no enemies -- DG soldiers from the only
+    # set with spawn nodes on each map
+    2: (204, 3000, ["e015", "e030"], "low"),         # Drone 1st: Wastelands base
+                                                     # (3000 is the one with a base)
+    8: (203, 3000, ["e102", "e102", "e015"], "low"),  # Trooper 1st: Kalm base
+    # 2026-10-05: wiki: the base on the high point is guarded by Twin Sentry
+    # turrets, with DG Soldiers, Red Saucers and Bull Heads respawning. Two
+    # turrets ride the normal spawn nodes (SE's fixed turret placement is not
+    # decoded)
+    22: (205, 3001, ["e026", "e026", "e102", "e042", "e046"], "low"),  # Iron Curtain
+    # 16 / 24 (Collector's Mind I / II): the archive lists capsules and no
+    # enemies -- left without
 }
+# 2026-10-05: BASE MISSIONS (static RE + MEASURED retail bzd, scratchpad
+# re-basemission/). A mission base is the PvP Team Base gimmick: the client
+# creates the situation controller's table-14 rows [a, a+count) at zone load,
+# SKIPS every base-class row while the record's Base Durability (wire+16) is
+# 0 (retail 0x0066e440 -> zonemgr+0x2b0 |= 8), takes the owner from the
+# placement byte +0x50, and binds it with notify kind 29 (HP = that same
+# Base Durability). We sent 0 and no kind 29 -> "no base on the map" (live
+# 10-05, Iron Curtain). quest -> (table-14 row = the gimmick instance kind 29
+# names, owning team, the base's world position). Every one is a g056 owned
+# by team 1 (the enemy side); no mission has a base for the players.
+MISSION_BASES = {
+    30: (21, 1, (1850.0, -11.5, -567.5)),      # Forest of Enmity, z201:3002
+    22: (54, 1, (-624.6, 283.5, -343.8)),      # Iron Curtain, z205:3001
+    8: (7, 1, (-806.3, -11.5, 1538.4)),        # Trooper 1st exam, z203:3000
+    2: (2, 1, (-1666.3, -14.3, -134.9)),       # Drone 1st exam, z204:3000
+    5: (69, 1, (300.7, -272.0, 1602.7)),       # Church base, z208:3001
+}
+#: the Base Durability a base mission's record carries (the client's base HP);
+#: retail's value is unknown, Team Base's live 8000 is the one we have seen
+MISSION_BASE_HP = 8000
+
+
 # "Maximum Participants" per the archive (the mission screen's limit, command
 # 29 answer body[37]). Unlisted quests: 1. WARNING: A second player joining a
 # mission is UNTESTED end to end.
+#: 2026-10-05: the map exercises' caps from EX-POTION's 2006 Drone mission
+#: table (ex-potion.com/dcff7/mdgd.html): Church 1, Jungle 3, Wastelands 3,
+#: Sewers 2, Kalm 3, Train Graveyard 2, Battlefield Ruins 4.
 MAX_PLAYERS = {
     1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 6: 1, 7: 1, 8: 1, 16: 1, 18: 3, 19: 1,
     20: 3, 21: 3, 22: 6, 23: 4, 24: 1, 25: 1, 26: 6, 27: 3, 28: 1, 29: 2,
-    30: 2, 31: 1, 32: 1, 33: 1, 34: 1, 35: 1, 36: 3, 39: 1, 40: 1,
+    30: 2, 31: 1, 32: 3, 33: 3, 34: 2, 35: 3, 36: 3, 37: 2, 38: 4, 39: 1,
+    40: 1,
 }
 # archive maps for rows with no enemy set above (zone numbers as served)
 # 2026-09-24: + the map exercises 37 Train Graveyard (z212) / 38 Battlefield
@@ -288,17 +637,94 @@ MISSION_TIME = {
     16: 600, 18: 420, 19: 300, 20: 300, 21: 300, 22: 300, 23: 480, 24: 900,
     25: 420, 26: 600, 27: 480, 28: 270, 29: 300, 30: 300, 31: 3600, 36: 480,
     39: 3600, 40: 3600,
+    # 2026-10-05, archive: "most if not all maps had a standard time limit
+    # set to 60 minutes" (the map exercises; 31 had it already)
+    32: 3600, 33: 3600, 34: 3600, 35: 3600, 37: 3600, 38: 3600,
 }
 
 
+def npc_type(zone, sit, code):
+    """2026-10-05: the kind-15 TYPE that draws model `code` in (zone, sit):
+    the first index of the zone's CHARACTER table (bzd table 0, CHARDEF) whose
+    model is `code` and whose weapon models the situation's brd set also
+    loads; None when none does. The type is NOT an index into the situation's
+    model list (the old models.index(code)): live 10-05 type 1 in z204 drew a
+    name plate "Dual Horn" (chardef[1] = e020) with no body, because Res_3002
+    never loads e020 -- and most rows named a model their set never loads."""
+    loaded = set(SITUATION_SETS.get((zone, sit), ()))
+    if code not in loaded:
+        return None
+    for i, row in enumerate(CHARDEF.get(zone, ())):
+        if row[0] == code and set(row[1]) <= loaded:
+            return i
+    return None
+
+
+#: 2026-10-05 (static RE, scratchpad re-headshot/): explicit kind-15 types,
+#: in the controller's pool-node order, where the first chardef row of a model
+#: is the wrong enemy. The arena's spawn-group table (client bzd table 25,
+#: named by each pool type-4 node's u16 at +0x48) gives the Beginner's Courses
+#: z231 rows 12 / 13 / 14: HEAD-ONLY DG Soldiers (hit-part table 2: head x10,
+#: every other part 0; damage mask 0x48 zeroes melee; HP 500), 12 / 13 standing,
+#: 14 moving. Type 6, the first e102 row, takes body damage. Offline: the
+#: client's own damage routine 0x681130 -> body 0 on all 12 parts for 12-14.
+MISSION_TYPES = {
+    39: [12, 12, 13, 13, 14],     # "special DG Soldiers ... only head damage"
+    40: [16, 14, 14, 14],         # the Guard Hound + 3 moving head-only soldiers
+}
+
+
+def npc_hp(zone, t, default):
+    """The kind-15 HP for chardef type `t` of `zone`: its own max HP
+    (CHARDEF_HP), else `default` (--npc-spawn-hp)."""
+    hps = CHARDEF_HP.get(zone, ())
+    return hps[t] if 0 <= t < len(hps) and hps[t] else default
+
+
+def can_draw(zone, sit, t):
+    """True when chardef type `t` of `zone` draws in situation `sit`: its
+    model and weapon models are all in the situation's brd set."""
+    defs = CHARDEF.get(zone, ())
+    loaded = set(SITUATION_SETS.get((zone, sit), ()))
+    return (0 <= t < len(defs) and defs[t][0] in loaded
+            and set(defs[t][1]) <= loaded)
+
+
+def group_type(zone, sit, group, rng=None):
+    """2026-10-05: the kind-15 type a spawn group (doc_mission_spawns
+    "pool_groups" entry: [flag, [[type, weight], ...]]) fields in (zone,
+    sit): a weighted pick among its drawable types (weight 0 only when none
+    weighs more), None when it has none (the node stays empty)."""
+    import random
+    rng = rng or random
+    pairs = [(t, w) for t, w in (group[1] if group else ()) if can_draw(zone, sit, t)]
+    live = [(t, w) for t, w in pairs if w > 0] or pairs
+    if not live:
+        return None
+    if len(live) == 1:
+        return live[0][0]
+    return rng.choices([t for t, _w in live], [max(w, 1) for _t, w in live])[0]
+
+
+def kill_target_type(quest, zone, t):
+    """True when chardef type `t` is (one of) `quest`'s named kill target."""
+    want = KILL_TARGETS.get(quest)
+    defs = CHARDEF.get(zone, ())
+    return bool(want) and 0 <= t < len(defs) and defs[t][0] in want
+
+
 def mission_setup(quest):
-    """(zone, situation, [kind-15 types], players) for `quest`, or None."""
+    """(zone, situation, [kind-15 types], players) for `quest`, or None. A
+    model the situation cannot draw is left out (selftest keeps that empty).
+    MISSION_TYPES overrides the first-row lookup with the arena's own types."""
     row = MISSION_SETUP.get(quest)
     if row is None:
         return None
     zone, sit, codes, _conf = row
-    models = SITUATION_SETS[(zone, sit)]
-    return zone, sit, [models.index(c) for c in codes], players(quest)
+    if quest in MISSION_TYPES:
+        return zone, sit, list(MISSION_TYPES[quest]), players(quest)
+    types = [npc_type(zone, sit, c) for c in codes]
+    return zone, sit, [t for t in types if t is not None], players(quest)
 
 
 #: 2026-09-26: each mission's initial supplies (source: Lifestream fan
@@ -309,13 +735,22 @@ def mission_setup(quest):
 #: figure for Trooper 2nd's rifle rounds, which is read as the standard 18.
 HANDGUN, RIFLE, MG = 0x62300000, 0x62300001, 0x62300002
 POTION = 0x69320000                # the ONLINE Potion (category 0x6932)
+#: 2026-10-05 (static RE, scratchpad re-bomb/): the Bomb Fragment, a thrown
+#: grenade -- in this build (item record, use script 0x18 -> RequestBomb ->
+#: status bit 0x40 echoed by kind 43), never handed out until now. 3 a stack.
+BOMB = 0x69320008
+PHOENIX_DOWN = 0x69320004
 STANDARD_SUPPLIES = ((HANDGUN, 36), (RIFLE, 18), (MG, 60))
+#: 2026-10-05: Beginner's Course I / II per the 2006 player wiki (dc.jpn.org
+#: Mission page, "H(300), ポ(3), フ(1)"): 300 handgun rounds, 3 Potions and 1
+#: Phoenix Down each. The 3 Bomb Fragments are Course III's (a later mission),
+#: so Course II no longer gets them.
 SUPPLIES = {
-    39: ((HANDGUN, 300), (POTION, 3)),                   # Beginner's Course I
-    40: ((HANDGUN, 300), (POTION, 3)),                   # Beginner's Course II
+    39: ((HANDGUN, 300), (POTION, 3), (PHOENIX_DOWN, 1)),  # Beginner's Course I
+    40: ((HANDGUN, 300), (POTION, 3), (PHOENIX_DOWN, 1)),  # Beginner's Course II
     7: ((HANDGUN, 54), (RIFLE, 18), (MG, 120), (POTION, 3)),  # Trooper 2nd exam
 }
-SUPPLY_ITEMS = frozenset((HANDGUN, RIFLE, MG, POTION))
+SUPPLY_ITEMS = frozenset((HANDGUN, RIFLE, MG, POTION, BOMB, PHOENIX_DOWN))
 
 
 def supplies(quest, standard=STANDARD_SUPPLIES):
@@ -390,6 +825,14 @@ def ko_out(quest, deaths):
 CAPSULE_MOST = frozenset((27,))
 #: how many capsules a CAPSULE_MOST mission's field gets
 CAPSULE_MOST_FIELD = 15
+#: 2026-10-05: capsule missions with NO enemies -> (zone, situation) whose
+#: item generators hand out Mako Capsules (doc_item_generators): the record
+#: carries the situation and the capsules go on those generators. Not in
+#: MISSION_SETUP, which would spawn an enemy set.
+CAPSULE_SITUATIONS = {
+    16: (208, 3003),     # Collector's Mind: 10 capsule generators in Church 3003
+    24: (205, 3002),     # Collector's Mind Lv.2: 12 in Sewers 3002
+}
 
 
 def capsule_setup(quest):
@@ -409,21 +852,61 @@ def capsules_end(quest, held):
     return bool(cs and cs[1] and held >= cs[1])
 
 
+#: 2026-10-05: the enemy a "kill" mission names (SE's objective lines above).
+#: Only a kill of one of these models counts; a quest not listed counts any
+#: enemy (its line names none, or the map exercises' "defeat N enemies").
+KILL_TARGETS = {
+    1: frozenset(("e030",)),            # Defeat 10 Beast Soldiers
+    3: frozenset(("e015",)),            # Defeat 3 DG Commanders
+    6: frozenset(("e015",)),            # Defeat 5 DG Commanders
+    7: frozenset(("e015",)),            # Defeat 12 DG Commanders
+    18: frozenset(("e020",)),           # Defeat the Dual Horn
+    26: frozenset(("e020",)),           # Defeat 5 Dual Horns
+    36: frozenset(("e102", "e030")),    # Defeat the DG Soldier and Beast Soldier
+    # "as many as possible" missions count only their named enemy too
+    19: frozenset(("e038",)),           # Bizarre Bugs
+    20: frozenset(("e015",)),           # "DG Soldiers" (Commanders stand in)
+    21: frozenset(("e028",)),           # the snipers (archive: "normal DG
+                                        # soldiers and Beast Soldiers ... would
+                                        # not count")
+    29: frozenset(("e102", "e037")),    # DG Soldiers and SOLDIERs
+    40: frozenset(("e102",)),           # 3 DG Soldiers, not the Guard Hound
+}
+
+
+def kill_counts(quest, npc_type):
+    """True when killing a kind-15 `npc_type` counts toward `quest`'s target.
+    An unknown type (None: a request-30 report) counts."""
+    want = KILL_TARGETS.get(quest)
+    if want is None or npc_type is None:
+        return True
+    row = MISSION_SETUP.get(quest)
+    defs = CHARDEF.get(row[0], ()) if row else ()
+    return 0 <= npc_type < len(defs) and defs[npc_type][0] in want
+
+
 def npc_kill_ends(quest, npc_kills):
     """True when a reported enemy-kill count completes a 'kill' mission."""
     kind, n, _ = objective(quest)
     return kind == "kill" and n > 0 and npc_kills >= n
 
 
-def verdict(quest, over, why, deaths):
+def verdict(quest, over, why, deaths, won_base=None):
     """'w' / 'l' for a mission room. A KO-limit end loses; an objective end
     wins; a clock end wins only a 'most' mission ("as many as possible" has
-    no failure but the KO limit and time is the only way it ends)."""
+    no failure but the KO limit and time is the only way it ends).
+    `won_base` = for a room the BASE ended ("team N's base destroyed", with
+    or without the occupation), whether this player's side is the one that
+    took it. The battle room words that end its own way (battleroom
+    base_report / arenadata.base_occupy_tick), so a "base" mission -- exams
+    2 and 8 among them -- never matched WHY_OBJECTIVE and always lost."""
     if (ko_out(quest, deaths) or (why or "").startswith(WHY_KO)
             or (why or "").startswith(WHY_QUIT)):
         return "l"
     if over and (why or "").startswith(WHY_OBJECTIVE):
         return "w"
+    if over and won_base is not None and "base destroyed" in (why or ""):
+        return "w" if won_base else "l"
     if objective(quest)[0] == "most" and over:
         return "w"
     return "l"
@@ -694,6 +1177,14 @@ def _selftest():
           verdict(19, True, WHY_KO + ": 3", 0) == "l")
     check("a quit loses even an 'as many as possible' mission",
           verdict(19, True, WHY_QUIT + " the mission", 0) == "l")
+    check("a 'base' mission (exam 2) wins when the players' side took the base",
+          verdict(2, True, "team 1's base destroyed", 0, won_base=True) == "w"
+          and verdict(2, True, "team 1's base destroyed and occupied by 0x10",
+                      0, won_base=True) == "w")
+    check("a 'base' mission loses when the players' own base fell",
+          verdict(2, True, "team 0's base destroyed", 0, won_base=False) == "l")
+    check("a base end without a known side still loses (old callers)",
+          verdict(2, True, "team 1's base destroyed", 0) == "l")
     check("capsule missions place their target; 27 places a field, no target",
           capsule_setup(16) == (7, 7) and capsule_setup(4) == (3, 3)
           and capsule_setup(28) == (5, 5)
@@ -705,19 +1196,68 @@ def _selftest():
     check("npc_kill_ends at the target only for kill missions",
           npc_kill_ends(1, 10) and not npc_kill_ends(1, 9)
           and not npc_kill_ends(19, 500) and not npc_kill_ends(2, 50))
+    _t3 = mission_setup(3)[2]           # [Commander, Commander, Beast Soldier]
+    check("a kill mission counts only the enemy it names",
+          kill_counts(3, _t3[0]) and not kill_counts(3, _t3[2])
+          and kill_counts(3, None) and kill_counts(31, 3))
+    check("every kill target is a model its mission spawns",
+          all(set(MISSION_SETUP[q][2]) & w for q, w in KILL_TARGETS.items())
+          and all(any(kill_counts(q, t) for t in mission_setup(q)[2])
+                  for q in KILL_TARGETS))
     check("every listed default mission has an objective",
           all(q in OBJECTIVES for q in list(range(1, 9)) + list(range(16, 37)) + [39, 40]
               if q != 17))
     # the per-mission setup
+    # 2026-10-05: no per-model cap check -- the brd u32 SITUATION_CAPS holds is
+    # a model VARIANT bitmask (loadchr 0x49cdc8), not an instance count (the
+    # instance pool 0x644e40 is shared); see doc-arena-node-types-corrected
+    check("every SITUATION_SETS row has its caps",
+          set(SITUATION_CAPS) == set(SITUATION_SETS))
     check("every MISSION_SETUP enemy code is in its situation's model set",
           all(c in SITUATION_SETS[(z, st)]
               for z, st, cs, _c in MISSION_SETUP.values() for c in cs))
-    check("Course I/II keep the live types (3,3 / 3,3,0 in 201:3001)",
-          mission_setup(39) == (201, 3001, [3, 3], 1)
-          and mission_setup(40) == (201, 3001, [3, 3, 0], 1))
+    # 2026-10-05: the Courses moved to the archive's Battlefield Ruins
+    # (they were LIVE in the Jungle as 201:3001 types 3, 3 / 3, 3, 4)
+    check("Course I: the 5 HEAD-ONLY soldiers (231:3001, chardef 12/13/14)",
+          mission_setup(39) == (231, 3001, [12, 12, 13, 13, 14], 1))
+    check("Course II: the Guard Hound + 3 moving head-only soldiers (16, 14 x3)",
+          mission_setup(40) == (231, 3002, [16, 14, 14, 14], 1)
+          and CHARDEF[231][16][0] == "e039")
+    check("enemy HP from the chardef: Dual Horn Duel's Dual Horn (its spawn group's "
+          "type 3) 22000, Course I's "
+          "head-only soldiers 500; an unknown type keeps the flag's value",
+          npc_hp(204, 3, 100) == 22000 and CHARDEF[204][3][0] == "e020"
+          and npc_hp(231, 12, 100) == 500 and npc_hp(231, 99, 100) == 100
+          and all(len(CHARDEF_HP[z]) == len(CHARDEF[z]) for z in CHARDEF))
+    check("every MISSION_TYPES type draws the model its row names, one per code",
+          all(len(ts) == len(MISSION_SETUP[q][2])
+              and [CHARDEF[MISSION_SETUP[q][0]][t][0] for t in ts] == MISSION_SETUP[q][2]
+              and all(set(CHARDEF[MISSION_SETUP[q][0]][t][1])
+                      <= set(SITUATION_SETS[MISSION_SETUP[q][:2]])
+                      for t in ts)
+              for q, ts in MISSION_TYPES.items()))
+    check("every set-up row draws ALL its models (no code its brd set cannot load)",
+          all(len(mission_setup(q)[2]) == len(r[2]) for q, r in MISSION_SETUP.items()))
+    check("every type draws the model its row asked for",
+          all([CHARDEF[r[0]][t][0] for t in mission_setup(q)[2]] == list(r[2])
+              for q, r in MISSION_SETUP.items()))
+    check("Dual Horn Duel: z204 situation 3003, type 1 = e020 (the Dual Horn)",
+          mission_setup(18)[:2] == (204, 3003) and mission_setup(18)[2][0] == 1
+          and CHARDEF[204][1][0] == "e020")
+    check("Dual Horn Duel: the hounds come along but do not count",
+          len(mission_setup(18)[2]) == 3
+          and [kill_counts(18, t) for t in mission_setup(18)[2]] == [True, False, False])
+    check("TWIN: the Dual Horn cannot be drawn in 204:3002 (its set has no e020)",
+          npc_type(204, 3002, "e020") is None)
     check("archive participant limits (Double Attack 2, Steel Wall 6, exams 1)",
           players(29) == 2 and players(22) == 6 and players(26) == 6
-          and players(1) == 1 and players(32) == 1 and players(99) == 1)
+          and players(1) == 1 and players(99) == 1)
+    check("map exercise caps (EX-POTION): Church 1, Jungle 3, Wastelands 3, "
+          "Sewers 2, Kalm 3, Train Graveyard 2, Ruins 4",
+          [players(q) for q in (31, 32, 33, 34, 35, 37, 38)] == [1, 3, 3, 2, 3, 2, 4])
+    check("Beginner's Courses: 300 HG + 3 Potions + 1 Phoenix Down, no bombs",
+          supplies(39) == supplies(40) == ((HANDGUN, 300), (POTION, 3), (PHOENIX_DOWN, 1))
+          and PHOENIX_DOWN in SUPPLY_ITEMS)
     check("every set-up mission has an objective",
           all(q in OBJECTIVES for q in MISSION_SETUP))
     # Argento's chain

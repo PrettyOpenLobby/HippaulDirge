@@ -44,6 +44,10 @@ class BattleRules(object):
                    if self.restrictions else ""))
 
 
+#: OURS (2026-10-01): a kill counts toward "Kill Streak Bonus" from the
+#: third one in a single life (the client only receives the count)
+STREAK_FROM = 3
+
 LEADER_TAG = "[L]"              # 2026-09-24: the Team Leader name tag (--leader-tag)
 
 
@@ -66,13 +70,14 @@ class BattleRoom(object):
                  "points", "seq9", "arrived", "started", "end_at", "reset_at",
                  "result_sent", "dead_until", "last_death", "over", "why",
                  "mission", "leader", "opened", "left", "damage_seen", "tally",
-                 "npc_kills", "npc_hp", "team_leaders", "leader_kills",
+                 "npc_kills", "npc_hp", "npc_counted", "team_leaders", "leader_kills",
                  "first_killer", "finisher",
                  "tally_keys", "field", "holders", "cap_hold", "capsule_winner",
                  "base_hp", "go_at", "go_fired", "go_cap", "gens",
                  "quest_items", "coins", "base_down", "occupy", "occupier",
-                 "base_spots", "carrier_kos", "last_ko", "carrier_drop", "last_pick",
-                 "cap_last", "last_capsule")
+                 "base_spots", "base_teams", "carrier_kos", "last_ko", "carrier_drop", "last_pick",
+                 "cap_last", "last_capsule", "field_picks",
+                 "team_kos", "life_kills", "streaks")
 
     def __init__(self, key, members, teams, rules, leader=0, mission=None,
                  now=None):
@@ -111,6 +116,10 @@ class BattleRoom(object):
         self.tally = None           # doc_stats.record_battle, once, at the end
         self.tally_keys = {}        # member id -> its key in `tally`
         self.npc_kills = 0          # mission: request 30s whose victim is no member
+        # 2026-10-05: NPC ids already counted -- request 30 AND the 1 Hz HP
+        # report both report one enemy's death (live: Course I "cleared" on
+        # 3 real kills, each counted twice)
+        self.npc_counted = set()
         self.npc_hp = {}            # mission: NPC id -> last HP from the 1 Hz report
         # 2026-09-24: TEAM CAPSULE -- slot -> (item, pos) on the field, who
         # holds how many, the running hold (team, until), the decided team
@@ -120,6 +129,20 @@ class BattleRoom(object):
         # -); paid 1000 each at the end (doc_stats.coin_gil) and cut from the
         # client's bag (kind 21, ident = itself) before its kind 4
         self.coins = {}
+        # 2026-10-01: member -> {consumable id: net picked up on the field}
+        # (kind 11 +, own drop -). Manual p.33: consumables found on the
+        # battlefield "generally cannot be taken back to the lobby", so
+        # end_battle cuts them (kind 21) as it cuts the coins.
+        self.field_picks = {}
+        # 2026-10-01: the Results screen's "Teammate KO'd" and "Kill Streak
+        # Bonus" rows (doc_stats.results_rp) read counts the server sends.
+        # team_kos = teammates this player KO'd (a friendly-fire table);
+        # life_kills = kills since this player's last KO; streaks = kills
+        # made on a streak. SE's streak rule is not in the client: OURS --
+        # every kill from the STREAK_FROM-th in one life counts once.
+        self.team_kos = {}
+        self.life_kills = {}
+        self.streaks = {}
         self.cap_hold = None
         self.capsule_winner = None
         # 2026-09-26: the two TEAM CAPSULE medals (launch build, 60:[47] /
@@ -144,6 +167,9 @@ class BattleRoom(object):
         self.occupy = {}            # base index -> (occupier cid, since)
         self.occupier = None        # the member whose hold won the battle
         self.base_spots = None      # (team 0 base, team 1 base) world positions
+        # 2026-10-05: the owning team per base INDEX; None = index i is team
+        # i's (PvP Team Base). A base mission lists ONE base, team 1's.
+        self.base_teams = None
         # 2026-09-24: TEAM LEADER (mode byte 5, "TLD"). SE's 28:205: "Two
         # teams compete to defeat one another's team leader. Defeating the
         # enemy leader earns points." The client keeps no leader (its
@@ -268,7 +294,7 @@ class BattleRoom(object):
     def saw_damage(self, sender, entries, now):
         self.damage_seen += 1
 
-    def kill(self, killer, victim, now, dedupe_s=1.0):
+    def kill(self, killer, victim, now, dedupe_s=1.0, npc_type=None):
         """A request 30 from `victim`'s client (or from an observer). Returns
         the kind-9 record fields (points, killer, victim, last_one) or None
         when the report is a duplicate / not this room's. Ends the room when
@@ -282,6 +308,12 @@ class BattleRoom(object):
             # character-table HP paths); count it if it does, and let a "kill"
             # mission end on its target.
             if self.mission is not None and killer in self.kills:
+                # 2026-10-05: "defeat N Dual Horns" counts only Dual Horns
+                if not doc_missions.kill_counts(self.mission, npc_type):
+                    return None
+                if victim in self.npc_counted:
+                    return None
+                self.npc_counted.add(victim)
                 self.npc_kills += 1
                 self.kills[killer] += 1
                 if self.first_killer is None:
@@ -301,6 +333,10 @@ class BattleRoom(object):
             return None
         self.last_death[victim] = now
         self.deaths[victim] += 1
+        self.life_kills[victim] = 0
+        if (killer in self.kills and killer != victim and not self.individual()
+                and self.team_of(killer) == self.team_of(victim)):
+            self.team_kos[killer] = self.team_kos.get(killer, 0) + 1
         if (self.mission is not None
                 and doc_missions.ko_out(self.mission, self.deaths[victim])):
             self.over, self.why = True, "%s: %d KO(s)" % (
@@ -313,6 +349,9 @@ class BattleRoom(object):
                                or self.team_leaders.get(self.team_of(victim)) == victim)
         if credited:
             self.kills[killer] += 1
+            self.life_kills[killer] = self.life_kills.get(killer, 0) + 1
+            if self.life_kills[killer] >= STREAK_FROM:
+                self.streaks[killer] = self.streaks.get(killer, 0) + 1
             if self.first_killer is None:
                 self.first_killer = killer
             self.last_ko[victim] = [killer, now, False]
@@ -375,14 +414,21 @@ class BattleRoom(object):
         self.carrier_kos[lk[0]] = self.carrier_kos.get(lk[0], 0) + 1
         return lk[0]
 
-    def npc_hp_update(self, entries, player, now):
+    def npc_hp_update(self, entries, player, now, credit=None, types=None):
         """2026-09-23: a mission's enemy deaths from the controlling client's
         1 Hz report (mission_npc_report). An NPC whose HP falls from > 0 to 0
-        is a kill for `player`; returns the ids that died this report."""
+        is a kill for `player`; returns the ids that died this report.
+        `types` = {id: kind-15 type} (only a mission's named enemy counts)."""
         died = []
         for nid, hp in entries:
-            prev = self.npc_hp.get(nid)
-            self.npc_hp[nid] = hp
+            # 2026-10-05: keyed by (reporter, id). Each member's console can
+            # simulate its OWN copy of an id (live 10-05: three consoles,
+            # HP 100 -> 60 -> 100 as two of them reported one Dual Horn), and
+            # a shared set changes controller on a handover; one id's history
+            # across consoles made fake rises, and a fall to 0 could repeat.
+            key = (player, nid)
+            prev = self.npc_hp.get(key)
+            self.npc_hp[key] = hp
             if prev is not None and hp != prev:
                 # 2026-09-23: the game's DAMAGE SCALE, measured -- no shipped
                 # table gives player HP (the server always set it; ours is a
@@ -390,7 +436,12 @@ class BattleRoom(object):
                 print("  [missions] NPC 0x%x HP %d -> %d (%+d)"
                       % (nid, prev, hp, hp - prev), flush=True)
             if prev and hp == 0 and not self.over:
-                self.kill(player, nid, now)
+                # 2026-10-05: the kill is the LAST HITTER's when one is known
+                # (a non-controller's 113, re-targeted to the controller of a
+                # shared set), not the reporting controller's
+                _k = (credit or {}).get(nid)
+                self.kill(_k if _k in self.kills else player, nid, now,
+                          npc_type=(types or {}).get(nid))
                 died.append(nid)
         return died
 
@@ -416,13 +467,25 @@ class BattleRoom(object):
                 continue
             self.base_hp[idx] = hp
             changed.append((idx, hp))
-            if hp == 0 and prev and not self.over and idx in (0, 1):
-                if occupy:
-                    self.base_down.setdefault(idx, 1 - idx)
+            owner = (self.base_teams[idx] if self.base_teams is not None
+                     and idx < len(self.base_teams) else idx)
+            if hp == 0 and prev and not self.over and owner in (0, 1):
+                if self.mission is not None:
+                    # 2026-10-05: a BASE MISSION's base is the enemy's and
+                    # taking it is every member's objective (mission rooms
+                    # split players across teams 0 / 1). -1 = any member holds.
+                    if occupy:
+                        self.base_down.setdefault(idx, -1)
+                        continue
+                    self.over = True
+                    self.why = "%s: the enemy base destroyed" % doc_missions.WHY_OBJECTIVE
                     continue
-                self.capsule_winner = 1 - idx
+                if occupy:
+                    self.base_down.setdefault(idx, 1 - owner)
+                    continue
+                self.capsule_winner = 1 - owner
                 self.over = True
-                self.why = "team %d's base destroyed" % idx
+                self.why = "team %d's base destroyed" % owner
         return changed
 
     def winner_slot(self):
@@ -461,8 +524,10 @@ class BattleRoom(object):
             # 2026-09-23: the mission's own victory / defeat lines (SE's text,
             # doc_missions.OBJECTIVES): KO limit loses, objective wins, and an
             # "as many as possible" mission wins when the clock ends it.
+            won_base = (None if self.capsule_winner is None
+                        else self.slot_of(cid) == self.capsule_winner)
             return doc_missions.verdict(self.mission, self.over, self.why,
-                                        self.deaths.get(cid, 0))
+                                        self.deaths.get(cid, 0), won_base)
         w = self.winner_slot()
         if w is None:
             return "d"

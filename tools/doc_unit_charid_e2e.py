@@ -61,6 +61,11 @@ def run(world_door):
             struct.pack_into("<I", tail, 80 - 12, CID)   # body[80]
             c.sendto(E.world_req(0, 1, bytes(tail)), dst)
             time.sleep(0.6)
+        if world_door == 2:
+            # 2026-10-05: a SHORT world door (no body[80]; a re-entry after a
+            # battle) -- its stores must still key on the known character
+            c.sendto(E.world_req(0, 2, b"", pad=40), dst)
+            time.sleep(0.6)
         c.sendto(E.world_req(0, D.LOBBY_CMD_SELECTOR_REQ,
                              struct.pack("<II", doc_unit.CMD_MINE, 0)), dst)
         time.sleep(0.8)
@@ -87,6 +92,12 @@ def main():
           ("[charid] 0x%08x from the world-door request body[80]" % CID) in text)
     check("MY UNITS is keyed by the CHARACTER (/0x%08x)" % CID,
           ("/0x%08x]" % CID) in line, line)
+    print("run 1b: full world door, then a SHORT one (re-entry after a battle)")
+    text, line = run(2)
+    units = [ln for ln in text.splitlines() if "[units] selector 2 [" in ln]
+    check("the SHORT world door's stores key on the CHARACTER (/0x%08x), not "
+          "the bare account" % CID,
+          bool(units) and ("/0x%08x]" % CID) in units[-1], units[-1] if units else "none")
     print("run 2 (TWIN): MY UNITS with no world door")
     text, line = run(0)
     check("TWIN: the key is the bare account (the live bug's shape)",

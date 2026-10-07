@@ -112,14 +112,33 @@ class TradeBook:
             if p is None:
                 return [("ack", sender)], "INVITE unreadable"
             partner, gil, items = p
-            for old in (self.by.get(sender), self.by.get(partner)):
-                if old is not None:          # a stale trade on either side
-                    self._close(old)
+            cur = self.by.get(sender)
+            if cur is not None and cur is self.by.get(partner) \
+                    and cur.other(sender) == partner:
+                # 2026-10-01: the invitee answering an invitation (manual
+                # p.27: it picks the inviter and accepts) reaches us as its
+                # own invitation naming the inviter -- the accept wire is not
+                # decoded. Treat it as joining the open trade, so the
+                # inviter's offer is kept rather than wiped by a new one.
+                cur.offers[sender] = (gil, items)
+                cur.confirmed.clear()
+                return ([("ack", sender),
+                         ("push", partner, offer_body(OFFER_PUSH, sender, gil, items))],
+                        "INVITE 0x%08x -> 0x%08x joins their open trade: %d gil, %s"
+                        % (sender, partner, gil, items))
+            acts = [("ack", sender)]
+            for old in {id(o): o for o in (cur, self.by.get(partner))
+                        if o is not None}.values():
+                # a stale trade on either side: its THIRD player is told,
+                # or it would sit in a trade window nobody else has open
+                self._close(old)
+                for who in (old.a, old.b):
+                    if who not in (sender, partner):
+                        acts.append(("push", who, bare_body(CANCEL_PUSH)))
             t = Trade(sender, partner)
             t.offers[sender] = (gil, items)
             self.by[sender] = self.by[partner] = t
-            return ([("ack", sender),
-                     ("push", partner, offer_body(INVITE_PUSH, sender, gil, items))],
+            return (acts + [("push", partner, offer_body(INVITE_PUSH, sender, gil, items))],
                     "INVITE 0x%08x -> 0x%08x: %d gil, %s" % (sender, partner, gil, items))
         t = self.by.get(sender)
         if t is None:
@@ -181,5 +200,18 @@ if __name__ == "__main__":
     # a confirm with no trade cancels the sender only
     acts, _ = tb.request(CONFIRM_REQ, PC, None)
     assert acts == [("push", PC, bare_body(CANCEL_PUSH))]
+    # 2026-10-01: the invitee "accepting" with its own 41 joins the open trade
+    # and keeps the inviter's offer
+    tb.request(INVITE_REQ, PC, live41)
+    acts, note = tb.request(INVITE_REQ, DECK,
+                            offer_body(INVITE_REQ, PC, 0, [(0x69320000, 1)]))
+    assert "joins their open trade" in note, note
+    assert tb.by[PC].offers == {PC: (5, []), DECK: (0, [(0x69320000, 1)])}, tb.by[PC].offers
+    # a THIRD player's invitation closes it and tells the one left out
+    THIRD = 0x00050000
+    acts, _ = tb.request(INVITE_REQ, THIRD,
+                         offer_body(INVITE_REQ, DECK, 1, [])[:24])
+    assert ("push", PC, bare_body(CANCEL_PUSH)) in acts, acts
+    assert tb.by[DECK].other(DECK) == THIRD and PC not in tb.by
     print("doc_trade self-test PASS")
     sys.exit(0)

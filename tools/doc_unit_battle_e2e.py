@@ -188,15 +188,24 @@ def main():
     units = docpg.read(units_path)["units"]
     u1, u2, u3 = (units[doc_unit.hexid(u)] for u in (U1, U2, U3))
     row = doc_unit.UNIT_BATTLE_ROW
-    # A's WIN with 1 kill pays RP_WIN + RP_PER_KILL; U1 gets exactly that
-    want = 100 + D.doc_stats.battle_rp("w", 1, 31)
+    # 2026-10-01: a unit gains exactly the rank points its member's career
+    # recorded for this battle (SE's Results formula plus medal pages, so the
+    # number is read back rather than recomputed here)
+    chars = docpg.read("stats").get("chars", {})
+
+    def battle_rp_of(cid):
+        k = next((k for k in chars if k.endswith("/0x%08x" % cid)), None)
+        hist = (chars.get(k) or {}).get("history") or [{}]
+        return int(hist[-1].get("rp", 0))
+    want = 100 + battle_rp_of(A_CID)
     check("store: U1 (A's unit, 1 kill) WON and gained its member's %d rank points"
           % (want - 100),
           (u1.get("stats") or [[0, 0, 0]])[row] == [1, 0, 0] and u1["pts"] == want,
           "stats %s pts %d" % (u1.get("stats"), u1["pts"]))
-    check("store: U2 (B's unit) LOST and gained B's loss points",
+    check("store: U2 (B's unit) LOST and gained B's points (%d)"
+          % battle_rp_of(B_CID),
           (u2.get("stats") or [[0, 0, 0]])[row] == [0, 0, 1]
-          and u2["pts"] == 100 + D.doc_stats.battle_rp("l", 0, 31),
+          and u2["pts"] == 100 + battle_rp_of(B_CID),
           "stats %s pts %d" % (u2.get("stats"), u2["pts"]))
     check("store: U3 (refused) untouched", not u3.get("stats") and u3["pts"] == 100,
           "stats %s pts %d" % (u3.get("stats"), u3["pts"]))

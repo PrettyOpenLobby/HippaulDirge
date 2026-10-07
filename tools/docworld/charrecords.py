@@ -84,6 +84,20 @@ def chara_id_for(base, uid, key, slot):
     return (base + ((uid & 0xFFFF) << 2) + slot) & 0x3FFFFFFF
 
 
+def chara_id_of(base, uid, key, slot, char=None):
+    """2026-10-05: the id to SERVE for a character: its POL Content ID when the
+    roster element carries one ("cid", doc_charastore.content_id_of), else the
+    derived chara_id_for. The client keeps a memory-card loadout only for an
+    owner among the handle's DoC content ids (static RE, re-loadout/)."""
+    try:
+        cid = int((char or {}).get("cid") or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    if 0 < cid < 0x40000000:
+        return cid
+    return chara_id_for(base, uid, key, slot)
+
+
 def build_charamake_answer(template, reg_pkt, record, seq=0,
                            inner_ip="127.0.0.1"):
     """The selector-16 CHARAMAKE answer, CARRYING the new character's record.
@@ -105,6 +119,41 @@ def build_charamake_answer(template, reg_pkt, record, seq=0,
     head = bytearray(template[framing.BODY_OFF:framing.BODY_OFF + 12]).ljust(12, b"\x00")
     tail = bytearray(reg_pkt[framing.BODY_OFF + 108:]) if len(reg_pkt) > framing.BODY_OFF + 108 else bytearray()
     body = head + bytearray(record[:96]).ljust(96, b"\x00") + tail
+    if len(body) < 176:
+        body += bytes(176 - len(body))
+    return handshake.build_lobby_advance(bytes(template[:framing.BODY_OFF]) + bytes(body),
+                               selector=16, seq=seq, inner_ip=inner_ip)
+
+
+#: 2026-10-01: a REGISTER REFUSAL. The router 0x00588000 sets [nest+20] =
+#: -(u16 body[10..11]) when body[8] bit 0 is set, before any state gate;
+#: selector 16 still moves the nest 10 -> 2, and phase 10's poll returns
+#: [nest+20], so the client reports e.g. -45201 and shows SE's own CER-45201
+#: dialog over the creation screen. MEASURED by an offline run of the
+#: client's own code (re-charamake/refuse_proof.py: 45201 / 42310 / 42311 /
+#: 42002 each come back negated; without the flag a code reads as success).
+#: The record still gets copied, so it carries slot 0xFF and no USED bit:
+#: the select list and the existing characters are left alone
+#: (refuse_list_proof.py case E).
+REFUSE_FLAG_OFF = 8
+REFUSE_CODE_OFF = 10
+REFUSE_NO_SLOT = 0xFF
+
+
+def build_charamake_refusal(template, reg_pkt, code, seq=0,
+                            inner_ip="127.0.0.1"):
+    """The selector-16 answer that REFUSES a REGISTER with CER `code`."""
+    record = bytearray(96)
+    name = bytes(reg_pkt[framing.BODY_OFF + 80:framing.BODY_OFF + 96]
+                 if len(reg_pkt) >= framing.BODY_OFF + 96 else b"")
+    record[68:68 + 16] = name.ljust(16, b"\x00")[:16]
+    record[84] = REFUSE_NO_SLOT
+    record[85] &= 0xFE
+    head = bytearray(template[framing.BODY_OFF:framing.BODY_OFF + 12]).ljust(12, b"\x00")
+    head[REFUSE_FLAG_OFF] |= 1
+    struct.pack_into("<H", head, REFUSE_CODE_OFF, int(code) & 0xFFFF)
+    tail = bytearray(reg_pkt[framing.BODY_OFF + 108:]) if len(reg_pkt) > framing.BODY_OFF + 108 else bytearray()
+    body = head + record + tail
     if len(body) < 176:
         body += bytes(176 - len(body))
     return handshake.build_lobby_advance(bytes(template[:framing.BODY_OFF]) + bytes(body),
