@@ -169,7 +169,10 @@ def _state(career, npc):
 
 def wins(career):
     c = career or {}
-    return sum(int((c.get(m) or {}).get("w", 0)) for m in ("bt", "tbt", "fa"))
+    # 2026-10-08: one bucket per Status page-2 row (doc_stats.ALL_BUCKETS);
+    # "fa" is the pre-row name an unmigrated career may still carry
+    return sum(int((c.get(m) or {}).get("w", 0))
+               for m in ("bt", "tbt", "tdm", "tbs", "tcp", "tfl", "tbr", "tfr", "fa"))
 
 
 # --- decisions: (event, state_changes, bag_changes, why) -------------------

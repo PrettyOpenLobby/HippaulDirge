@@ -63,6 +63,9 @@ SWEEP = [
 def main():
     ap = cli.build_parser()
     a = ap.parse_args()
+    # 2026-10-08: the container's stdout dies with the container; keep a copy
+    # under /logs (--log-file, default auto)
+    cli.install_log_file(a)
 
     extra_selectors = [int(x) for x in a.lobby_extra_selectors.split(",") if x.strip()]
     if extra_selectors:
@@ -160,18 +163,18 @@ def main():
         by itself exactly as before. `sess` names another client's session
         (sec 4fx: the relay dresses a SENDER, not the packet in hand).
 
-        WARNING: sec 4gz, STILL OPEN: the resolve is by ADDRESS. Sessions no longer
-        collide behind one household NAT, but two POL members playing from one
-        house still resolve through `resolve(ip)` -- and if that hands both the
-        same member, both get the same roster and (member + slot) the same
-        charid, at which point adopt_session's live-collision guard is the only
-        thing keeping them apart. Fixing THAT means resolving the member from
-        something in the datagram, not from where it came from."""
+        sec 4gz (2026-10-08): the resolve is by the credential blob the
+        client sent on its entrance / world door (`_s.token`, the thing in
+        the datagram that names the POL member) and only falls to the
+        ADDRESS when the blob does not decide. Two POL members behind one
+        household NAT are therefore told apart whenever their blobs decode;
+        when neither does, both still resolve through `resolve(ip)` and
+        adopt_session's live-collision guard is what keeps them apart."""
         _s = sess if sess is not None else current[0]
         if _resolver is None or _s is None:
             return uid
         if _s.account_key is None:
-            _s.account_key = _resolver.resolve(_s.ip)
+            _s.account_key = _resolver.resolve(_s.ip, blob=_s.token)
         return _s.account_key
     _roster_uid = [0]
 
@@ -267,6 +270,60 @@ def main():
     _go_resend = {}        # session -> [due, burst spec, tries left, GO time]
     GO_RESEND_S = 3.0
     GO_RESEND_TRIES = 2
+    # 2026-10-08: paced game-server bursts (spawn, GO, Add Npc, kind 27). These
+    # used to time.sleep(0.05) between packets inside the select loop, which
+    # stalled every other client for the length of the burst. A burst is now a
+    # list of thunks, each building and sending ONE packet when called (so the
+    # sequence number is taken at send time and stays monotone on the wire,
+    # sec 4cx), plus a continuation for the code that has to follow the last
+    # packet. The loop head fires what is due; next_deadline() wakes it on time.
+    _paced = []            # [due, thunks left, continuation or None, gap]
+
+    def pace_sends(thunks, then=None, gap=0.05):
+        """Send thunks[0] now, the rest one per `gap` s from the select loop,
+        and run `then` after the last one. Single-threaded: everything here
+        runs on the loop thread, so no lock is needed."""
+        thunks = list(thunks)
+        if thunks:
+            thunks.pop(0)()
+        _paced.append([time.time() + gap, thunks, then, gap])
+
+    def paced_thunks(sess, dst, spec, note, **kw):
+        """briefingroom.gs_battle_sequence(spec, ...) as one thunk per kind,
+        for pace_sends. note(kind, packet) prints the SENT line."""
+        out = []
+        for _part in (spec or "").replace(" ", "").split(","):
+            if not _part:
+                continue
+
+            def _one(_part=_part):
+                for _k, _np in briefingroom.gs_battle_sequence(
+                        _part, seq_fn=lambda: next_gs_seq(sess),
+                        ident=sess.seen_charid[0], **kw):
+                    s.sendto(_np, dst)
+                    note(_k, _np)
+            out.append(_one)
+        return out
+
+    def fire_paced(now):
+        """One packet per due burst, then its continuation once it is empty."""
+        for _pe in list(_paced):
+            try:
+                if now < _pe[0]:
+                    continue
+                if _pe[1]:
+                    _pe[1].pop(0)()
+                    _pe[0] = now + _pe[3]
+                else:
+                    _paced.remove(_pe)
+                    if _pe[2] is not None:
+                        _pe[2]()
+            except Exception:
+                import traceback
+                if _pe in _paced:
+                    _paced.remove(_pe)
+                print("  [paced] burst FAILED:\n%s" % traceback.format_exc(),
+                      flush=True)
     _join_queue = {}
     # 2026-10-01: character id -> the battle STATUS word its client last
     # reported (request 46); notify kind 43 echoes it to the room.
@@ -565,7 +622,7 @@ def main():
                      "last_peer_rx", "save_count", "chara_kw",
                      "chara_ids", "roster_uid", "gs_src", "src", "wire_cid",
                      "relay_pushed", "relay_wu", "ip", "key", "account_key",
-                     "pos_id", "gs_battle_on",
+                     "token", "pos_id", "gs_battle_on",
                      "gs_battle_end", "gs_battle_reset", "gs_battle_go",
                      "suit_item")
 
@@ -573,6 +630,7 @@ def main():
             self.ip = ip                  # sec 4ft: the key's address
             self.key = (ip, port)         # sec 4gz: the registry key, (ip, port)
             self.account_key = None       # sec 4ft: resolved lazily by _skey
+            self.token = None             # the credential blob off the entrance or world door
             self.chara_burst_at = None
             self.chara_pending = None
             self.frag3_pending = None
@@ -642,7 +700,7 @@ def main():
     # 2026-10-05: LEADER KEYS. A table leader's mode-4 game-server datagrams
     # are keyed [0, P, 0, 0] / IV [0, P - 0x5B0, 0, 0], P the address of one
     # heap object that MOVES per session (doc_kelcrypt.LEADER_KEYED): live
-    # 10-05 a tester's console sent 1,594 unreadable headers (P 0x003B5B10) and the
+    # 10-05 a player's console sent 1,594 unreadable headers (P 0x003B5B10) and the
     # IV-only learner could never find it. A background search of the window
     # learns a new P from one datagram; the pairs persist across restarts.
     _lk_path = (os.environ.get("POL_DOC_LEADER_KEYS_FILE")
@@ -798,7 +856,7 @@ def main():
         """2026-10-01: character `cid`'s career RANK for the peer / user record
         (+54, 1-based like the career's, doc_stats.RANK_CODES). Manual p.27:
         the pick menu shows each player's own rank; the global --user-rank
-        (unset on prod = 0 = "DGD-3") made every other player a DG Drone 3rd.
+        (unset = 0 = "DGD-3") made every other player a DG Drone 3rd.
         --user-rank still wins when it is set (a probe)."""
         if a.user_rank is not None or _stats is None or not cid:
             return a.user_rank
@@ -894,6 +952,26 @@ def main():
                 if _ss.seen_charid[0] and not peer_idle(_ss, now)}
         p = doc_chat.parse(body)
         n = 0
+        if p is None and doc_chat.is_avatar_signal(body) and sender:
+            # 2026-10-08: kinds 10..12 / 255 are the AVATAR SIGNAL (doc_chat
+            # AVATAR_KINDS): the receiver stores a byte on the sender's unit
+            # and raises a HUD event, so it goes to every live player who
+            # can hold that unit -- everyone in the world but the sender
+            for cid in sorted(c for c in live if c != sender):
+                ts = session_of(cid)
+                dst = (ts.ka_src or ts.src) if ts is not None else None
+                if dst is None:
+                    continue
+                s.sendto(worldchannel.seal_world_body(None, doc_chat.relay_body(body),
+                                         seq=a.lobby_seq, ptype=a.world_type,
+                                         ident=sender), dst)
+                n += 1
+            print("  [chat] 0x%08x avatar signal kind %d value 0x%04x -> %d "
+                  "player(s) (selector 255)"
+                  % (sender, body[doc_chat.STREAM_OFF],
+                     struct.unpack_from("<H", body, doc_chat.STREAM_OFF + 2)[0], n),
+                  flush=True)
+            return n
         for cid in doc_chat.recipients(body, sender, live,
                                        chat_where if a.chat == "on" else None):
             ts = session_of(cid)
@@ -934,6 +1012,51 @@ def main():
                               room.key if room is not None else None, team,
                               (_pose[0], _pose[2]) if _pose else None)
 
+    def relay_gs_chat(sender, body):
+        """2026-10-08: a game-server request 42 (doc_chat, GS_CHAT_REQ) -- the
+        chat line a client in a battle sends instead of selector 255 -- to the
+        members of its room, as a reliable message 42 (ident = the speaker,
+        the sender's body from +4 verbatim). Live: 201 SAY lines and 417
+        avatar signals in a live battle went into the "no answer defined" branch and
+        reached nobody; every one was resent five times because nothing
+        ACKed it (the caller sets _gs_answered)."""
+        p = doc_chat.parse_gs(body)
+        if p is None or not sender:
+            print("  [chat] GS request 42 from 0x%08x is not a chat stream (%d B) "
+                  "-- dropped" % (sender or 0, len(body or b"")), flush=True)
+            return 0
+        kind, n, text = p
+        what = ("avatar signal kind %d value 0x%04x" % (kind, n)
+                if kind in doc_chat.AVATAR_KINDS
+                else "%s (kind %d) %r" % (doc_chat.kind_name(kind), kind, text))
+        if a.chat == "off":
+            print("  [chat] 0x%08x %s on the game-server channel -- NOT relayed "
+                  "(--chat=off)" % (sender, what), flush=True)
+            return 0
+        room = battle_of(sender)
+        if room is None or sender not in room.members or sender in room.left:
+            print("  [chat] 0x%08x %s on the game-server channel with no battle "
+                  "room -- dropped (the lobby copy rides selector 255)"
+                  % (sender, what), flush=True)
+            return 0
+        team_of = (lambda _c: None) if room.individual() else room.team_of
+        to = doc_chat.gs_recipients(kind, sender, room.present(), team_of)
+        sent = 0
+        for m in to:
+            ms, dst = member_dst(m)
+            if dst is None:
+                continue
+            s.sendto(gamemsg.build_gs_message(doc_chat.GS_CHAT_REQ, seq=next_gs_seq(ms),
+                                              body_extra=bytes(body[4:]),
+                                              ident=sender), dst)
+            sent += 1
+        print("  [chat] 0x%08x %s -> %d member(s) of table %d (game-server "
+              "message 42, ident = speaker)%s"
+              % (sender, what, sent, room.key,
+                 " -- a battle TELL carries no target: dropped"
+                 if kind == doc_chat.KIND_TELL else ""), flush=True)
+        return sent
+
     def broadcast_graduate(cid, why):
         """Selector 134 sub-kind 11 to every client in the world: the mark comes
         off `cid` on every peer table, and on its own self record."""
@@ -961,7 +1084,7 @@ def main():
         "gs_rearm_pending", "gs_battle_on", "gs_battle_end", "gs_battle_reset", "gs_battle_go",
         "gs_seq", "last_pose", "last_wu", "seen_uid", "seen_charid", "wire_cid",
         "last_stream", "save_count", "roster_uid", "pos_id", "account_key",
-        "chara_pending", "chara_burst_at", "suit_item")
+        "token", "chara_pending", "chara_burst_at", "suit_item")
     _INHERIT_DICT = (        # merged into the box we already hold
         "gs_teams", "chara_kw", "chara_ids", "relay_pushed", "relay_wu")
     _INHERIT_RETARGET = (    # an endpoint: kept as a FLAG, aimed at the new port
@@ -1098,27 +1221,36 @@ def main():
             return False
         return time.time() < (st.get("brief_end") or t0 + 120.0) + 60.0
 
-    # sec 4gk addendum 5: player-to-player TRADE (doc_trade.py). The server is
-    # a relay: offers go to the partner as 42/44, and when both have confirmed
-    # the wallets are swapped and both clients get 50 (the client applies the
-    # swap itself from the two stored offers) -- or 48 if the swap is refused.
+    # sec 4gk addendum 5 / 2026-10-08: player-to-player TRADE (doc_trade.py),
+    # the RETAIL flow: 41 -> 45 to the inviter + 42 to the invitee; the
+    # invitee's 43 (its approval, with its terms) -> 46 + 44 to the inviter;
+    # the inviter's 49 approves -> wallets swapped, 50 to both (the client
+    # applies the swap itself from the two stored offers), 48 to both if the
+    # swap is refused; 47 from either side cancels (48 to both).
     _trade = doc_trade.TradeBook() if (a.trade and _shop is not None) else None
     if _trade is not None:
-        print("[docudp] TRADE ON: 41/43/47/49 relayed as 42/44/50/48 (sec 4gk)",
-              flush=True)
+        print("[docudp] TRADE ON: 41 -> 45 + 42, 43 -> 46 + 44, 49 -> 50, "
+              "47 -> 48 (retail flow, 2026-10-08)", flush=True)
 
-    def trade_push(charid, body):
+    def trade_push(charid, body, ident=None):
+        """A trade push to `charid`. `ident` = the header ident: the client's
+        48 says "Trade cancelled." only when it is NOT the receiver."""
         ts = session_of(charid)
         dst = (ts.ka_src or ts.src) if ts is not None else None
         if dst is None:
             print("  [trade] 0x%08x has no live session -- push %d dropped"
                   % (charid, body[1]), flush=True)
             return False
+        _id = charid if ident is None else ident
         s.sendto(worldchannel.seal_world_body(None, body, seq=a.lobby_seq, ptype=a.world_type,
-                                 ident=charid), dst)
-        print("  [trade] SENT %d to 0x%08x at %s:%d" % (body[1], charid, dst[0], dst[1]),
-              flush=True)
+                                 ident=_id), dst)
+        print("  [trade] SENT %d to 0x%08x at %s:%d (ident 0x%08x)"
+              % (body[1], charid, dst[0], dst[1], _id), flush=True)
         return True
+
+    def trade_online(charid):
+        _ts = session_of(charid)
+        return _ts is not None and (_ts.ka_src or _ts.src) is not None
 
     def trade_swap(t):
         ok, note = True, "no wallets (--shop off)"
@@ -1129,8 +1261,10 @@ def main():
             ok, note = _shop.trade(ka, t.offers[t.a], kb, t.offers[t.b])
         print("  [trade] %s" % note, flush=True)
         for _c in (t.a, t.b):
+            # ident = the partner: a refused swap must read "Trade cancelled."
             trade_push(_c, doc_trade.bare_body(doc_trade.DONE_PUSH if ok
-                                               else doc_trade.CANCEL_PUSH))
+                                               else doc_trade.CANCEL_PUSH),
+                       ident=t.other(_c))
 
     def synth_world_req(nbody=176):
         """A bare type-`--world-type` request to build an UNSOLICITED world
@@ -1602,6 +1736,22 @@ def main():
                      if _due > now + a.gs_real_dist_settle else ""), flush=True)
         if now < teamdist.gs_dist_due(g, a.gs_real_dist_settle):
             return
+        # 2026-10-08: RANDOM TEAMS (record flags 0x00400000) -- the server
+        # deals the sides at the distribution; the kind-20 team bytes are
+        # what the client applies (the entry's team bytes are read unless
+        # BT), so the spaces the players stood on do not matter.
+        _rec_rt = bt_store.record(key)
+        if (_rec_rt is not None and not _coop and not _ind
+                and struct.unpack_from("<I", _rec_rt, tablerecords.BT_OFF_FLAGS)[0]
+                & tablerecords.BT_FLAG_RANDOM_TEAMS):
+            _rt = teamdist.gs_random_teams(members)
+            if _rt and _rt != {m: g["teams"].get(m) for m in _rt}:
+                g["teams"].update(_rt)
+                print("  [roster] table %d: RANDOM TEAMS -- dealt %s (the record's "
+                      "flag 0x00400000; the spaces chosen are ignored)"
+                      % (key, ", ".join("0x%x -> team %d" % (m, t)
+                                        for m, t in sorted(_rt.items()))),
+                      flush=True)
         dist = teamdist.gs_real_distribution(g["teams"], members)
         if a.gs_add_chara_before_dist == "on":
             # 2026-10-03 (live: in TEAM battles only the leader's hits
@@ -1959,7 +2109,7 @@ def main():
         # (request 30) whatever its status -- so the server does: the victim
         # comes back where it fell, at once (kind 25 at its last position,
         # kind 13 on the next tick), and the spent Reraise is echoed off
-        # (kind 43). Only kinds seen working live (re-battle option B); kind 9
+        # (kind 43). Only kinds seen on a client (re-battle option B); kind 9
         # followed by kind 19 without a 13 leaves the victim untouchable.
         _rr = _status.get(victim, 0)
         if a.status_echo and _rr & gamemsg.STATUS_RERAISE:
@@ -2899,6 +3049,31 @@ def main():
         peers = (room.members if room is not None
                  else [m for m in bt_store.members(bt_store.table_of(cid) or -1)
                        if m])
+        if (ptype == p2pbattle.P2P_DAMAGE and _dent and room is not None
+                and not room.rules.friendly_fire and not room.individual()):
+            # 2026-10-08: FRIENDLY FIRE OFF (the record's default): a
+            # teammate's positive damage entry is cut before the relay --
+            # the victim's client is what applies it (p2pbattle.strip_team_damage)
+            def _same_side(atk, vic):
+                return (atk in room.kills and vic in room.kills and atk != vic
+                        and room.team_of(atk) == room.team_of(vic))
+            _ff_plain, _ff_dropped = p2pbattle.strip_team_damage(plain, _same_side)
+            if _ff_dropped:
+                _ffk = (sender.key, "ff")
+                _p2p_seen[_ffk] = _p2p_seen.get(_ffk, 0) + 1
+                if _p2p_seen[_ffk] <= 5 or _p2p_seen[_ffk] % 100 == 0:
+                    print("  [p2p] FRIENDLY FIRE is OFF at table %d: %d teammate hit(s) "
+                          "from 0x%08x cut (%s) (#%d)"
+                          % (room.key, len(_ff_dropped), cid,
+                             ", ".join("0x%x:%+d by 0x%x" % e[:3] for e in _ff_dropped[:3]),
+                             _p2p_seen[_ffk]), flush=True)
+                if _ff_plain is None:
+                    battle_capture("p2p", type=ptype, name="damage (friendly fire cut)",
+                                   flags=_f, sender=cid, target=_tgt, table=room.key,
+                                   payload=bytes(plain[framing.BODY_OFF:]))
+                    return 0
+                plain = _ff_plain
+                _dent = [e for e in _dent if e not in _ff_dropped]
         out = worldpose.build_peer_relay(plain)
         sent = 0
         for m in peers:
@@ -3257,6 +3432,17 @@ def main():
     _quest_zone.update({int(q, 0): int(v, 0) for q, _, v in
                         (p.partition(":") for p in
                          a.quest_zones.replace(" ", "").split(",") if p)})
+    # 2026-10-08: a zone the client does not ship hangs it on a black screen
+    # (arenamaps.CLIENT_ZONES); refuse such a configuration at start
+    _bad_zones = sorted({z for z in _quest_zone.values()
+                         if not arenamaps.zone_installed(z)}
+                        | ({a.gs_battle_zone}
+                           if not arenamaps.zone_installed(a.gs_battle_zone) else set()))
+    if _bad_zones:
+        raise SystemExit("[docudp] zone(s) %s are not in the client's install "
+                         "(--quest-zones / --gs-battle-zone / doc_missions): a "
+                         "kind 2 naming one leaves the player on a black screen"
+                         % _bad_zones)
 
     _map_zone = arenamaps.parse_map_zones(a.battle_map_zones)
     # the inverse, for the command-41 answer's map label. First index wins, so
@@ -3317,6 +3503,12 @@ def main():
                          "(--quest-zones; the table's map does not apply)"
                          % (q, _qz))
         z, note = _table_arena(cid)
+        if z is not None and not arenamaps.zone_installed(z):
+            # 2026-10-08: never name a zone the client does not ship (the
+            # loader waits for its zone.cnf forever); the parsers refuse
+            # these already, this is the last check before the wire
+            return a.gs_battle_zone, ("zone %d is not in the client's install "
+                                      "-- staying in zone %d" % (z, a.gs_battle_zone))
         return (a.gs_battle_zone if z is None else z), note
 
     def _battle_zone(key, cid=None):
@@ -3615,7 +3807,8 @@ def main():
             if _mctl_ps:
                 _mp = arenadata.mission_player_spawn(z, _mctl_ps, p,
                                                      radius=a.mission_player_radius,
-                                                     seat=_seat_of(cid)[0])
+                                                     seat=_seat_of(cid)[0],
+                                                     borrow=_mq in doc_missions.MAP_EXERCISES)
                 if tuple(round(v, 1) for v in _mp) != tuple(round(v, 1) for v in p):
                     print("  [missions] quest %s controller %d: player starts at "
                           "its own node %s, not the generic z%d spawn %s "
@@ -4120,33 +4313,36 @@ def main():
                     ("29:" + arenadata.base_objects_payload(_bs[0], _bs[3]).hex())
                     if part.strip() == "29" else part
                     for part in (_gspec or "").split(","))
-            for _k, _np in briefingroom.gs_battle_sequence(_gspec,
-                                              seq_fn=lambda: next_gs_seq(sess),
-                                              ident=sess.seen_charid[0]):
-                s.sendto(_np, sess.gs_join_src[0])
-                time.sleep(0.05)
-                print("  [battle] GO: SENT notify kind %d (%s), %.1f s after "
-                      "its 47 (sec 4ga)" % (_k, gamemsg.GS_NOTIFY_NAMES.get(_k, "?"),
-                                            now - (sess.gs_battle_on[0] or now)),
-                      flush=True)
             if _gspec:
                 _go_resend[sess] = [now + GO_RESEND_S, _gspec, GO_RESEND_TRIES, now]
-            try:
-                capsule_send_field(battle_of(sess.seen_charid[0]), sess)
-            except Exception:
-                import traceback
-                print("  [capsule] field FAILED:\n%s" % traceback.format_exc(),
+            _go_dst = sess.gs_join_src[0]
+
+            def _go_note(_k, _np, _sess=sess, _t0=now):
+                print("  [battle] GO: SENT notify kind %d (%s), %.1f s after "
+                      "its 47 (sec 4ga)" % (_k, gamemsg.GS_NOTIFY_NAMES.get(_k, "?"),
+                                            time.time() - (_sess.gs_battle_on[0] or _t0)),
                       flush=True)
-            if _bs is not None:
-                for _bi in range(len(_bs[0])):
-                    s.sendto(gamemsg.build_gs_notify(33, arenadata.base_hp_payload(_bi, _bs[2], _bs[1]),
-                                             seq=next_gs_seq(sess),
-                                             ident=sess.seen_charid[0]),
-                             sess.gs_join_src[0])
-                print("  [base] SENT notify kind 33 x%d: HP %d, controller 0x%08x"
-                      % (len(_bs[0]), _bs[1], _bs[2]), flush=True)
-            if (a.npc_arena == "on" and _npc_arena_types) or _mission_ctrl(sess):
-                _npc_arena_due[sess] = now + a.npc_arena_after
+
+            def _after_go(_sess=sess, _dst=_go_dst, _bs=_bs):
+                # what used to follow the burst inline; runs after its last packet
+                try:
+                    capsule_send_field(battle_of(_sess.seen_charid[0]), _sess)
+                except Exception:
+                    import traceback
+                    print("  [capsule] field FAILED:\n%s" % traceback.format_exc(),
+                          flush=True)
+                if _bs is not None:
+                    for _bi in range(len(_bs[0])):
+                        s.sendto(gamemsg.build_gs_notify(33, arenadata.base_hp_payload(_bi, _bs[2], _bs[1]),
+                                                 seq=next_gs_seq(_sess),
+                                                 ident=_sess.seen_charid[0]),
+                                 _dst)
+                    print("  [base] SENT notify kind 33 x%d: HP %d, controller 0x%08x"
+                          % (len(_bs[0]), _bs[1], _bs[2]), flush=True)
+                if (a.npc_arena == "on" and _npc_arena_types) or _mission_ctrl(_sess):
+                    _npc_arena_due[_sess] = time.time() + a.npc_arena_after
+
+            pace_sends(paced_thunks(sess, _go_dst, _gspec, _go_note), then=_after_go)
         # 2026-10-05: the GO burst again when the arena never reported in
         _gor = _go_resend.get(sess)
         if _gor is not None and now >= _gor[0]:
@@ -4324,27 +4520,35 @@ def main():
                       % (_mroom.key, sess.seen_charid[0], _nmis, _shared["ctrl"]),
                       flush=True)
             if _rb is None:
+                _npc_room = battle_of(sess.seen_charid[0])
                 if not (a.npc_arena == "on" and _npc_arena_types):
                     _rb = []
+                elif (_npc_room is not None and _npc_room.mission is None
+                        and not battleroom.npc_allowed(_npc_room.rules)):
+                    # 2026-10-08: the table's NPC row (record flags 0x40) is
+                    # off: no arena NPCs for this room whatever --npc-arena says
+                    _rb = []
+                    print("  [npc-arena] table %d: NPCs are OFF in the table's "
+                          "rules -- none placed" % _npc_room.key, flush=True)
                 else:
                     _rb = doc_npc_spawn.ring_payloads(_ctr, _npc_arena_types,
                                                       radius=a.npc_arena_radius,
                                                       hp=a.npc_spawn_hp)
                 _nmis = len(_npc_arena_types) if _rb else 0
-            for _b in _rb:
-                s.sendto(gamemsg.build_gs_notify(doc_npc_spawn.KIND_ADD_NPC, _b,
-                                         seq=next_gs_seq(sess),
-                                         ident=sess.seen_charid[0]),
-                         sess.gs_join_src[0])
-                time.sleep(0.05)
+            _npc_dst = sess.gs_join_src[0]
+            _npc_thunks = [
+                (lambda _b=_b: s.sendto(gamemsg.build_gs_notify(
+                    doc_npc_spawn.KIND_ADD_NPC, _b, seq=next_gs_seq(sess),
+                    ident=sess.seen_charid[0]), _npc_dst))
+                for _b in _rb]
             if _rb and not _msp:
-                print("  [npc-arena] SENT notify kind %d 'Add Npc': %d NPC(s), types "
+                print("  [npc-arena] SENDING notify kind %d 'Add Npc': %d NPC(s), types "
                       "%s counter-clockwise from +x, radius %.0f around (%.1f, %.1f, "
                       "%.1f), ids 0x%08x.. -> %s:%d"
                       % (doc_npc_spawn.KIND_ADD_NPC, len(_npc_arena_types),
                          a.npc_arena_types, a.npc_arena_radius, _ctr[0], _ctr[1],
                          _ctr[2], doc_npc_spawn.ARENA_ID_BASE,
-                         sess.gs_join_src[0][0], sess.gs_join_src[0][1]),
+                         _npc_dst[0], _npc_dst[1]),
                       flush=True)
             # Seen live (slot 7): the Add-Npc entries DO land in the
             # char table (8 x HP 100, flags 0x40050211) but never render: an
@@ -4365,22 +4569,34 @@ def main():
                 print("  [missions] 0x%08x shares the room's %d NPC(s): no kind 27 "
                       "(controller 0x%08x; their poses are relayed)"
                       % (_me, _nmis, _ctl_id), flush=True)
+            _ctl_thunks = []
+            _after_ctl = None
             if _mission_ctrl(sess) and _nmis and _ctl_id == _me:
-                for _i in range(_nmis):
-                    s.sendto(gamemsg.build_gs_notify(
+                _ctl_thunks = [
+                    (lambda _i=_i: s.sendto(gamemsg.build_gs_notify(
                         27, struct.pack("<III", doc_npc_spawn.ARENA_ID_BASE + _i,
                                         _ctl_id, 0),
-                        seq=next_gs_seq(sess), ident=_me), sess.gs_join_src[0])
-                    time.sleep(0.02)
-                print("  [missions] SENT notify kind 27 x%d to 0x%08x: NPC control "
-                      "of 0x%08x.. -> 0x%08x%s"
-                      % (_nmis, _me, doc_npc_spawn.ARENA_ID_BASE, _ctl_id,
-                         " (the player)" if _ctl_id == _me else " (the room's controller)"),
-                      flush=True)
-                if sess in _mnpc and _ctl_id == _me:
-                    _mnpc[sess]["ctl"] = {
-                        doc_npc_spawn.ARENA_ID_BASE + _i:
-                        [now + gamemsg.MISSION_CTL_CHECK_S, 1] for _i in range(_nmis)}
+                        seq=next_gs_seq(sess), ident=_me), _npc_dst))
+                    for _i in range(_nmis)]
+
+                def _after_ctl(_sess=sess, _me=_me, _ctl_id=_ctl_id, _nmis=_nmis):
+                    print("  [missions] SENT notify kind 27 x%d to 0x%08x: NPC control "
+                          "of 0x%08x.. -> 0x%08x%s"
+                          % (_nmis, _me, doc_npc_spawn.ARENA_ID_BASE, _ctl_id,
+                             " (the player)" if _ctl_id == _me else " (the room's controller)"),
+                          flush=True)
+                    if _sess in _mnpc and _ctl_id == _me:
+                        _mnpc[_sess]["ctl"] = {
+                            doc_npc_spawn.ARENA_ID_BASE + _i:
+                            [time.time() + gamemsg.MISSION_CTL_CHECK_S, 1]
+                            for _i in range(_nmis)}
+
+            def _after_npcs(_ctl_thunks=_ctl_thunks, _after_ctl=_after_ctl):
+                # the kind 27 hand-over follows the last Add Npc, 20 ms apart
+                if _ctl_thunks:
+                    pace_sends(_ctl_thunks, then=_after_ctl, gap=0.02)
+            if _npc_thunks or _ctl_thunks:
+                pace_sends(_npc_thunks, then=_after_npcs)
         # 2026-09-23: REPLACE dead mission NPCs. The situation's resource set
         # loads a fixed number of each model (bzd table 20: 3001 = e030 x1, w010,
         # w003, e102 x2) -- a third soldier draws nothing (live: six requested,
@@ -4461,7 +4677,9 @@ def main():
                             _near_pts = arenadata.mission_spawn_order(
                                 _mn["spawn"], _ref,
                                 max(a.mission_spawn_near, MISSION_REPLACE_NEAR))
-                            _pos = _near_pts[_mn["next"] % min(6, len(_near_pts))]
+                            # 2026-10-09 (live, Map Exercise Kalm): over 6 the
+                            # picks ran 250-450 out and were heard, never seen
+                            _pos = _near_pts[_mn["next"] % min(3, len(_near_pts))]
                         else:
                             _pos = _mn["spawn"][_mn["next"] % len(_mn["spawn"])]
                         _mn["next"] += 1
@@ -4606,61 +4824,65 @@ def main():
                 _spawn_of[_bcid] = (_bpos, arenamaps.spawn_bmap(
                     _bzone, _bpos, arenamaps.battle_bmap(_bzone, _zone_pieces, _gs_bmap)))
                 _spawn_zone[_bcid] = _bzone
-            for _k, _np in briefingroom.gs_battle_sequence(a.gs_battle_start, spawn=_bpos,
-                                              seq_fn=lambda: next_gs_seq(sess),
-                                              ident=sess.seen_charid[0],
-                                              zone=_bzone,
-                                              # 2026-10-06: the pieces AT the spawn
-                                              bmap=arenamaps.spawn_bmap(
-                                                  _bzone, _bpos, arenamaps.battle_bmap(
-                                                      _bzone, _zone_pieces, _gs_bmap))):
-                s.sendto(_np, sess.gs_join_src[0])
-                time.sleep(0.05)
+            _sp_dst = sess.gs_join_src[0]
+
+            def _spawn_note(_k, _np):
                 print("  SENT notify kind %d (%s) on the post-join timer -- sec 4ed"
                       % (_k, gamemsg.GS_NOTIFY_NAMES.get(_k, "?")), flush=True)
-            _send_base_objects(sess, sess.gs_join_src[0],
-                               "with the spawn (post-join timer)")
-            _mctl = _mission_ctrl(sess)
-            if _mctl:
-                s.sendto(gamemsg.build_gs_notify(28, arenadata.npc_controller_payload(_mctl),
-                                         seq=next_gs_seq(sess),
-                                         ident=sess.seen_charid[0]),
-                         sess.gs_join_src[0])
-                print("  [missions] SENT notify kind 28 naming NPC controller %d "
-                      "(the mission's situation) with the spawn" % _mctl, flush=True)
-            elif a.mp_points == "on":
-                # 2026-09-26 (doc_items): kind 28's count + mask are what the
-                # zone setup's "magic supply" step (0x00bf1370) reads to create
-                # the situation's MP points -- ONCE, so with the spawn, like
-                # the mission's controller record and the bases' kind 29
-                s.sendto(gamemsg.build_gs_notify(28, doc_items.mp_points_record(),
-                                         seq=next_gs_seq(sess),
-                                         ident=sess.seen_charid[0]),
-                         sess.gs_join_src[0])
-                print("  [mp point] SENT notify kind 28 (MP points: count 64, "
-                      "all enabled) with the spawn", flush=True)
-            # sec 4fv: a solo leader never satisfies gs_real_ready, so the
-            # distribution -- the only door vl_main has to get_onlinezone --
-            # never opened. Push it AFTER kind 2 (which sets [chan+204] & 4 and
-            # the zone byte get_onlinezone polls for).
-            _self = sess.seen_charid[0] or 0
-            _tk = bt_store.table_of(_self) if _self else None
-            _seated = [m for m in bt_store.members(_tk) if m] if _tk else []
-            if a.gs_solo_dist and _self and len(_seated) < 2:
-                _dist = teamdist.gs_solo_distribution(sess.gs_teams, _self)
-                s.sendto(gamemsg.build_gs_distribution(_dist, seq=next_gs_seq(sess),
-                                               ident=_self),
-                         sess.gs_join_src[0])
-                if battle_of(_self) is None:
-                    open_battle(_tk, [_self], {_self: sess.gs_teams.get(_self, 0)},
-                                mission=_mission_battle.get(sess.key), now=now)
-                print("  [solo] SENT notify 20 (PLAYER DISTRIBUTION) over %s "
-                      "(table %s, %d seated). Watch: 'Player distribution has "
-                      "been determined' -> OK -> request 47 -> get_onlinezone "
-                      "-> KerberosZone.exit(z%d) (sec 4fv)"
-                      % (["0x%x:t%d:s%d" % e for e in _dist], _tk, len(_seated),
-                         _bzone),
-                      flush=True)
+
+            def _after_spawn(_sess=sess, _dst=_sp_dst, _bz=_bzone):
+                # what used to follow the burst inline; runs after its last packet
+                _send_base_objects(_sess, _dst, "with the spawn (post-join timer)")
+                _mctl = _mission_ctrl(_sess)
+                if _mctl:
+                    s.sendto(gamemsg.build_gs_notify(28, arenadata.npc_controller_payload(_mctl),
+                                             seq=next_gs_seq(_sess),
+                                             ident=_sess.seen_charid[0]),
+                             _dst)
+                    print("  [missions] SENT notify kind 28 naming NPC controller %d "
+                          "(the mission's situation) with the spawn" % _mctl, flush=True)
+                elif a.mp_points == "on":
+                    # 2026-09-26 (doc_items): kind 28's count + mask are what the
+                    # zone setup's "magic supply" step (0x00bf1370) reads to create
+                    # the situation's MP points -- ONCE, so with the spawn, like
+                    # the mission's controller record and the bases' kind 29
+                    s.sendto(gamemsg.build_gs_notify(28, doc_items.mp_points_record(),
+                                             seq=next_gs_seq(_sess),
+                                             ident=_sess.seen_charid[0]),
+                             _dst)
+                    print("  [mp point] SENT notify kind 28 (MP points: count 64, "
+                          "all enabled) with the spawn", flush=True)
+                # sec 4fv: a solo leader never satisfies gs_real_ready, so the
+                # distribution -- the only door vl_main has to get_onlinezone --
+                # never opened. Push it AFTER kind 2 (which sets [chan+204] & 4 and
+                # the zone byte get_onlinezone polls for).
+                _self = _sess.seen_charid[0] or 0
+                _tk = bt_store.table_of(_self) if _self else None
+                _seated = [m for m in bt_store.members(_tk) if m] if _tk else []
+                if a.gs_solo_dist and _self and len(_seated) < 2:
+                    _dist = teamdist.gs_solo_distribution(_sess.gs_teams, _self)
+                    s.sendto(gamemsg.build_gs_distribution(_dist, seq=next_gs_seq(_sess),
+                                                   ident=_self),
+                             _dst)
+                    if battle_of(_self) is None:
+                        open_battle(_tk, [_self], {_self: _sess.gs_teams.get(_self, 0)},
+                                    mission=_mission_battle.get(_sess.key),
+                                    now=time.time())
+                    print("  [solo] SENT notify 20 (PLAYER DISTRIBUTION) over %s "
+                          "(table %s, %d seated). Watch: 'Player distribution has "
+                          "been determined' -> OK -> request 47 -> get_onlinezone "
+                          "-> KerberosZone.exit(z%d) (sec 4fv)"
+                          % (["0x%x:t%d:s%d" % e for e in _dist], _tk, len(_seated),
+                             _bz),
+                          flush=True)
+
+            pace_sends(paced_thunks(sess, _sp_dst, a.gs_battle_start, _spawn_note,
+                                    spawn=_bpos, zone=_bzone,
+                                    # 2026-10-06: the pieces AT the spawn
+                                    bmap=arenamaps.spawn_bmap(
+                                        _bzone, _bpos, arenamaps.battle_bmap(
+                                            _bzone, _zone_pieces, _gs_bmap))),
+                       then=_after_spawn)
         if (a.gs_keepalive_ms > 0 and sess.gs_ka_src[0] is not None
                 and now >= sess.gs_ka_next[0]):
             sess.gs_ka_next[0] = now + a.gs_keepalive_ms / 1000.0
@@ -4707,6 +4929,7 @@ def main():
                     _due = teamdist.gs_dist_due(gs_table_state(_rk), a.gs_real_dist_settle)
                     if _due is not None:
                         due.append(_due)   # sec 4fw: wake for the settle
+        due.extend(_pe[0] for _pe in _paced)       # paced bursts
         due.extend(_fill_start.values())           # a full table's start
         due.extend(_rematch.values())              # a kept table's next round
         due.extend(battle_deadlines())             # sec 4he: room clocks
@@ -4748,6 +4971,7 @@ def main():
                              len(sessions)), flush=True)
                     if session_of(_sess.seen_charid[0]) is None:
                         vacate_seat(_sess.seen_charid[0], "session reaped")
+        fire_paced(_now)                           # paced bursts, one packet each
         try:
             fire_battles(_now)                     # sec 4he: room clocks
         except Exception:
@@ -5090,6 +5314,14 @@ def main():
         # uid for its first two user lists) and the same guard answered a
         # fresh container's first user list with the empty body.
         _ue = worldpose.early_uid(data)
+        if _ue and _resolver is not None:
+            # 2026-10-08: the same two datagrams carry the 52-byte credential
+            # blob (doc_charastore.credential_blob), which names the POL
+            # member without the address; kept on the session for _skey.
+            _cb = doc_charastore.credential_blob(
+                doc_kelcrypt.decrypt(data) if _KELCRYPT else data)
+            if _cb is not None:
+                sess.token = _cb
         # sec 4ea: THE GAME-SERVER LADDER. A type-130 datagram from the client
         # is a request whose u16 type sits at body[0]; the answer is type + 1
         # (GS_REQ_ANSWERS) and it is what puts [chan+2148] back to 1 so the
@@ -5428,7 +5660,20 @@ def main():
                 _seq21 = (inner.get("seq") if inner is not None
                           and inner.get("is_data") else None)
                 _new21, _why21 = _item_uses.use(_me21, _itm, _now21, seq=_seq21)
-                if not _new21:
+                _ban21 = battle_of(_me21) if _me21 else None
+                if (_new21 and _ban21 is not None
+                        and battleroom.items_banned(_ban21.rules)
+                        and doc_items.is_healing_item(_itm)):
+                    # 2026-10-08: the table's "Healing Items" restriction
+                    # (record flags 0x00200000): message 22 IS the effect,
+                    # so a banned item gets no 22 and does nothing. The
+                    # client already took it out of its bag when it asked
+                    # (0x00be6c08): that is the item's price (OURS).
+                    _new21 = False
+                    print("  GS request 21 (USE ITEM 0x%08x) from 0x%08x: healing "
+                          "items are BANNED at table %d -- no message 22"
+                          % (_itm, _me21, _ban21.key), flush=True)
+                elif not _new21:
                     print("  GS request 21 (USE ITEM 0x%08x) from 0x%08x: %s -- "
                           "answered already" % (_itm, _me21, _why21), flush=True)
                 else:
@@ -5549,6 +5794,17 @@ def main():
                       % (_scid, _sval, len(_sto),
                          " [Limit Break ON]" if _sval & gamemsg.STATUS_LIMIT_BREAK
                          else ""), flush=True)
+            elif _gmt == doc_chat.GS_CHAT_REQ:
+                # 2026-10-08: in-battle chat / the avatar signal. The reliable
+                # ACK is what stops the 0.6/1.6/3.6/7.6 s resend (every line
+                # in a live capture arrived five times); the relay is message 42.
+                _gs_answered = True
+                try:
+                    relay_gs_chat(seen_charid[0] or 0, _gbody)
+                except Exception:
+                    import traceback
+                    print("  [chat] GS relay FAILED:\n%s" % traceback.format_exc(),
+                          flush=True)
             elif _gmt in gamemsg.GS_REQ_ANSWERS:
                 _gans = gamemsg.GS_REQ_ANSWERS[_gmt]
                 _g32 = b""
@@ -5580,9 +5836,14 @@ def main():
                                   flush=True)
                             _garg = gamemsg.GS_TEAM_NONE    # = on no team
                 if _gans == 57:
+                    # 2026-10-08: 56 -> 57 is the briefing-room copy of lobby
+                    # command 30, the STOCK LIST (retail 57 handler copies
+                    # into the requester's buffer [chan+2144], rows {u16, u16
+                    # qty, u32 item}). The old one-row answer showed a stock
+                    # item whose id was the player's own charid. Empty: the
+                    # server keeps no stock (lobbycmd.SHAPED_CMDS).
                     _gp = gamemsg.build_gs_team_list(
-                        [(0, 0, seen_charid[0])], seq=next_gs_seq(sess),
-                        ident=seen_charid[0])
+                        (), seq=next_gs_seq(sess), ident=seen_charid[0])
                 else:
                     _gp = gamemsg.build_gs_message(_gans, seq=next_gs_seq(sess),
                                            body_extra=_g32,
@@ -5839,20 +6100,23 @@ def main():
                                 _bzone, _bpos, arenamaps.battle_bmap(
                                     _bzone, _zone_pieces, _gs_bmap)))
                         _spawn_zone[seen_charid[0]] = _bzone
-                    for _k, _np in briefingroom.gs_battle_sequence(
-                            a.gs_battle_start, spawn=_bpos,
-                            seq_fn=lambda: next_gs_seq(sess), ident=seen_charid[0],
-                            zone=_bzone,
-                            bmap=arenamaps.spawn_bmap(_bzone, _bpos, arenamaps.battle_bmap(
-                                _bzone, _zone_pieces, _gs_bmap))):
-                        s.sendto(_np, src)
-                        time.sleep(0.05)
+                    def _spawn47_note(_k, _np):
                         print("  SENT notify kind %d (%s) -- message %d, %d "
                               "bytes. STAGE 4: watch the emulog for "
                               "KEL_NET_GAMESERVER_NOTIFY_* and a zone load"
                               % (_k, gamemsg.GS_NOTIFY_NAMES.get(_k, "?"),
                                  gamemsg.GS_NOTIFY_MSG, len(_np)), flush=True)
-                    _send_base_objects(sess, src, "with the spawn (request 47)")
+
+                    # sess and src are rebound every loop pass: bind them here
+                    def _after_spawn47(_sess=sess, _src=src):
+                        _send_base_objects(_sess, _src, "with the spawn (request 47)")
+
+                    pace_sends(paced_thunks(sess, src, a.gs_battle_start, _spawn47_note,
+                                            spawn=_bpos, zone=_bzone,
+                                            bmap=arenamaps.spawn_bmap(
+                                                _bzone, _bpos, arenamaps.battle_bmap(
+                                                    _bzone, _zone_pieces, _gs_bmap))),
+                               then=_after_spawn47)
             elif _gmt is not None:
                 print("  GS request %d (%s, arg %s) -- no answer defined; "
                       "fire-and-forget or unread"
@@ -6072,7 +6336,7 @@ def main():
         _short_ok = (_short and len(data) >= framing.BODY_OFF + 12
                      and data[1] != 1 and len(data) > framing.BODY_OFF + 1
                      and (data[framing.BODY_OFF + 1] in short_ladder
-                          # sec 4gk: trade CONFIRM 47 / CANCEL 49 are 36-byte
+                          # sec 4gk: trade CANCEL 47 / APPROVE 49 are 36-byte
                           or (_trade is not None
                               and data[framing.BODY_OFF + 1] in doc_trade.SHORT_REQS)))
         if (a.world_answer and (not _short or _short_ok)
@@ -6633,16 +6897,17 @@ def main():
                 # handler (flag 0x400, partner = our result word 0).
                 _tme = _ident or seen_charid[0]
                 _tacts, _tnote = _trade.request(_req_sel, _tme,
-                                                worldchannel.request_body(data, inner))
+                                                worldchannel.request_body(data, inner),
+                                                online=trade_online)
                 print("  [trade] request %d from 0x%08x: %s"
                       % (_req_sel, _tme, _tnote), flush=True)
                 for _ta in _tacts:
-                    if _ta[0] == "ack":
+                    if _ta[0] == "answer":
                         s.sendto(worldchannel.seal_world_body(
-                            data, doc_trade.bare_body(doc_trade.ACK_ANS),
+                            data, doc_trade.bare_body(_ta[1]),
                             seq=a.lobby_seq, ptype=a.world_type, ident=_ident), src)
                     elif _ta[0] == "push":
-                        trade_push(_ta[1], _ta[2])
+                        trade_push(_ta[1], _ta[2], ident=_ta[3])
                     elif _ta[0] == "swap":
                         trade_swap(_ta[1])
                 _served_list = True
@@ -6893,6 +7158,17 @@ def main():
                                   % (src[0], _qid, "" if a.quest_mission
                                      else " (OFF: --no-quest-mission)"),
                                   flush=True)
+                    if _cmd == doc_trade.ACCEPT_CMD and _trade is not None:
+                        # 2026-10-08: command 23 = the invitee's Accept Trade
+                        # (vt+1084 0x00bdd128). Its 241 is the shared no-op;
+                        # the inviter is told "%s is entering terms." (134
+                        # sub 7, INFERRED: the arm and dialog exist, nothing
+                        # else sends them). Often never sent at all.
+                        _acme = _ident or seen_charid[0] or 0
+                        _aacts, _anote = _trade.accept(_acme)
+                        print("  [trade] %s" % _anote, flush=True)
+                        for _ta in _aacts:
+                            trade_push(_ta[1], _ta[2], ident=_ta[3])
                     # 2026-09-23 (sec 4hc): command 33 = clearNovicePlayerFlag
                     # (the Cactuar Beginner's Machine). Answer with the 241 whose
                     # sub-33 arm clears the local mark (doc_novice_proof C), then
@@ -6996,6 +7272,29 @@ def main():
                                  "answer instead)", a.world_type,
                                  lobbycmd.LOBBY_CMD_SELECTOR_REQ, lobbycmd.LOBBY_CMD_SELECTOR_ANS,
                                  _uk, _un), flush=True)
+                    # 2026-10-08: the retail commands whose 241 arm reads past
+                    # body[12] (lobbycmd.SHAPED_CMDS): the echo handed their
+                    # arms the request's own stale bytes -- as stock rows (30),
+                    # as an "add this item" test (28), as a granted stock row
+                    # (31). Served the retail shape instead.
+                    if (_cmd in lobbycmd.SHAPED_CMDS and not _served_list
+                            and a.lobby_cmd == "echo"):
+                        s.sendto(worldchannel.seal_world_body(
+                            data, lobbycmd.shaped_cmd_body(
+                                _cmd, subchannel=(a.world_subchannel
+                                                  if a.world_subchannel >= 0 else 7)),
+                            seq=a.lobby_seq, ptype=a.world_type, ident=_ident), src)
+                        _served_list = True
+                        print("  SENT type-%d selector %d -> %d COMMAND %d: %s"
+                              % (a.world_type, lobbycmd.LOBBY_CMD_SELECTOR_REQ,
+                                 lobbycmd.LOBBY_CMD_SELECTOR_ANS, _cmd,
+                                 {lobbycmd.LOBBY_CMD_DATA: "40 zero bytes (meaning unknown)",
+                                  lobbycmd.LOBBY_CMD_RESULT: "result 0, no item (body[20] != 9)",
+                                  lobbycmd.LOBBY_CMD_STOCK: "the stock list, EMPTY (no stock kept)",
+                                  lobbycmd.LOBBY_CMD_STOCK_ACCEPT:
+                                      "REFUSED %d: nothing in stock"
+                                      % lobbycmd.STOCK_REFUSE_CODE}[_cmd]),
+                              flush=True)
                     # 2026-09-24: UNIT VERSUS INFO (command 34, doc_unit). The
                     # unit table's window asks for the two sides; the Start
                     # gate 0x00aa12c8 counts the nonzero unit ids in this
@@ -7203,7 +7502,7 @@ def main():
             # 2026-10-05: every per-character store keys on THIS id. Each
             # lookup below used to re-check the request length and drop it to 0
             # for a SHORT world-door request (a re-entry after a battle) --
-            # undoing the session fallback: live, Ruuko's world door served
+            # undoing the session fallback: live, one player's world door served
             # the bare account's wallet and career (rank 1, 0 RP, no medals),
             # and every result then "awarded" the career's old medals again.
             _wd_cid = _world_door_charid(data, sess) if _sel == 2 else 0

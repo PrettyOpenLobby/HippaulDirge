@@ -16,3 +16,4 @@ COPY tools/doc_migrations /app/doc_migrations
 COPY tools/doctitle.py /app/doctitle.py
 
 ENV POL_TITLES=doctitle
+

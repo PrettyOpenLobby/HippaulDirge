@@ -1,5 +1,6 @@
 """Lobby commands (selector 240/241): command ids, the clock, and the table and quest command numbers."""
 import time
+import struct
 from . import framing
 
 
@@ -140,3 +141,67 @@ LOBBY_CMD_QUEST = 41       # 2026-09-13: FETCH QUEST DETAIL, sent when a Solo
                            # body[16] (live: 0x11 = quest 17). 241 arm 0x00bc99c4
                            # copies answer body[16..52] into mgr+11708 (unread).
 LOBBY_CMD_QUEST_INFO = 29  # 2026-09-13 (static): the Solo detail screen's
+
+
+# 2026-10-08: THE RETAIL 241 TABLE (handler 0x00bd0948, sub-table 0x00bf0250,
+# 32 entries = commands 3..34, shared no-op 0x00bd0ff4; doc_retail_lobby_
+# 20260923). The prototype's 0x00bc9210 / 39 entries (3..41) is NOT what
+# players run. Every retail sender was enumerated (each builds through the
+# conn object's +116 = 0x00594fe8 and sends through +172): commands 1-20 and
+# 23-34 exist, 21 / 22 and 35+ have no sender. The ones the server used to
+# answer with the generic echo, and what they are:
+#   5   0x00bd8b98 (no caller): command 4's twin, leaves the game-server
+#       session. No-op arm: the echo is the answer.
+#   14  0x00bdb8a8 (no caller): arm 0x00bd09cc copies body[16..55] (40 bytes,
+#       meaning unknown) into [kelsvc+1052]. Served as 40 zero bytes, not the
+#       echoed request.
+#   15 / 16  enterSingleRoom / leaveSingleRoom (natives 0x005313a0 /
+#       0x005315f0; no loaded script calls them). No-op arms.
+#   19  0x00bdc240 (its only caller 0x005971d8 has no reference): body[16] =
+#       u32 argument, sent beside GS request 45. No-op arm.
+#   21 / 22 / 35..40  prototype only; retail bails out of range (harmless).
+#   23  ACCEPT TRADE (vt+1084 0x00bdd128, lobby phase 74; doc_trade.py).
+#       No-op arm.
+#   28  0x00bdda20 (facade +524..+572, subkinds 1..7, no caller found): arm
+#       0x00bd0d74 prints "Command Result %d" with body[16] and, when
+#       body[20] == 9 and body[16] >= 0, ADDS the item [kelsvc+1056] x
+#       [1060] to the bag. The echo carried the request's own body[20]
+#       (subkind / item argument) straight into that test: served as zeros.
+#   30  THE STOCK LIST (Inventory window 0x00b07b20, phase 100: "Stock items
+#       are items that have not yet been added to your inventory"): arm
+#       0x00bd0e4c reads body[16] u16, body[18] u16 count (<= 8), body[20]
+#       u32 stock gil, then 8-byte rows {u16, u16 qty, u32 item} from
+#       body[24]. The echo handed back stale request bytes as rows. Served
+#       EMPTY (OURS: the server keeps no stock -- every grant goes straight
+#       to the bag).
+#   31  ACCEPT A STOCK ITEM (phase 102): on success the arm ADDS the row the
+#       client picked ([1056] x [1060]). With an empty stock no row exists;
+#       a 31 is refused (OURS, code STOCK_REFUSE_CODE) so the client can never
+#       add an item the server did not grant.
+#   32  0x00bddfa8 (no caller). No-op arm.
+# In a briefing room (a game-server session) 30 / 31 travel as GS requests
+# 56 / 58 instead (gamemsg.py).
+LOBBY_CMD_DATA = 14
+LOBBY_CMD_ACCEPT_TRADE = 23
+LOBBY_CMD_RESULT = 28
+LOBBY_CMD_STOCK = 30
+LOBBY_CMD_STOCK_ACCEPT = 31
+#: OURS (2026-10-08): the refusal code for a 31 with nothing in stock; SE's
+#: own code for it is unknown
+STOCK_REFUSE_CODE = 1
+SHAPED_CMDS = (LOBBY_CMD_DATA, LOBBY_CMD_RESULT, LOBBY_CMD_STOCK, LOBBY_CMD_STOCK_ACCEPT)
+CMD_ANS_LEN = 184
+
+
+def shaped_cmd_body(cmd, subchannel=7):
+    """The retail 241 for a command whose arm reads past body[12] (see
+    SHAPED_CMDS): the command id at body[12], everything after it ours."""
+    b = bytearray(CMD_ANS_LEN)
+    b[0] = subchannel & 0xFF
+    b[1] = LOBBY_CMD_SELECTOR_ANS
+    struct.pack_into("<H", b, 12, cmd & 0xFFFF)
+    if cmd == LOBBY_CMD_STOCK_ACCEPT:
+        struct.pack_into("<HH", b, 4, 0x0001, STOCK_REFUSE_CODE)
+    # 14: 40 zero bytes; 28: body[16] = 0, body[20] = 0 (never 9); 30: no
+    # rows, no gil -- all zero
+    return bytes(b)

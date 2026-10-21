@@ -70,6 +70,26 @@ def gs_auto_teams(teams, members):
     return out, assigned
 
 
+def gs_random_teams(members, rng=None, sides=2):
+    """2026-10-08: a table whose record carries RANDOM TEAMS (flags
+    0x00400000, the config row 26:137 with options Off / Random / Auto
+    Balance 26:198/197/196): the server deals the seated members over the
+    sides at the distribution, ignoring the team spaces they stood on.
+    Retail's server did the deal (the client only shows the result through
+    kind 20, whose team bytes it applies); the ONE wire bit does not say
+    which of Random / Auto Balance was picked, so both get an even split in
+    a shuffled order (OURS). `rng.shuffle` seeds a test. Pure: returns
+    {cid: team} for every seated member, sides as even as the count allows."""
+    import random
+    seated = [m for m in members if m]
+    order = list(seated)
+    (rng or random).shuffle(order)
+    out = {}
+    for i, m in enumerate(order):
+        out[m] = i % max(1, sides)
+    return out
+
+
 def gs_rebalance_teams(teams, members):
     """2026-09-24: a stuck briefing only frustrates players, so return
     (teams, moved) when the briefing time is up and every seated member is on

@@ -185,8 +185,8 @@ RANK_TABS = {
     0: lambda c: c["rp"],
     1: lambda c: c["bt"]["w"],
     2: lambda c: win_rate(c["bt"]),
-    3: lambda c: c["tbt"]["w"],
-    4: lambda c: win_rate(c["tbt"]),
+    3: lambda c: team_record(c)["w"],
+    4: lambda c: win_rate(team_record(c)),
     5: lambda c: c["kills"],
     6: lambda c: kill_rate(c),
     7: lambda c: medal_count(c, 16), 8: lambda c: medal_count(c, 19),
@@ -377,7 +377,45 @@ MEDAL_IDS = 24
 # FA's core destroy), +80 TCP, +92 TFL, +116 TBR, +128 TFR. BT is a separate mode
 # family with no row on this page; the old {"BT": 44, "TBT": 56} put Solo
 # results on the Team Battle row and Team Battle results on Deathmatch.
-MODE_TRIPLES = {"TBT": 44, "FA": 68}
+# 2026-10-08: one bucket PER ROW. Until now every team mode was tallied as
+# "tbt" (the +44 row) and the +68 row was fed from a "fa" bucket no battle
+# ever reached (no table mode is named FA), so a Team Base battle moved the
+# Team Battle row and the Base Siege row stayed at 0. The table's own mode
+# (battleroom mode names, tablerecords.BT_MODE_NAMES) picks the bucket; a
+# Team Leader (TLD) battle has no row on the page and is filed under TBT
+# (OURS). An old career's "fa" count moves to "tbs" once (career()).
+MODE_TRIPLES = {"TBT": 44, "TDM": 56, "TBS": 68, "TCP": 80, "TFL": 92,
+                "TBR": 116, "TFR": 128}
+TEAM_BUCKETS = tuple(m.lower() for m in MODE_TRIPLES)
+ALL_BUCKETS = ("bt",) + TEAM_BUCKETS
+LEGACY_BUCKETS = {"fa": "tbs"}       # old bucket -> the row it meant
+
+
+def mode_bucket(mode, variant=None):
+    """The career bucket a battle is filed in: the table's own mode when it
+    has a page-2 row, else TBT for a team battle and BT for an individual
+    one."""
+    v = (variant or mode or "").upper()
+    if v in MODE_TRIPLES:
+        return v.lower()
+    if v == "FA":
+        return "tbs"
+    return "bt" if (mode or "").upper() == "BT" else "tbt"
+
+
+def wld_sum(c, buckets):
+    """One {w, l, d} over several buckets of a career."""
+    out = {"w": 0, "l": 0, "d": 0}
+    for b in buckets:
+        t = c.get(b) or {}
+        for k in out:
+            out[k] += int(t.get(k, 0))
+    return out
+
+
+def team_record(c):
+    """Every team mode's W/L/D together (the Ranking's team category)."""
+    return wld_sum(c, TEAM_BUCKETS)
 
 
 def career_body_offset(k):
@@ -406,9 +444,8 @@ def career_record(c):
 
     def put(off, v):
         struct.pack_into("<I", rec, off, max(0, min(int(v), 0xFFFFFFFF)))
-    w = sum(c[m]["w"] for m in ("bt", "tbt", "fa"))
-    l_ = sum(c[m]["l"] for m in ("bt", "tbt", "fa"))
-    d = sum(c[m]["d"] for m in ("bt", "tbt", "fa"))
+    _all = wld_sum(c, ALL_BUCKETS)
+    w, l_, d = _all["w"], _all["l"], _all["d"]
     put(0, w)
     put(4, l_)
     put(36, w + l_ + d)
@@ -417,7 +454,7 @@ def career_record(c):
     put(20, c["missions"]["cleared"])
     put(40, c["missions"]["cleared"] + c["missions"]["failed"])
     for mode, off in MODE_TRIPLES.items():
-        t = c[mode.lower()]
+        t = c.get(mode.lower()) or {"w": 0, "l": 0, "d": 0}
         put(off, t["w"] + t["l"] + t["d"])
         put(off + 4, t["w"])
         put(off + 8, t["d"])
@@ -615,7 +652,10 @@ def result_board(recipient, members, summaries):
 def new_career(name="", rid=0):
     return {"name": name, "id": rid, "rank": RANK_MIN, "rp": 0,
             "battles": 0, "bt": {"w": 0, "l": 0, "d": 0},
-            "tbt": {"w": 0, "l": 0, "d": 0}, "fa": {"w": 0, "l": 0, "d": 0},
+            "tbt": {"w": 0, "l": 0, "d": 0}, "tdm": {"w": 0, "l": 0, "d": 0},
+            "tbs": {"w": 0, "l": 0, "d": 0}, "tcp": {"w": 0, "l": 0, "d": 0},
+            "tfl": {"w": 0, "l": 0, "d": 0}, "tbr": {"w": 0, "l": 0, "d": 0},
+            "tfr": {"w": 0, "l": 0, "d": 0},
             "missions": {"cleared": 0, "failed": 0}, "quests": {},
             # 2026-09-23: the MISSION LEDGER (doc_missions.py) -- exam quests an
             # instructor has "added to Missions" and the player has not cleared
@@ -624,6 +664,25 @@ def new_career(name="", rid=0):
             "play_secs": 0, "medals": {}, "medal_set": MEDAL_SET,
             "private": False,
             "history": []}
+
+
+def migrate_buckets(c):
+    """2026-10-08: a career from before the per-row buckets carried "fa"
+    (never written by a battle, but the 10-01 hand audit and older imports
+    could) -- fold it into the row it meant (tbs) once and drop the key.
+    Returns True when it moved anything."""
+    moved = False
+    for old, new in LEGACY_BUCKETS.items():
+        t = c.pop(old, None)
+        if not t:
+            continue
+        dst = c.setdefault(new, {"w": 0, "l": 0, "d": 0})
+        for k in ("w", "l", "d"):
+            n = int(t.get(k, 0))
+            if n:
+                dst[k] = int(dst.get(k, 0)) + n
+                moved = True
+    return moved
 
 
 def migrate_medals(c):
@@ -860,6 +919,7 @@ class Stats:
         base = new_career()
         for k, v in base.items():             # files from an older shape
             c.setdefault(k, v)
+        migrate_buckets(c)
         if name:
             c["name"] = name
         if rid:
@@ -959,7 +1019,10 @@ class Stats:
                         if quest in (c.get("quests_open") or []):
                             c["quests_open"].remove(quest)
             else:
-                c[{"BT": "bt", "TBT": "tbt", "FA": "fa"}[mode]][outcome] += 1
+                # 2026-10-08: the table's OWN mode picks the page-2 row
+                # (variant); mode stays TBT/BT for the pay and the medals
+                _bk = mode_bucket(mode, variant)
+                c.setdefault(_bk, {"w": 0, "l": 0, "d": 0})[outcome] += 1
                 if "mode_idx" in r:
                     # 2026-10-01: SE's own formula, the Results screen's --
                     # its breakdown, then each medal page's rank points
@@ -1201,6 +1264,43 @@ if __name__ == "__main__":
     assert res[A]["rp"] == RP_WIN + 3 * RP_PER_KILL and res[B]["rp"] == RP_LOSS + RP_PER_KILL
     assert st.career(A)["tbt"] == {"w": 1, "l": 0, "d": 0}
     assert st.career(B)["tbt"] == {"w": 0, "l": 1, "d": 0}
+    # 2026-10-08: Status page 2 rows. A Team Base (TBS) table is tallied as
+    # TBT for the pay but FILED on its own row (+68), a Team Survival (TDM)
+    # one on +56; the Team Battle row (+44) does not move for either, and
+    # the page-1 totals (+0 W / +4 L / +36 battles) count every mode.
+    TA, TB = "member:70/0x70", "member:71/0x71"
+    st.record_battle("TBT", [{"key": TA, "team": 0, "kills": 2},
+                             {"key": TB, "team": 1}], winner=0, seconds=200)
+    _tbs = st.record_battle("TBT", [{"key": TA, "team": 0, "kills": 1},
+                                    {"key": TB, "team": 1}], winner=0,
+                            seconds=200, variant="TBS")
+    assert _tbs[TA]["mode"] == "TBT" and _tbs[TA]["outcome"] == "w", _tbs[TA]
+    st.record_battle("TBT", [{"key": TA, "team": 0}, {"key": TB, "team": 1}],
+                     winner=1, seconds=200, variant="TDM")
+    _cA = st.career(TA)
+    assert _cA["tbs"] == {"w": 1, "l": 0, "d": 0}, _cA["tbs"]
+    assert _cA["tdm"] == {"w": 0, "l": 1, "d": 0}, _cA["tdm"]
+    assert _cA["tbt"] == {"w": 1, "l": 0, "d": 0}, _cA["tbt"]
+    _rA = career_record(_cA)
+    assert struct.unpack_from("<III", _rA, 68) == (1, 1, 0), _rA[68:80]   # TBS row
+    assert struct.unpack_from("<III", _rA, 56) == (1, 0, 0), _rA[56:68]   # TDM row
+    assert struct.unpack_from("<III", _rA, 44) == (1, 1, 0), _rA[44:56]   # TBT row
+    assert struct.unpack_from("<I", _rA, 0)[0] == 2 and struct.unpack_from("<I", _rA, 4)[0] == 1
+    assert struct.unpack_from("<I", _rA, 36)[0] == 3
+    assert team_record(_cA) == {"w": 2, "l": 1, "d": 0}
+    for _k in (TA, TB):
+        del st.data["chars"][_k]
+    # TLD has no page-2 row: filed under TBT (OURS); FA (the old name) = TBS
+    assert mode_bucket("TBT", "TLD") == "tbt" and mode_bucket("TBT", "FA") == "tbs"
+    assert mode_bucket("BT", None) == "bt" and mode_bucket("TBT", "TCP") == "tcp"
+    # an old career with the "fa" bucket: folded into tbs once, key gone
+    st.data["chars"]["member:7/0x9"] = dict(new_career("Old", 9),
+                                             fa={"w": 2, "l": 1, "d": 0})
+    del st.data["chars"]["member:7/0x9"]["tbs"]
+    _old = st.career("member:7/0x9")
+    assert "fa" not in _old and _old["tbs"] == {"w": 2, "l": 1, "d": 0}, _old
+    assert struct.unpack_from("<III", career_record(_old), 68) == (3, 2, 0)
+    del st.data["chars"]["member:7/0x9"]
     # a BT draw pays the draw rate and no BT medal; too short pays nothing
     res = st.record_battle("BT", [{"key": A, "team": 0}, {"key": B, "team": 1}],
                            winner=None, seconds=120)

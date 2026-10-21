@@ -124,24 +124,38 @@ GS_REQ_ANSWERS = {31: 32, 33: 34, 36: 37, 47: 48, 56: 57, 58: 59, 60: 61,
 # 33, 36, 38, 42, 43, 44, 45, 47, 53, 54, 56, 58, 60, 62, 64, 100.
 # The "queue reply 4/5/6/9.." names an earlier reading gave 0x00bc31b0 were
 # HUD EVENT numbers (it feeds the battle HUD 0x00ad9380, not the wire).
+# 2026-10-08 (retail RE, doc_capsule_church_slot07 / doc_mission3000; none of
+# 25 / 26 / 53 / 100 marks a request outstanding ([chan+2136] = 2), so none
+# waits for an answer): 25 = an ITEM REMOVED from the bag in battle (builder
+# 0x00bccff8: u32 item at body[8], u16 qty at body[12]; the actor item-change
+# case 0x004a38c8; the lobby sends selector 135 for the same), 53 = the ack
+# the notify arms of kinds 36 / 38 send, 26 / 100 = builders with no caller,
+# 56 / 58 = the briefing-room copies of lobby commands 30 / 31 (the stock
+# list and its accept). 62 / 64 (NPC control SET / CLEAR) are PROTOTYPE only:
+# no retail builder exists.
 GS_REQ_NAMES = {1: "keepalive", 24: "1 Hz battle report (needs kind 3)",
+                25: "item removed (fire-and-forget)",
                 26: "req 26 (no caller)", 30: "KILL REPORT {killer, victim}",
                 31: "team/state set", 33: "req 33", 36: "req 36",
                 38: "P2P respawn / control request (39: body[4] >= 0)",
-                42: "req 42", 43: "kill-notice ack (kind 9 arm)",
+                42: "in-battle CHAT / avatar signal (relayed as message 42)",
+                43: "kill-notice ack (kind 9 arm)",
                 44: "item-use counts (kind-4 reply, no answer)",
                 45: "leave / exit (46)",
-                47: "leaveBriefingRoom", 53: "ack of kind 36",
-                54: "kelsvc vt+732 (55: body[4] < 0 = error kick)", 56: "req 56",
-                58: "req 58 (item)", 60: "req 60",
-                62: "NPC control SET", 64: "NPC control CLEAR", 100: "req 100"}
+                47: "leaveBriefingRoom", 53: "ack of kinds 36 / 38",
+                54: "kelsvc vt+732 (55: body[4] < 0 = error kick)",
+                56: "stock list (lobby command 30 in a briefing room)",
+                58: "stock accept (lobby command 31 in a briefing room)", 60: "req 60",
+                62: "NPC control SET (prototype only)",
+                64: "NPC control CLEAR (prototype only)", 100: "req 100 (no caller)"}
 GS_NOTIFY_MSG = 35
-GS_NOTIFY_NAMES = {2: "battle spawn", 3: "restart pos", 4: "battle SETUP",
+GS_NOTIFY_NAMES = {2: "battle spawn", 3: "restart pos", 4: "battle RESULT",
                    5: "battle START", 22: "extinct", 27: "npc control",
                    31: "add chara", 51: "reset mission", 52: "round interval end",
                    53: "new round start", 54: "quest phase"}
-GS_SETUP_LEN = 400        # kind 4 reads up to record+333; a zero record is the
-                          # conservative "no rules, no npcs" (0x00bc1760)
+GS_SETUP_LEN = 400        # kind 4 = the battle RESULT record (retail arm
+                          # 0x00bc9610, doc_stats.RESULT_LEN); it carries no
+                          # rules -- those ride selector 38 (battleroom.py)
 GS_LEAVE_BRIEFING = 47
 GS_READY_ROSTER_OFF = 132  # selector 38: 28-byte roster entries from body[132]
 GS_READY_ROSTER_STRIDE = 28

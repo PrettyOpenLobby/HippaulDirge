@@ -27,4 +27,7 @@ RUN python -c "import sys, live_sessions; hasattr(live_sessions, 'marker_key') o
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 55040/udp
+# 55040 is not a privileged port, so the responder runs as the unprivileged
+# uid that owns the /logs bind mount (the core image creates it).
+USER 1000
 ENTRYPOINT ["python", "docudp.py"]

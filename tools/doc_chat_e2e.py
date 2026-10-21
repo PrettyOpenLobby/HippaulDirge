@@ -252,6 +252,62 @@ def main():
             "A SAY in battle (the room; not D in the lobby)")
         say(D_CID, DC.KIND_SHOUT, b"lobby shout", [],
             "D SHOUT from the lobby does not reach the battle")
+
+        # 7. 2026-10-08: IN-BATTLE chat rides game-server request 42 (the
+        # live layout, doc_chat.gs_chat_body) and comes back as message 42
+        def gs42(frm, body, seq):
+            pkt = bytearray(D.BODY_OFF) + bytearray(body)
+            pkt[0] = 0x04
+            pkt[8], pkt[9] = D.GS_INNER_TYPE, 1
+            struct.pack_into("<H", pkt, 14, seq)
+            struct.pack_into("<I", pkt, 16, frm)
+            return seal(pkt)
+
+        def gs_chats(pkts, want=None):
+            out = []
+            for p in pkts:
+                if (len(p) >= D.BODY_OFF + 20 and p[8] == D.GS_INNER_TYPE
+                        and struct.unpack_from("<H", p, D.BODY_OFF)[0] == 42):
+                    b = p[D.BODY_OFF:]
+                    if want is None or (b[12], bytes(b[20:20 + len(want[1])])) == want:
+                        out.append(p)
+            return out
+
+        def battle_say(frm, kind, text, want, label, seq):
+            body = DC.gs_chat_body(kind, text, session=1)
+            cl[frm].sendto(gs42(frm, body, seq), dst)
+            time.sleep(0.6)
+            got = drain_all()
+            w = (kind, text + b"\0")
+            heard = sorted(c for c in cl if c != frm and gs_chats(got[c], w))
+            ok = (heard == sorted(want)
+                  and all(len(gs_chats(got[c], w)) == 1
+                          and ident(gs_chats(got[c], w)[0]) == frm
+                          and gs_chats(got[c], w)[0][9] & 1 for c in want)
+                  and not gs_chats(got[frm]))
+            check("GS 42: %s -> %s" % (label, "+".join(NAMES[c] for c in sorted(want))
+                                       or "nobody"), ok,
+                  "heard by %s" % ("+".join(NAMES[c] for c in heard) or "nobody"))
+            return got
+
+        _g = battle_say(A_CID, DC.KIND_SAY, b"lets leave", [B_CID, C_CID],
+                        "A SAY in battle (the room; D in the lobby does not hear)", 501)
+        battle_say(A_CID, DC.KIND_TEAM, b"flank right", [C_CID],
+                   "A TEAM in battle (team 0: C; never B)", 502)
+        battle_say(B_CID, DC.KIND_TELL, b"psst", [],
+                   "B TELL in battle (no target on this channel: nobody)", 503)
+        # the kind-255 avatar signal captured live, verbatim
+        cl[C_CID].sendto(gs42(C_CID, bytes.fromhex(
+            "2a0010000000000000000000ff00800000000000"), 504), dst)
+        time.sleep(0.6)
+        got = drain_all()
+        sig = {c: [p for p in gs_chats(got[c]) if p[D.BODY_OFF + 12] == 255]
+               for c in cl}
+        check("GS 42: C's kind-255 signal reaches A + B (ident C, value 0x80), "
+              "not D, not C",
+              len(sig[A_CID]) == 1 and len(sig[B_CID]) == 1 and not sig[D_CID]
+              and not sig[C_CID] and ident(sig[A_CID][0]) == C_CID
+              and struct.unpack_from("<H", sig[A_CID][0], D.BODY_OFF + 14)[0] == 0x80)
     finally:
         srv.terminate()
         try:
@@ -264,6 +320,13 @@ def main():
     txt = io.open(log_path, encoding="utf-8", errors="replace").read()
     if not twin and not legacy:
         check("log: ROOM OPENED for table 1", "ROOM OPENED for table 1" in txt)
+        check("log: request 42 ACKed (seq 501) -- the client stops resending it",
+              "reliable ACK for seq 501" in txt)
+        check("log: [chat] relay lines for the battle SAY and the avatar signal",
+              "'lets leave' -> 2 member(s) of table 1" in txt
+              and "avatar signal kind 255 value 0x0080 -> 2 member(s)" in txt)
+        check("log: no request 42 fell into 'no answer defined'",
+              "GS request 42 (" not in txt)
     check("log: no traceback", "Traceback" not in txt)
 
 

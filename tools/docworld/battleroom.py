@@ -48,6 +48,48 @@ class BattleRules(object):
 #: third one in a single life (the client only receives the count)
 STREAK_FROM = 3
 
+
+# 2026-10-08: THE TABLE RULES. RETRACTED (same day): "retail told the client
+# its rules in the kind-4 SETUP record ([chan+1380])" -- kind 4 is the battle
+# RESULT; its word ([chan+1388] on retail, arm 0x00bc9610) is the win / lose /
+# draw and banner bits, and [chan+1380] is request 30's retry slot. The client
+# takes the rules from SELECTOR 38's table record (arm 0x00bd2ab0 -> converter
+# 0x00596ea8: wire+0 flags -> facade cfg+0, wire+116 restrictions -> cfg+56;
+# getBattleMode / kinds 3, 20, 30 copy the flags to [chan+20]), which
+# briefingroom.gs_ready_roster already carries verbatim. Retail client code
+# reads only (run offline on the retail client):
+#   friendly fire (flags 0x04)       -> 0x00bcdfc8 drops a teammate's damage
+#   Magic (flags 0x00020000 + wire+116 0x02) -> kind 2 skips setMP(100)
+#   random teams / unit (0x01400000) -> team 255 until the distribution
+# The server enforces every rule it can see as well (the backstop, and the
+# only enforcement for the rules no client code reads):
+#   friendly fire (flags 0x04 clear) -> the 113 damage relay (p2pbattle)
+#   random teams (flags 0x00400000)  -> the kind-20 distribution (teamdist)
+#   NPCs (flags 0x40)                -> the arena NPC placement
+#   Healing Items (flags 0x00200000) -> request 21 (no message 22)
+#   Limit Break / Bomb (wire+116 0x04 / 0x10) -> request 46's echo (kind 43)
+#   Magic (wire+116 0x02)            -> the MP ledger (doc_magic)
+# Enforced by NOBODY (no client reader, no server-visible event): Melee /
+# Shooting (wire+116 0x01 / 0x08: a 113 entry does not say which weapon made
+# it), S-Mines (0x20: no item id known) and the Customization lock (flags
+# 0x20: the loadout lives on the memory card and never crosses the wire).
+def friendly_fire_allowed(rules):
+    return bool(rules.friendly_fire)
+
+
+def npc_allowed(rules):
+    return bool(rules.npc)
+
+
+def items_banned(rules):
+    """The table's "Healing Items" restriction (flags 0x00200000)."""
+    return bool(rules.flags & tablerecords.BT_FLAG_ITEM_RESTRICT)
+
+
+def custom_locked(rules):
+    """The table's "Customization" lock (flags 0x20): read, not enforceable."""
+    return bool(rules.flags & tablerecords.BT_FLAG_CUSTOM_RESTRICT)
+
 LEADER_TAG = "[L]"              # 2026-09-24: the Team Leader name tag (--leader-tag)
 
 

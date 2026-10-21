@@ -73,6 +73,13 @@ ITEM_MP = {0x69320006: 50}                    # Ether
 ITEM_HP = {0x69320000: 150, 0x69320001: 150, 0x69320002: 150, 0x69320003: 150,
            0x69320005: 150, 0x6932000A: 150, 0x6932000B: 200, 0x6932000C: 200}
 PHOENIX_DOWN = 0x69320004
+
+
+def is_healing_item(item):
+    """2026-10-08: what the battletable's "Healing Items" restriction
+    (record flags 0x00200000) bans: the HP and MP consumables and the
+    Phoenix Down -- every item the client asks the server to apply."""
+    return item in ITEM_HP or item in ITEM_MP or item == PHOENIX_DOWN
 #: the reliable layer's resend offsets (500 ms, doubling) -- doc_magic's,
 #: re-measured on request 21 live +0.51 / +1.51 / +3.52 s
 RESEND_OFFSETS = (0.6, 1.6, 3.6, 7.6, 15.6)

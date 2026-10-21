@@ -35,7 +35,7 @@ TMP = os.environ.get("TEMP", HERE)
 A_CID, B_CID = 0x000410E4, 0x000410E8
 NPC0 = 0x40000100
 DUAL_HORN_DUEL = 18
-# a controller's NPC pose as captured on prod 10-05 (mode 4, header enciphered)
+# a controller's NPC pose as captured live (mode 4, header enciphered)
 NPC_POSE_MODE4 = bytes.fromhex(
     "0404400007320e001e0c4541dbf8e6fb57be4c008751718c"
     "000100400000e0c4adac48c2008000c400000000000000000000803f020080060001000000000000")

@@ -615,6 +615,9 @@ MISSION_BASE_HP = 8000
 #: 2026-10-05: the map exercises' caps from EX-POTION's 2006 Drone mission
 #: table (ex-potion.com/dcff7/mdgd.html): Church 1, Jungle 3, Wastelands 3,
 #: Sewers 2, Kalm 3, Train Graveyard 2, Battlefield Ruins 4.
+#: the Map Exercises (Church, Jungle, Wastelands, Sewers, Kalm, Train
+#: Graveyard, Battlefield Ruins)
+MAP_EXERCISES = (31, 32, 33, 34, 35, 37, 38)
 MAX_PLAYERS = {
     1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 6: 1, 7: 1, 8: 1, 16: 1, 18: 3, 19: 1,
     20: 3, 21: 3, 22: 6, 23: 4, 24: 1, 25: 1, 26: 6, 27: 3, 28: 1, 29: 2,

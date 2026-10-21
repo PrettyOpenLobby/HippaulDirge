@@ -32,6 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docudp as D   # noqa: E402
+from docworld import arenadata as AD   # noqa: E402
 from doc_e2e_udp import udp_socket, wait_listening  # noqa: E402
 import doc_stats as S   # noqa: E402
 from doc_battle_leave_e2e import (world_req, gs_req, check, FAILS, A_CID,  # noqa: E402
@@ -261,9 +262,26 @@ def main():
           "team 1's base destroyed" in text and "DESTROYED --" not in text
           and any(k == 4 for k, _ in notes))
 
+    # 2026-10-08: Wastelands (z204) ships no 1100; since 10-06 a team table
+    # there carries its 9100 (arenadata.situation_for, the "jail" fix), and
+    # the client's own bzd table 28 for 9100 lists a base pair (rows 1 / 0 in
+    # the extract). The client builds them, so the server binds them. The
+    # check used to say "no base", written when the record still carried the
+    # 1100 the zone lacks.
     text, notes = battle("wastelands", 3, 3, 8000)
-    check("[wastelands] no base message: its 11xx situations list no base",
-          "[base]" not in text and not any(k == 33 for k, _ in notes))
+    _wb = AD.base_gimmicks(204, AD.situation_for(204, False))
+    check("[wastelands] Team Base on z204 resolves to situation 9100 and binds "
+          "its base pair from that situation",
+          AD.situation_for(204, False) == 9100 and _wb == (1, 0)
+          and any(k == 29 and kind29_bases(p) == [(1, 0, 1), (1, 1, 0)]
+                  for k, p in notes)
+          and sum(1 for k, _ in notes if k == 33) == 2, "%r" % (_wb,))
+    # TWIN: an arena whose team situation lists no base (Warehouse z209,
+    # map 14, 9100 without a base pair) sends no base message
+    text, notes = battle("nobase", 14, 3, 8000)
+    check("[nobase] TWIN: z209's 9100 lists no base -> no base message",
+          AD.base_gimmicks(209, AD.situation_for(209, False)) is None
+          and "[base]" not in text and not any(k == 33 for k, _ in notes))
 
     text, notes = battle("tbt", 2, 1, 8000)
     check("[tbt] a Team Battle table on Kalm sends no base message, no capsule",
@@ -284,8 +302,11 @@ def main():
           caps == [(D.MAKO_CAPSULE, 1, 0), (D.MAKO_CAPSULE, 1, 1),
                    (D.MAKO_CAPSULE, 1, 2)]
           and all(e[2] >= 3 for e in k10 if e[0] != D.MAKO_CAPSULE), "%r" % k10)
-    check("[capsule] logged placed + sent",
-          "[capsule] table 1: 3 Mako Capsule(s) placed" in text
+    # 2026-10-06 (live, Jungle TCP): the capsules sit on the situation's own
+    # capsule generators (Kalm z203 -> 9100), not on a ring
+    check("[capsule] logged placed on 9100's capsule generators + sent",
+          "[capsule] table 1: 3 Mako Capsule(s) on situation 9100's capsule "
+          "generators" in text
           and "[capsule] SENT notify kind 10 x3" in text)
     check("[capsule] no base messages on a capsule table", "[base]" not in text)
 

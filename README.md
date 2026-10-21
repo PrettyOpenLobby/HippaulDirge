@@ -112,25 +112,28 @@ The core builds the profile the Viewer shows for a Dirge of Cerberus Content ID 
 data only this title holds, so a small plugin runs inside the core's `login`
 and `authsess` processes (OpenLobby's `services/titles.py`, `POL_TITLES`).
 `Dockerfile.title` layers it on the core image and `docker-compose.title.yml`
-swaps that image into those two services. From this directory, with the core
-checked out beside it:
+swaps that image into those two services. The bring-up below includes it.
+To rebuild only those two, from this directory:
 
 ```
-docker compose --project-directory ../openlobby     -f ../openlobby/docker-compose.yml -f docker-compose.title.yml     up -d --build login authsess
+docker compose --project-directory ../openlobby \
+    -f ../openlobby/docker-compose.yml -f docker-compose.title.yml \
+    up -d --build login authsess
 ```
 
-Without it the game plays the same; only the Viewer's profile screen for a Dirge Content ID stays empty. The plugin reads the `doc_character` and `doc_career` tables from the core's database. To run several titles, build each title image on the previous
-one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
-`.env`, for example `POL_TITLES=tmtitle,doctitle`.
+Without it the game plays the same; only the Viewer's profile screen for a
+Dirge Content ID stays empty. The plugin reads the `doc_character` and
+`doc_career` tables from the core's database. With other games enabled, run
+`python ../openlobby/tools/stack.py compose up -d --build` instead: it builds
+each title image on the previous one and lists every plugin in `POL_TITLES`.
 
 ## Prerequisites
 
 - This repository checked out as `hippauldirge`, which is where the compose files
   look for it (`git clone https://github.com/PrettyOpenLobby/HippaulDirge.git hippauldirge`).
   A checkout from before the rename, still named `crystaldirge`, needs renaming.
-- The core lobby stack (OpenLobby) checked out beside this repository, its
-  image built (`openlobby:latest`), and its stack running on the same Docker
-  host
+- The core lobby stack (OpenLobby) checked out beside this repository as
+  `openlobby`, on the same Docker host
 - Docker with Compose v2
 - A Japanese Dirge of Cerberus disc with the online mode, and a PlayOnline
   install on a PlayStation 2 hard disk (real hardware, or an emulator that
@@ -140,21 +143,50 @@ one (`OPENLOBBY_IMAGE`) and list them all in `POL_TITLES` in OpenLobby's
 
 ## Bring-up
 
+From this directory:
+
 ```
-cp .env.example .env        # set POL_ADVERTISE to your server's LAN/VPN IP
-docker compose --project-directory ../openlobby \
-    --env-file ../openlobby/.env --env-file .env \
-    -f ../openlobby/docker-compose.yml -f docker-compose.yml \
-    up -d --build doc
+python ../openlobby/tools/stack.py enable doc
+python ../openlobby/tools/stack.py compose up -d --build
 ```
+
+That builds the core image, builds this repository's image on it, starts
+`doc`, and swaps the title plugin (above) into the core's `login` and
+`authsess`. `stack.py` is OpenLobby's launcher for the core and its games
+(OpenLobby's docs/games.md): it remembers which games you enabled, runs them
+in the core's compose project, and when several games plug into `login` it
+builds their images one on another and lists them all in `POL_TITLES`. The
+arena tables (below) are optional; `python ../openlobby/tools/stack.py check`
+lists which of them are in place.
+
+The `POL_DOC_*` knobs go in this directory's `.env` (copy `.env.example`),
+which stack.py passes after OpenLobby's `.env`.
+
+### By hand
 
 `docker-compose.yml` is an override of the core's compose file: the service
 joins the core's project and network and starts once its PostgreSQL is
 healthy. The image is built on the core image (`OPENLOBBY_IMAGE`, default
-`openlobby:latest`).
+`openlobby:latest`), so build the core first (`docker compose build` in
+`../openlobby`). The command stack.py runs for Dirge alone, from this
+directory:
 
-Without building, from the image published to
-`ghcr.io/prettyopenlobby/hippauldirge` on every push:
+```
+docker compose --project-directory ../openlobby \
+    --env-file ../openlobby/.env --env-file .env \
+    -f ../openlobby/docker-compose.yml \
+    -f docker-compose.yml -f docker-compose.title.yml up -d --build
+```
+
+Compose refuses an `--env-file` that does not exist, so leave out the one
+you have not created.
+
+### Without building
+
+The responder's image is published to `ghcr.io/prettyopenlobby/hippauldirge`
+on every push. `python ../openlobby/tools/stack.py compose --ghcr up -d`
+uses it; the title plugin's small image is still built locally, on the
+published core. By hand, the responder alone:
 
 ```
 docker compose --project-directory ../openlobby \
@@ -163,8 +195,9 @@ docker compose --project-directory ../openlobby \
     -f docker-compose.ghcr.yml up -d doc
 ```
 
-`POL_ADVERTISE` must be the address the console reaches this host on; it is
-handed to the game inside the protocol. The core's DNS answers
+`POL_ADVERTISE` in OpenLobby's `.env` must be the address the console
+reaches this host on; it is handed to the game inside the protocol. The
+core's DNS answers
 `kel-1001.pol.com` with the same address. Nothing needs to be configured on
 the console beyond the DNS/hosts redirection already done for the core.
 

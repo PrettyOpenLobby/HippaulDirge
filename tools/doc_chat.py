@@ -223,6 +223,116 @@ def relay_body(body):
     return bytes(body)
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-08: THE GAME-SERVER COPY OF THE SAME STREAM (request 42 -> message 42)
+#
+# Once a client is in a battle ([kelsvc+28] bit 0x20), the one chat send
+# routine (kelsvc vt+760/764 on retail 0x00bd7da0, proto 0x00bd1070) stops
+# using selector 255 and hands the record to the game-server channel's
+# sender (retail 0x00bcdf30, proto 0x00bc6488), whose builder (retail
+# 0x00bc8408, proto 0x00bc0448) lays the request out as
+#
+#     body+0   u16 42           body+2  u16 session (the table key)
+#     body+12  u8  kind         body+13 0
+#     body+14  u16 LENGTH       (retail: lhu rec+12; proto: the u8 at rec+10)
+#     body+16  u32 0            ALWAYS ZERO: `sw zero, 4(a2)` -- the record's
+#                               target (rec+4) is NOT copied, so a battle TELL
+#                               carries no addressee on the wire
+#     body+20  text[LENGTH]     (<= 200), only when kind < 10 or 13..254;
+#                               kinds 10..12 and 255 send no text (length 8)
+#
+# captured from a live battle on our own server: kind 5 SAY
+#   2a00 0300 00000000 00000000 05 00 0800 00000000 "sssssss\0"
+# and 417 payload-free kind 255 lines 2a00 1000 .. ff 00 8000 00000000 (the
+# bytes at +14/+15 are 0x80 or 0x84 there, see AVATAR_KINDS).
+#
+# The receive side is message 42 (table 0x00bf2dc0 entry 41 -> arm proto
+# 0x00bc51bc): it calls the kelsvc wrapper 0x00bd52d8 with the stream at
+# body+12 and the length [record+18]-12, which runs 0x00bcb450 -- the SAME
+# dispatcher selector 255 uses -- with the SENDER = record+4 (the datagram's
+# ident). Kinds < 10 and 13..254 file (kind, sender, text) into the chat
+# ring (0x00bcb238); the sender's own line is printed locally by the send
+# routine, so the speaker must not get a copy back.
+#
+# A relay is therefore: build_gs_message(42, body_extra = the sender's body
+# from +4, ident = sender), to every room member the kind reaches.
+GS_CHAT_REQ = 42
+GS_STREAM_OFF = STREAM_OFF            # the stream sits at body+12 on both channels
+GS_TEXT_OFF = 20
+GS_TEXT_MAX = 200
+
+#: kinds 10, 11, 12 and 255 are not chat: 0x00bcb450 routes them to
+#: 0x00bcadf0, which (a) finds the SENDER's unit on the avatar (0x00bdf010,
+#: 32 units of 700 bytes at [avatar+3488]) and stores stream[2] (the byte at
+#: body+14) into unit+535 with flag 0x8000 (an engine callback reads it back
+#: through the unit's vt+120), and (b) raises HUD event 10 (kinds 10 / 255),
+#: 21 (11) or 22 (12) through 0x00bc6ed0 -> 0x00bc31b0 with the sender id and
+#: the byte at body+15. The client sends kind 255 from kelsvc vt+72 (retail
+#: 0x00bda710: rec+8 = 255, rec+12 = the u16 the engine passes in; live
+#: values 0x0080 / 0x0084). WHAT the byte means is not identified (the
+#: engine-side callback was not opened); it is a per-player signal every
+#: other member's client expects, so it is relayed verbatim like a SAY.
+AVATAR_KINDS = (10, 11, 12, 255)
+
+
+def parse_gs(body):
+    """(kind, length, text) of a game-server request-42 body, or None."""
+    if body is None or len(body) < GS_STREAM_OFF + 8:
+        return None
+    if struct.unpack_from("<H", body, 0)[0] != GS_CHAT_REQ:
+        return None
+    kind = body[GS_STREAM_OFF]
+    n = struct.unpack_from("<H", body, GS_STREAM_OFF + 2)[0]
+    if kind in AVATAR_KINDS:
+        return kind, n, b""
+    raw = bytes(body[GS_TEXT_OFF:GS_TEXT_OFF + min(n, GS_TEXT_MAX)])
+    return kind, n, raw.split(b"\0", 1)[0]
+
+
+def is_avatar_signal(body):
+    """A selector-255 body carrying one of AVATAR_KINDS (the lobby copy of
+    the same signal, which parse() does not treat as chat)."""
+    return (body is not None and len(body) >= STREAM_OFF + 8
+            and body[1] == SEL_CHAT and body[STREAM_OFF] in AVATAR_KINDS)
+
+
+def gs_recipients(kind, sender, members, team_of):
+    """The room members a battle chat line of `kind` from `sender` reaches.
+    `members` = the room's present members, `team_of(cid)` -> the team or
+    None (individual play).
+      SAY / SHOUT / ENTRY -> the whole room (a battle is one area and one
+                             table; the lobby help's radius does not apply)
+      TEAM                -> the sender's team (the client itself refuses
+                             /team with no team, 0x9c0f)
+      TELL                -> nobody: the builder drops the target (OURS: a
+                             line nobody can route is dropped, not broadcast)
+      10 / 11 / 12 / 255  -> everyone else (the avatar signal)
+      anything else       -> everyone else (unpinned, as the lobby)"""
+    others = [m for m in members if m and m != sender]
+    if kind == KIND_TELL:
+        return []
+    if kind == KIND_TEAM:
+        t = team_of(sender)
+        if t is None:
+            return []
+        return [m for m in others if team_of(m) == t]
+    return others
+
+
+def gs_chat_body(kind, text=b"", session=0, value=0):
+    """A request-42 body the way the client's builder lays it out (tests and
+    proofs): `value` = the u16 at +14 of a kind-255 signal."""
+    b = bytearray(GS_TEXT_OFF)
+    struct.pack_into("<HH", b, 0, GS_CHAT_REQ, session & 0xFFFF)
+    b[GS_STREAM_OFF] = kind & 0xFF
+    if kind in AVATAR_KINDS:
+        struct.pack_into("<H", b, GS_STREAM_OFF + 2, value & 0xFFFF)
+        return bytes(b)
+    t = bytes(text)[:GS_TEXT_MAX - 1] + b"\0"
+    struct.pack_into("<H", b, GS_STREAM_OFF + 2, len(t))
+    return bytes(b) + t
+
+
 def chat_body(kind, text, target=BROADCAST):
     """A selector-255 body the way the client lays it out (tests)."""
     t = text + b"\0"
@@ -293,6 +403,37 @@ def _selftest():
         4 in to(KIND_SAY, 1, where=None))
     chk("twin: the scoped say does NOT", 4 not in to(KIND_SAY, 1))
     chk("avatar kinds are not chat", parse(chat_body(12, b"x")) is None)
+    chk("...but they are the avatar signal", is_avatar_signal(chat_body(12, b"x"))
+        and is_avatar_signal(chat_body(255, b"")) and not is_avatar_signal(chat_body(5, b"x")))
+    # 2026-10-08: the game-server copy (request 42). The SAY line captured
+    # live, verbatim, and the kind-255 signal captured live, verbatim.
+    live_say = bytes.fromhex("2a000300000000000000000005000800000000007373737373737300")
+    live_255 = bytes.fromhex("2a0010000000000000000000ff00800000000000")
+    chk("GS: the live SAY parses (kind 5, length 8, text)",
+        parse_gs(live_say) == (5, 8, b"sssssss"))
+    chk("GS: the live kind-255 signal parses with its u16 value and no text",
+        parse_gs(live_255) == (255, 0x80, b""))
+    chk("GS: a selector-255 body is not a request 42", parse_gs(chat_body(5, b"x")) is None)
+    chk("GS: gs_chat_body rebuilds the live SAY byte for byte",
+        gs_chat_body(5, b"sssssss", session=3) == live_say)
+    chk("GS: gs_chat_body rebuilds the live signal byte for byte",
+        gs_chat_body(255, session=16, value=0x80) == live_255)
+    room = [10, 11, 12, 13]
+    teams = {10: 0, 11: 1, 12: 0, 13: 1}
+    chk("GS: SAY reaches the whole room but the speaker",
+        gs_recipients(KIND_SAY, 10, room, teams.get) == [11, 12, 13])
+    chk("GS: SHOUT and ENTRY are the room too",
+        gs_recipients(KIND_SHOUT, 11, room, teams.get) == [10, 12, 13]
+        and gs_recipients(KIND_ENTRY, 11, room, teams.get) == [10, 12, 13])
+    chk("GS: TEAM reaches the sender's team only",
+        gs_recipients(KIND_TEAM, 10, room, teams.get) == [12])
+    chk("GS: TEAM in individual play (no team) reaches nobody",
+        gs_recipients(KIND_TEAM, 10, room, lambda c: None) == [])
+    chk("GS: TELL carries no target on this channel -> nobody",
+        gs_recipients(KIND_TELL, 10, room, teams.get) == [])
+    chk("GS: the kind-255 signal reaches everyone else",
+        gs_recipients(255, 13, room, teams.get) == [10, 11, 12])
+    chk("GS: a member who left is not a member", gs_recipients(KIND_SAY, 10, [10, 11], teams.get) == [11])
     return ok[0]
 
 

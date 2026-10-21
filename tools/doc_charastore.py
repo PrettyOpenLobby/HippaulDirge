@@ -373,10 +373,46 @@ def _utcnow_str():
 #: on every POL sign-in, a PS2 title follows a POL login from the same box, and
 #: prod runs host networking, so peer_ip is the real client address. The rows
 #: are read through OpenLobby's accounts.sessions_by_ip().
+def _contentauth():
+    """OpenLobby's contentauth module (the credential blob decoder and the
+    hashes the lobby files on 4:5), imported beside polcore like accounts."""
+    import contentauth
+    return contentauth
+
+
+#: Where the 52-byte credential blob sits in the two datagrams that open a
+#: session, as (wire length, body offset): the world door's is measured
+#: (worlddoor.py, body[28..79]); the entrance's follows from the uid the
+#: client later streams sitting at body[16] there and at body[44] = blob+16
+#: on the door (worldpose.early_uid). A window that is not a blob fails
+#: decode_blob's check bytes and trailer checksum, so a wrong guess here
+#: answers None and never a wrong member.
+BLOB_WINDOWS = ((80, 0), (132, 28))
+_BODY_OFF = 24
+
+
+def credential_blob(data):
+    """The credential blob in a (decrypted) entrance or world-door datagram,
+    or None when the datagram is neither or the bytes do not decode."""
+    try:
+        ca = _contentauth()
+    except Exception:                           # noqa: BLE001
+        return None
+    for wire_len, off in BLOB_WINDOWS:
+        if len(data) == wire_len:
+            b = bytes(data[_BODY_OFF + off:_BODY_OFF + off + ca.BLOB_LEN])
+            return b if ca.decode_blob(b) is not None else None
+    return None
+
+
 class AccountResolver:
     """The store key for a client address: its POL member, remembered.
 
     Order, and why each step exists:
+      0. the credential blob the client sent (2026-10-08): it decodes to a
+         hash the core filed when it answered this login's 4:5, so a hit is
+         the member itself and the address is never consulted. A miss (no
+         hash filed, or bytes that are not a blob) is logged and falls to
       1. the freshest POL `session` row at the address inside WINDOW. Several
          members at one address (a PC with the Windows viewer AND PCSX2 signed
          in) -> the one that already owns DoC characters; if that does not
@@ -431,7 +467,32 @@ class AccountResolver:
             seen.setdefault(mid, (mid, nick, at))
         return list(seen.values())
 
-    def resolve(self, ip):
+    def _by_blob(self, ip, blob):
+        if not blob:
+            return None
+        try:
+            mid, _row, how = _contentauth().member_for_blob(
+                blob, log=lambda m: print("[chara] %s" % m, flush=True),
+                tag="credential blob")
+        except Exception as e:                  # noqa: BLE001
+            print("[chara] WARN credential blob not checked (%r) - falling "
+                  "back to the address" % (e,), flush=True)
+            return None
+        if mid is None:
+            return None
+        key = "member:%d" % mid
+        print("[chara] %s -> %s (the CREDENTIAL BLOB decided; the address was "
+              "not consulted)" % (ip, key), flush=True)
+        self._remember(ip, key)
+        return key
+
+    def resolve(self, ip, blob=None):
+        key = self._by_blob(ip, blob)
+        if key:
+            return key
+        if blob:
+            print("[chara] %s: the credential blob did not decide - resolving "
+                  "by the address" % ip, flush=True)
         try:
             cands = self._sessions(ip)
         except Exception as e:                  # noqa: BLE001 -- see docstring
@@ -644,6 +705,37 @@ def _selftest():
     assert rb.register("member:2", dict(ca, name="shalua")) == (None, CER_NAME_TAKEN)
     assert rb.register("member:2", dict(ca, name="Shelke")) == (0, None)
     assert rb.register("member:2", dict(ca, name="X")) == (None, CER_NAME_LENGTH)
+    # 8. 2026-10-08: the credential blob names the member before the address.
+    #    A filed blob at the PC's address names the Deck's member; an unfiled
+    #    blob and garbage give the address path's own answer.
+    from polcore import kv
+    kv.reset(kv.MemoryKV(prefix="doctest:"))
+    try:
+        ca = _contentauth()
+        h = ca.hash_for(b"\0" * 16, 0x68E6A5B8, b"\0" * 8)
+        filed = ca.blob_for_selftest(h)
+        unfiled = ca.blob_for_selftest(b"\x5a" * 16)
+        assert ca.file_hashes([h], m_deck, "uDOC1", 7, "192.0.2.1") == 1
+        docdb.store("ip_members").clear()
+        rs = AccountResolver(docdb.store("ip_members"), S())
+        assert rs.resolve("192.0.2.1", blob=filed) == k_deck_want
+        assert (rs._memory().get("192.0.2.1") or {}).get("key") == k_deck_want
+        by_addr = rs.resolve("192.0.2.1")
+        assert by_addr != k_deck_want
+        assert rs.resolve("192.0.2.1", blob=unfiled) == by_addr
+        assert rs.resolve("192.0.2.1", blob=b"\xff" * 52) == by_addr
+        assert rs.resolve("192.0.2.1", blob=b"") == by_addr
+        # the two datagram windows, and a keepalive that carries none
+        door = bytearray(132); door[1] = 1
+        door[_BODY_OFF + 28:_BODY_OFF + 80] = filed
+        ent = bytearray(80); ent[1] = 1
+        ent[_BODY_OFF:_BODY_OFF + 52] = filed
+        assert credential_blob(bytes(door)) == filed
+        assert credential_blob(bytes(ent)) == filed
+        assert credential_blob(bytes(96)) is None
+        assert credential_blob(bytes(132)) is None
+    finally:
+        kv.reset()
     conn.close()
     fresh()
     docdb.store("ip_members").clear()

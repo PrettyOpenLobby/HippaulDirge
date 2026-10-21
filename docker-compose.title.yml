@@ -15,9 +15,10 @@
 # from the core's own PostgreSQL database (POL_DATABASE_URL, which login and
 # authsess already have), so nothing here names a database or a file.
 #
-# Stacking titles: every title image is the core image plus one plugin, so
-# to run several, build each on the previous one (OPENLOBBY_IMAGE) and list
-# them all in POL_TITLES, e.g. POL_TITLES=tmtitle,doctitle in .env.
+# Stacking titles: every title image is the image below it plus one plugin.
+# OpenLobby's tools/stack.py builds the chain in order, passing each link's
+# base in POL_TITLE_BASE_IMAGE, and sets POL_TITLES to every enabled title
+# (OpenLobby's docs/games.md). Run alone, this builds on OPENLOBBY_IMAGE.
 
 services:
   login:
@@ -26,7 +27,7 @@ services:
       context: ../hippauldirge
       dockerfile: Dockerfile.title
       args:
-        OPENLOBBY_IMAGE: "${OPENLOBBY_IMAGE:-openlobby:latest}"
+        OPENLOBBY_IMAGE: "${POL_TITLE_BASE_IMAGE:-${OPENLOBBY_IMAGE:-openlobby:latest}}"
     pull_policy: build
     environment:
       POL_TITLES: "${POL_TITLES:-doctitle}"

@@ -31,7 +31,7 @@ from . import gamemsg
 # Server pushes ride message 35, the NOTIFY family: body[12..15] u32 KIND
 # (0..54, table 0x00bf2c80), kind-specific payload from body[16] (kind 4 reads
 # its record at body[20]).  Named kinds: 2 = battle SPAWN (floats), 3 = restart
-# pos, 4 = battle SETUP (the rules record; the client replies with 53),
+# pos, 4 = battle RESULT (sec 4fy; the rules ride selector 38, battleroom.py),
 # 5 = battle START (facade bit 0x80: getBattleInitPos becomes readable),
 # 22 = Extinct (entity gone), 27 = NPC control change, 31 = add chara,
 # 51 = Reset Mission, 52 = ROUND_INTERVAL_END, 53 = NEW_ROUND_START,
@@ -61,13 +61,34 @@ def mission_spawn_order(points, player, near=150.0):
     enemies than it has points -- nearest the player's start first, but none
     closer than `near` (those go last, farthest of them first), so a lone
     enemy is found and does not appear on top of the player. Live quest 1:
-    roster node 0 was ~785 units away and the Beast Soldier idled there."""
+    roster node 0 was ~785 units away and the Beast Soldier idled there.
+
+    2026-10-09 (live, Map Exercise Church): the distance is flat (x, z), so
+    a point on ANOTHER FLOOR counted as near -- replacements went to the
+    church's y -440 level under a player at y -140 and were never seen
+    again. Points more than SAME_FLOOR_DY above or below the player now go
+    after every same-floor point, nearest (3D) first."""
     def d2(p):
         return sum((float(p[i]) - float(player[i])) ** 2 for i in (0, 2))
-    far = sorted((p for p in points if d2(p) >= near * near), key=d2)
-    close = sorted((p for p in points if d2(p) < near * near), key=d2,
+
+    def other_floor(p):
+        return len(player) > 1 and abs(float(p[1]) - float(player[1])) > SAME_FLOOR_DY
+    same = [p for p in points if not other_floor(p)]
+    far = sorted((p for p in same if d2(p) >= near * near), key=d2)
+    close = sorted((p for p in same if d2(p) < near * near), key=d2,
                    reverse=True)
-    return far + close
+    other = sorted((p for p in points if other_floor(p)),
+                   key=lambda p: d2(p) + (float(p[1]) - float(player[1])) ** 2)
+    return far + close + other
+
+
+#: OURS: the height difference past which a spawn point is on another floor
+#: (Sewers' slopes span 95 around the Map Exercise start and play fine; the
+#: church's floors are 120 and 300 apart)
+SAME_FLOOR_DY = 100.0
+#: OURS: a mission start farther than this (3D) from every enemy point of
+#: its controller borrows a start node nearer them (mission_player_spawn)
+MISSION_START_FAR = 400.0
 
 
 def mission_enemy_plan(pool, groups, player, k, pick, prefer=lambda t: False,
@@ -100,7 +121,8 @@ def mission_enemy_plan(pool, groups, player, k, pick, prefer=lambda t: False,
     return [(p, t) for _tier, _r, p, t in plan[:k]]
 
 
-def mission_player_spawn(zone, ctrl, generic, radius=300.0, seat=0):
+def mission_player_spawn(zone, ctrl, generic, radius=300.0, seat=0,
+                         borrow=False):
     """2026-10-04: the player START for a mission at (zone, ctrl).
 
     2026-10-05 (static RE, all retail arenas): a situation's TYPE-2 pool nodes
@@ -117,6 +139,24 @@ def mission_player_spawn(zone, ctrl, generic, radius=300.0, seat=0):
     players = (rec or {}).get("player") or []
     if not players:
         return tuple(generic)
+    # 2026-10-09 (live, Map Exercise Jungle, 201:3004): every one of the
+    # controller's start nodes is 566+ from its nearest enemy point, and the
+    # two enemies were never found. With `borrow` (the Map Exercises) such a
+    # mission takes the zone's start node (any situation's) with the most of
+    # its enemy points in reach.
+    pool = (rec or {}).get("pool") or []
+
+    def reach(s):
+        return [d for d in (sum((float(s[i]) - float(p[i])) ** 2 for i in range(3)) ** 0.5
+                            for p in pool) if d <= MISSION_START_FAR]
+    if borrow and pool and not any(reach(s) for s in players):
+        nodes = {tuple(float(v) for v in s)
+                 for r in MISSION_SPAWNS.get(str(zone), {}).values()
+                 for s in (r.get("player") or [])}
+        scored = sorted(((len(reach(s)), -min(reach(s) or [1e9]), s) for s in nodes),
+                        reverse=True)
+        if scored and scored[0][0]:
+            players = [scored[0][2]] + [e[2] for e in scored[1:]]
     # 2026-10-05 (live, Iron Curtain): a situation's start nodes alternate
     # between groups (node byte +72: 205:3001 = two flanks, the second higher
     # up); seat 1 went to the OTHER group alone and spawned outside the map.

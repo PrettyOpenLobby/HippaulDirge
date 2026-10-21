@@ -1809,6 +1809,25 @@ def main():
         check("TWIN: a controller with no start node keeps the generic spawn",
               D.arenadata.mission_player_spawn(299, 3002, _gen) == _gen
               and D.arenadata.mission_player_spawn(299, 3999, _gen) == _gen)
+        # 2026-10-09 (live, Map Exercise Jungle): own starts 566+ from every
+        # enemy point -> a Map Exercise borrows the zone's best-placed start
+        _ms["299"]["3003"] = {"pool": [[2000.0, 0.0, 2000.0], [2050.0, 0.0, 2000.0]],
+                              "player": [[0.0, 0.0, 900.0]]}
+        _ms["299"]["3004"] = {"pool": [], "player": [[2100.0, 0.0, 2000.0]]}
+        check("Map Exercise far from its enemies borrows the zone's start "
+              "node nearest them; without borrow it keeps its own",
+              D.arenadata.mission_player_spawn(299, 3003, _gen, borrow=True)
+              == (2100.0, 0.0, 2000.0)
+              and D.arenadata.mission_player_spawn(299, 3003, _gen) == (0.0, 0.0, 900.0)
+              and D.arenadata.mission_player_spawn(299, 3001, _gen, borrow=True)
+              == (490.0, 0.0, 480.0))
+        # 2026-10-09 (live, Map Exercise Church): a point on another floor
+        # (y -440 under a player at y -140) is not "near"
+        _ord = D.arenadata.mission_spawn_order(
+            [[200.0, -440.0, 0.0], [300.0, -140.0, 0.0], [600.0, -150.0, 0.0]],
+            (0.0, -140.0, 0.0), 150.0)
+        check("spawn order: same-floor points before another floor's",
+              _ord == [[300.0, -140.0, 0.0], [600.0, -150.0, 0.0], [200.0, -440.0, 0.0]])
     finally:
         if _ms_saved is None:
             _ms.pop("299", None)
@@ -2880,6 +2899,246 @@ def main():
           and 'a.weekly_medals != "on"' in _src26
           and "_stats.week_phase = doc_stats.parse_week_start(a.week_start)"
           in _src26)
+    # ── 2026-10-08: table rules the server enforces, and in-battle chat ────
+    import doc_chat as DCH
+    import doc_items as _DI
+    _src28 = responder_source()
+    _ff_rules = D.battle_rules_from_record(D.build_battletable_record(
+        table_id=0, flags=0, mode=1, comment="ff off"))
+    _ff_on = D.battle_rules_from_record(D.build_battletable_record(
+        table_id=0, flags=D.BT_FLAG_FRIENDLY_FIRE | D.BT_FLAG_NPC
+        | D.BT_FLAG_ITEM_RESTRICT | D.BT_FLAG_CUSTOM_RESTRICT, mode=1, comment="all"))
+    check("rules: a record with flags 0 = no friendly fire, no NPCs, items "
+          "allowed, loadout free",
+          not D.friendly_fire_allowed(_ff_rules) and not D.npc_allowed(_ff_rules)
+          and not D.items_banned(_ff_rules) and not D.custom_locked(_ff_rules))
+    check("rules: flags 0x04 / 0x40 / 0x00200000 / 0x20 read back as FF, NPCs, "
+          "Healing Items banned, Customization locked",
+          D.friendly_fire_allowed(_ff_on) and D.npc_allowed(_ff_on)
+          and D.items_banned(_ff_on) and D.custom_locked(_ff_on))
+    # a 113 from A (team 0): +40 on B (team 1), +30 on C (team 0), a Cure -25
+    # on C, +60 on an NPC
+    _ents = [(0xB, 40, 0xA, 7), (0xC, 30, 0xA, 7), (0xC, -25, 0xA, 9), (0x40000010, 60, 0xA, 7)]
+    _p113 = bytearray(D.BODY_OFF) + struct.pack("<I", len(_ents))
+    for _e in _ents:
+        _p113 += struct.pack("<IiII", *_e)
+    _p113[8] = 113
+    struct.pack_into("<I", _p113, 16, 0xA)
+    struct.pack_into("<H", _p113, 2, len(_p113))
+    _teams = {0xA: 0, 0xB: 1, 0xC: 0}
+    _same = lambda atk, vic: atk in _teams and vic in _teams and _teams[atk] == _teams[vic]
+    _kept, _dropped = D.strip_team_damage(bytes(_p113), _same)
+    check("friendly fire off: the teammate's +30 is cut; the enemy hit, the "
+          "Cure (negative) and the NPC hit stay",
+          _dropped == [(0xC, 30, 0xA, 7)] and _kept is not None
+          and D.p2p_damage(_kept)[2] == [(0xB, 40, 0xA, 7), (0xC, -25, 0xA, 9),
+                                          (0x40000010, 60, 0xA, 7)]
+          and struct.unpack_from("<H", _kept, 2)[0] == len(_kept) == D.BODY_OFF + 4 + 48)
+    _only = bytearray(D.BODY_OFF) + struct.pack("<IIiII", 1, 0xC, 30, 0xA, 7)
+    _only[8] = 113
+    struct.pack_into("<H", _only, 2, len(_only))
+    check("friendly fire off: a 113 that only hits a teammate relays nothing",
+          D.strip_team_damage(bytes(_only), _same) == (None, [(0xC, 30, 0xA, 7)]))
+    check("TWIN: nothing is cut when nobody shares a side",
+          D.strip_team_damage(bytes(_p113), lambda a_, v_: False) == (bytes(_p113), []))
+    check("friendly fire: wired into the damage relay, gated on the room's rule",
+          "strip_team_damage(plain, _same_side)" in _src28
+          and "not room.rules.friendly_fire and not room.individual()" in _src28)
+    import random as _random
+    _rt = D.gs_random_teams([1, 2, 3, 4, 5], rng=_random.Random(7))
+    check("random teams: every seated member dealt, sides 3 / 2",
+          sorted(_rt) == [1, 2, 3, 4, 5] and sorted(_rt.values()) == [0, 0, 0, 1, 1])
+    check("random teams: a different seed deals a different order (it is a deal, "
+          "not seat order)",
+          any(D.gs_random_teams([1, 2, 3, 4, 5], rng=_random.Random(s)) != _rt
+              for s in range(1, 12)))
+    check("random teams: dealt at the distribution on the record's flag 0x00400000",
+          "& BT_FLAG_RANDOM_TEAMS" in _src28
+          and "_rt = gs_random_teams(members)" in _src28
+          and "not _coop and not _ind" in _src28)
+    check("NPC row: the arena placement reads the room's rule",
+          "not npc_allowed(_npc_room.rules)" in _src28)
+    check("Healing Items: request 21 under the ban gets no message 22",
+          "items_banned(_ban21.rules)" in _src28
+          and "doc_items.is_healing_item(_itm)" in _src28
+          and _DI.is_healing_item(0x69320000) and _DI.is_healing_item(_DI.PHOENIX_DOWN)
+          and not _DI.is_healing_item(0x12345678))
+    # in-battle chat: request 42 -> message 42 to the room, ACKed
+    _gb = DCH.gs_chat_body(DCH.KIND_SAY, b"flank", session=1)
+    _m42 = D.build_gs_message(DCH.GS_CHAT_REQ, seq=9, body_extra=bytes(_gb[4:]), ident=0xA)
+    _b42 = _m42[D.BODY_OFF:]
+    check("chat 42: the relayed message 42 carries the sender's stream at body+12 "
+          "(kind, length, text at +20) under ident = the speaker",
+          struct.unpack_from("<H", _b42, 0)[0] == 42
+          and _b42[12] == DCH.KIND_SAY and struct.unpack_from("<H", _b42, 14)[0] == 6
+          and _b42[20:26] == b"flank\0"
+          and struct.unpack_from("<I", _m42, 16)[0] == 0xA
+          and _m42[8] == D.GS_INNER_TYPE and _m42[9] & 1)
+    check("chat 42: dispatched before the generic ladder, ACKed, relayed",
+          "elif _gmt == doc_chat.GS_CHAT_REQ:" in _src28
+          and _src28.index("elif _gmt == doc_chat.GS_CHAT_REQ:")
+          < _src28.index("elif _gmt in GS_REQ_ANSWERS:")
+          and "relay_gs_chat(seen_charid[0] or 0, _gbody)" in _src28
+          and "doc_chat.gs_recipients(kind, sender, room.present(), team_of)" in _src28)
+    check("chat 42: the lobby copy of the avatar signal (selector 255 kinds "
+          "10..12 / 255) is relayed to every live player",
+          "doc_chat.is_avatar_signal(body)" in _src28)
+    # 2026-10-08: --log-file. The container's stdout was lost at the 10-07
+    # recreate; docudp tees what it prints into a rotating file under /logs.
+    import io as _io
+    import tempfile as _tf
+    from docworld import cli as _CLI
+    _td = _tf.mkdtemp(prefix="doc_logtee_")
+    _lp = os.path.join(_td, "docudp.log")
+    _con = _io.StringIO()
+    _tee = _CLI.RotatingTee(_con, _lp, 100, 2)
+    for _i in range(12):
+        _tee.write("line %02d %s\n" % (_i, "x" * 20))
+    _tee.flush()
+    _tee.f.close()
+    _files = sorted(f for f in os.listdir(_td))
+    _all = "".join(open(os.path.join(_td, f), encoding="utf-8").read()
+                   for f in ("docudp.log.2", "docudp.log.1", "docudp.log")
+                   if os.path.exists(os.path.join(_td, f)))
+    check("log tee: the console gets every line, the file rotates at its cap "
+          "and keeps .1/.2 only",
+          _con.getvalue().count("\n") == 12
+          and _files == ["docudp.log", "docudp.log.1", "docudp.log.2"]
+          and all(os.path.getsize(os.path.join(_td, f)) < 100 + 40 for f in _files)
+          and "line 11" in open(_lp, encoding="utf-8").read() + _all
+          and "line 00" not in _all, "%r" % _files)
+    _bad = _CLI.RotatingTee(_io.StringIO(), _lp, 0, 0)
+    _bad.f.close()
+    _bad.write("after close\n")
+    check("log tee: a file that fails is dropped with a notice, never raises",
+          _bad.f is None and "after close" in _bad.stream.getvalue()
+          and "FAILED" in _bad.stream.getvalue())
+    check("log tee: auto = /logs/docudp.log only when /logs is writable on a "
+          "POSIX host (the container); off = none",
+          _CLI.log_file_path("auto", logs_dir=_td)
+          == (os.path.join(_td, "docudp.log") if os.name == "posix" else None)
+          and _CLI.log_file_path("auto", logs_dir=os.path.join(_td, "nope")) is None
+          and _CLI.log_file_path("off") is None
+          and _CLI.log_file_path("/x/y.log") == "/x/y.log"
+          and D.build_parser().parse_args([]).log_file == "auto")
+    check("log tee: main() installs it before anything is printed",
+          "install_log_file(a)" in responder_source()
+          and responder_source().index("install_log_file(a)")
+          < responder_source().index("extra_selectors = "))
+    # 2026-10-08: the OE zones 243..248 (ev2130..2180) ship in no archive; a
+    # zone without its zone.cnf hangs the retail loader on black (0x0059ff4c
+    # re-requests z255 forever). Nothing served may name one.
+    from docworld import arenamaps as _AM
+    import doc_npc as _DN
+    import doc_missions as _DMS
+    _mz = (set(_DMS.ARCHIVE_ZONES.values())
+           | {r[0] for r in _DMS.MISSION_SETUP.values()}
+           | set(_AM.parse_map_zones("").values()) | {201})
+    check("zones: every zone the server can put in kind 2 by default "
+          "(missions, the map table, --gs-battle-zone 201) is installed",
+          all(_AM.zone_installed(z) for z in _mz),
+          "%r" % sorted(z for z in _mz if not _AM.zone_installed(z)))
+    check("zones: the OE story zones 243..248 and z255 are NOT installed; "
+          "the intro chain 240..242 is",
+          not any(_AM.zone_installed(z) for z in list(range(243, 249)) + [255])
+          and all(_AM.zone_installed(z) for z in (240, 241, 242, 217)))
+    try:
+        _AM.parse_map_zones("0:244")
+        _refused = False
+    except SystemExit:
+        _refused = True
+    check("zones: --battle-map-zones refuses an uninstalled zone (0:244)", _refused)
+    check("zones: kind 2's precedence falls back to --gs-battle-zone for an "
+          "uninstalled zone, and start-up refuses a bad --quest-zones",
+          "not zone_installed(z)" in responder_source()
+          and "are not in the client's install" in responder_source())
+    try:
+        _DN.parse_overrides("7:2")
+        _ev_ok = False
+    except SystemExit:
+        _ev_ok = True
+    check("quest events: --npc-events refuses the zone-jump / debug cases "
+          "2, 3, 998, 999 of quest.handle_event; a scene id passes",
+          _ev_ok and _DN.parse_overrides("7:1001") == {7: 1001}
+          and _DN.ZONE_JUMP_EVENTS == frozenset((2, 3, 998, 999)))
+    # 2026-10-08: TRADE, the retail flow (doc_trade.py; every arm run
+    # offline on the retail client)
+    import doc_trade as _DT
+    _tb = _DT.TradeBook()
+    _A, _B = 0x0004103C, 0x00041018
+    _ta, _ = _tb.request(41, _A, _DT.offer_body(41, _B, 5, []), online=lambda c: True)
+    check("trade: 41 is answered 45 (sets the inviter's trade-open bit; 46 left "
+          "it closed) and pushes 42 to the invitee with ident = the inviter",
+          _ta[0] == ("answer", 45) and _ta[1][1] == _B and _ta[1][2][1] == 42
+          and _ta[1][3] == _A)
+    _ta, _ = _tb.request(43, _B, _DT.offer_body(43, _A, 0, [(0x69320000, 1)]))
+    _tc, _ = _tb.request(49, _A, None)
+    check("trade: the invitee's 43 -> 46 + 44 to the inviter; the inviter's 49 "
+          "(not 47) completes",
+          _ta[0] == ("answer", 46) and _ta[1][2][1] == 44 and _tc[0][0] == "swap")
+    _tb.request(41, _A, _DT.offer_body(41, _B, 5, []))
+    _tx, _ = _tb.request(47, _B, None)
+    check("trade: 47 cancels: 48 to the partner voiced by the canceller (\"Trade "
+          "cancelled.\") and the canceller's own silent reset",
+          sorted((x[1], x[3]) for x in _tx) == sorted([(_A, _B), (_B, _B)])
+          and all(x[2][1] == 48 for x in _tx))
+    check("trade: the server answers with the action's selector and the push "
+          "ident, and command 23 tells the inviter (134 sub 7)",
+          "doc_trade.bare_body(_ta[1])" in responder_source()
+          and "trade_push(_ta[1], _ta[2], ident=_ta[3])" in responder_source()
+          and "_trade.accept(_acme)" in responder_source()
+          and _DT.entering_terms_body()[1] == 134
+          and struct.unpack_from("<I", _DT.entering_terms_body(), 12)[0] == 7)
+    # 2026-10-08: THE RULES RIDE SELECTOR 38. The retail 38 arm 0x00bd2ab0
+    # converts body[12..131] (0x00596ea8): wire+0 flags -> facade cfg+0 and
+    # wire+116 restrictions -> cfg+56; the client's friendly-fire filter
+    # (0x00bcdfc8) and Magic ban (kind 2 skips setMP) read them
+    # (run offline on the retail client). Kind 4 carries no rules.
+    _rf = (D.BT_FLAG_HAS_RESTRICT | D.BT_FLAG_FRIENDLY_FIRE | D.BT_FLAG_ITEM_RESTRICT
+           | D.BT_FLAG_CUSTOM_RESTRICT)
+    _rrec = bytearray(D.build_battletable_record(table_id=0x21, leader=0xA, cur=2,
+                                                 maximum=8, map_idx=7, mode=1,
+                                                 flags=_rf))
+    _rrec[D.BT_OFF_RESTRICT] = 0x3F
+    _rq = bytearray(D.HDR_LEN + 176)
+    _rq[0] = 0x04
+    struct.pack_into("<H", _rq, 2, len(_rq))
+    _rq[8] = 127
+    _r38 = D.gs_ready_roster(D.build_world_answer(bytes(_rq), selector=38, seq=0,
+                                                  subchannel=7, inner_ip=None,
+                                                  ptype=127, pad_to=176, ident=0xA),
+                             0xA, 1, [0xA, 0xB], rec=bytes(_rrec))
+    _rb = _r38[D.BODY_OFF + D.BATTLETABLE_REC_OFF:]
+    check("rules: selector 38 carries the table record's flags (wire+0) and "
+          "restrictions (wire+116) verbatim at body[12..] -- what the client's "
+          "converter 0x00596ea8 reads",
+          D.BATTLETABLE_REC_OFF == 12
+          and struct.unpack_from("<I", _rb, 0)[0] == _rf
+          and _rb[D.BT_OFF_RESTRICT] == 0x3F)
+    check("rules: kind 4 is named the battle RESULT, not a rules SETUP",
+          D.GS_NOTIFY_NAMES[4] == "battle RESULT")
+    # 2026-10-08: the retail 241 arms that read past body[12] get the retail
+    # shape, not the echoed request (run offline on the retail client)
+    from docworld import lobbycmd as _LC
+    _s30 = _LC.shaped_cmd_body(30)
+    _s28 = _LC.shaped_cmd_body(28)
+    _s31 = _LC.shaped_cmd_body(31)
+    _s14 = _LC.shaped_cmd_body(14)
+    check("lobby cmds: 30 = an empty stock list (count body[18] 0, gil body[20] 0); "
+          "28 never carries 9 at body[20]; 14 = 40 zero bytes at body[16..55]",
+          _s30[1] == 241 and struct.unpack_from("<H", _s30, 12)[0] == 30
+          and struct.unpack_from("<HI", _s30, 18) == (0, 0)
+          and struct.unpack_from("<I", _s28, 20)[0] != 9
+          and _s14[16:56] == bytes(40) and len(_s14) >= 56)
+    check("lobby cmds: 31 (accept a stock item) is REFUSED: failure bit at body[4], "
+          "code at body[6] -- the client adds nothing the server did not grant",
+          struct.unpack_from("<HH", _s31, 4) == (1, _LC.STOCK_REFUSE_CODE)
+          and struct.unpack_from("<H", _s31, 12)[0] == 31)
+    check("lobby cmds: the server sends the shaped 241 for 14/28/30/31, and "
+          "GS 56 -> 57 is the EMPTY stock list (not one row named by the charid)",
+          "_cmd in SHAPED_CMDS" in _src28
+          and "[(0, 0, seen_charid[0])]" not in _src28
+          and set(_LC.SHAPED_CMDS) == {14, 28, 30, 31})
     print("%d check(s) failed" % len(FAILS) if FAILS else "ALL PASS")
     return 1 if FAILS else 0
 

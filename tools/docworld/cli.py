@@ -61,6 +61,10 @@ exists precisely because we do not know: try each option and let the client say.
 The per-selector details are in the docstrings of the build_* functions below.
 """
 import argparse
+import os
+import sys
+import threading
+import time
 import doc_novice
 import doc_field
 import doc_npc_spawn
@@ -112,6 +116,162 @@ def members_on(a):
               % a.accounts_db, flush=True)
         return True
     return False
+
+
+#: 2026-10-08: --log-file auto. 64 MB x 10 rotated copies (OURS): a busy
+#: evening (10-05/06, about 20,000 datagrams, each with its hexdump) logs
+#: about 60 MB, so the set holds several days of play in under 1 GB.
+LOG_FILE_AUTO = "/logs/docudp.log"
+LOG_FILE_MAX_MB = 64.0
+LOG_FILE_KEEP = 10
+
+
+class RotatingTee(object):
+    """A text stream that writes to `stream` and appends to `path`, rotating
+    the file at `max_bytes` (path.1 .. path.keep). The console side always
+    gets the text; a file that cannot be written is dropped with one notice
+    on the console, never an exception into the server."""
+    FLUSH_S = 1.0
+
+    def __init__(self, stream, path, max_bytes, keep, lock=None):
+        self.stream, self.path = stream, path
+        self.max_bytes, self.keep = int(max_bytes), max(0, int(keep))
+        self.lock = lock or threading.Lock()
+        self.f = None
+        self.flushed = 0.0
+        self._open()
+
+    def _open(self):
+        self.f = open(self.path, "a", encoding="utf-8", errors="replace")
+
+    def _rotate(self):
+        self.f.close()
+        self.f = None
+        if self.keep:
+            for i in range(self.keep - 1, 0, -1):
+                src = "%s.%d" % (self.path, i)
+                if os.path.exists(src):
+                    os.replace(src, "%s.%d" % (self.path, i + 1))
+            os.replace(self.path, self.path + ".1")
+        else:
+            os.remove(self.path)
+        self._open()
+
+    def _drop(self, ex):
+        f, self.f = self.f, None
+        try:
+            if f is not None:
+                f.close()
+        except OSError:
+            pass
+        try:
+            self.stream.write("[docudp] --log-file %s FAILED (%s); logging to the "
+                              "console only\n" % (self.path, ex))
+        except (OSError, ValueError):
+            pass
+
+    def write(self, text):
+        n = self.stream.write(text)
+        with self.lock:
+            if self.f is not None:
+                try:
+                    self.f.write(text)
+                    if self.max_bytes > 0 and self.f.tell() >= self.max_bytes:
+                        self._rotate()
+                except (OSError, ValueError) as ex:
+                    self._drop(ex)
+        return n
+
+    def flush(self, force=False):
+        try:
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+        # the server flushes after nearly every line; the FILE is flushed at
+        # most every FLUSH_S (a datagram's hexdump is a dozen lines, and a
+        # flush per line made a loopback run miss its own battle clock)
+        now = time.time()
+        with self.lock:
+            if self.f is not None and (force or now - self.flushed >= self.FLUSH_S):
+                try:
+                    self.f.flush()
+                    self.flushed = now
+                except (OSError, ValueError) as ex:
+                    self._drop(ex)
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def log_file_path(spec, logs_dir="/logs"):
+    """--log-file's file, or None (off)."""
+    s = (spec or "").strip()
+    if s.lower() in ("", "off", "none", "0"):
+        return None
+    if s.lower() == "auto":
+        # the container's mount; a Windows checkout's \logs on the current
+        # drive is somebody else's directory (and a loopback run must not
+        # write a second copy of every line there)
+        if (os.name == "posix" and os.path.isdir(logs_dir)
+                and os.access(logs_dir, os.W_OK)):
+            return os.path.join(logs_dir, os.path.basename(LOG_FILE_AUTO))
+        return None
+    return s
+
+
+def install_log_file(a):
+    """Tee sys.stdout and sys.stderr into --log-file (one shared file and
+    lock). Returns the path, or None when off or unwritable."""
+    path = log_file_path(getattr(a, "log_file", "auto"))
+    if not path:
+        return None
+    lock = threading.Lock()
+    max_b = int(float(getattr(a, "log_file_max_mb", LOG_FILE_MAX_MB)) * 1024 * 1024)
+    keep = int(getattr(a, "log_file_keep", LOG_FILE_KEEP))
+    try:
+        out = RotatingTee(sys.stdout, path, max_b, keep, lock)
+    except OSError as ex:
+        print("[docudp] --log-file %s not opened (%s); console only" % (path, ex),
+              flush=True)
+        return None
+    import atexit
+    atexit.register(out.flush, True)
+    sys.stdout = out
+    # stderr (tracebacks) goes into the same file object, so a rotation is
+    # seen by both streams
+    sys.stderr = _SharedTee(sys.stderr, out)
+    print("[docudp] LOG FILE %s (rotated at %.0f MB, %d kept): everything printed "
+          "here is also kept there" % (path, max_b / 1048576.0, keep), flush=True)
+    return path
+
+
+class _SharedTee(object):
+    """stderr's side: the console's stderr, plus the stdout tee's file."""
+
+    def __init__(self, stream, tee):
+        self.stream, self.tee = stream, tee
+
+    def write(self, text):
+        n = self.stream.write(text)
+        with self.tee.lock:
+            if self.tee.f is not None:
+                try:
+                    self.tee.f.write(text)
+                    if self.tee.max_bytes > 0 and self.tee.f.tell() >= self.tee.max_bytes:
+                        self.tee._rotate()
+                except (OSError, ValueError) as ex:
+                    self.tee._drop(ex)
+        return n
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+        self.tee.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
 
 
 def build_parser():
@@ -767,6 +927,19 @@ def build_parser():
                          "the end (9 at most, FFCheats) and cut them from its "
                          "bag (kind 21) before the result. off = coins stay "
                          "in the bag and pay nothing (the old behaviour).")
+    ap.add_argument("--log-file", default="auto",
+                    help="2026-10-08: tee everything docudp prints (stdout and "
+                         "stderr) into this file as well, rotated by size "
+                         "(--log-file-max-mb, --log-file-keep). The container's "
+                         "own log is lost when it is recreated, and most features "
+                         "log nowhere else. auto (the default) = "
+                         + LOG_FILE_AUTO + " when /logs is a writable directory "
+                         "(the mount --battle-capture and --save use, on a POSIX host), else off; "
+                         "off = no file.")
+    ap.add_argument("--log-file-max-mb", type=float, default=LOG_FILE_MAX_MB,
+                    help="rotate --log-file once it passes this size (MB)")
+    ap.add_argument("--log-file-keep", type=int, default=LOG_FILE_KEEP,
+                    help="rotated --log-file copies kept (.1 newest .. .N oldest)")
     ap.add_argument("--battle-capture", default="",
                     help="2026-09-24: append one JSON line per relayed P2P "
                          "battle datagram and per game-server request (not "

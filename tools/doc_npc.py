@@ -194,20 +194,36 @@ FOLLOWUP = {
 }
 
 
+#: 2026-10-08: the quest event ids the retail quest.handle_event (Java,
+#: 0x009c3d60) turns into a ZONE CHANGE or a debug screen rather than an NPC
+#: scene: 2 = KerberosZone.exit(250) (the "zone_jump_test" stub), 3 = the
+#: debug novice dialog, 998 / 999 = jumpToUp / jumpToUnder (mode switches
+#: that never leave the zone). 1 (exit(240), the new-player intro) is the
+#: intro push's own and stays allowed. None of them is an NPC's answer.
+ZONE_JUMP_EVENTS = frozenset((2, 3, 998, 999))
+
+
 def parse_overrides(spec):
     """'7:1001,15:2000' -> {7: 1001, 15: 2000}; '4:2:305' -> {(4, 2): 305}.
 
     Two fields are trigger:event (the walk-up answer, b-blind, as before);
-    three are trigger:b:event, which pins one follow-up only."""
+    three are trigger:b:event, which pins one follow-up only. An event in
+    ZONE_JUMP_EVENTS is refused (it sends the player to a test zone or a
+    debug screen, not a scene)."""
     out = {}
     for part in (spec or "").replace(" ", "").split(","):
         if not part:
             continue
         f = part.split(":")
+        ev = int(f[-1], 0)
+        if ev in ZONE_JUMP_EVENTS:
+            raise SystemExit("--npc-events %r: event %d is a zone jump / debug "
+                             "case of quest.handle_event, not an NPC scene"
+                             % (part, ev))
         if len(f) >= 3:
-            out[(int(f[0], 0), int(f[1], 0))] = int(f[2], 0)
+            out[(int(f[0], 0), int(f[1], 0))] = ev
         else:
-            out[int(f[0], 0)] = int(f[1], 0)
+            out[int(f[0], 0)] = ev
     return out
 
 

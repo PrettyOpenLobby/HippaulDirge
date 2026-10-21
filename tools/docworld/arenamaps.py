@@ -186,6 +186,25 @@ BT_MAP_ZONES_DEFAULT = ("0:201,1:202,2:203,3:204,4:205,5:206,6:207,7:208,"
                         "23:233,24:234,25:235,26:236,27:237")
 
 
+#: 2026-10-08: every zone whose zone.cnf the client has: the retail install
+#: (file.txt, 13,526 rows), the 20060124_3 patch and the served P2U-0010
+#: overlay list the same 76 (z132 is in none). The zone loader (retail
+#: 0x0059fd30) re-requests z255/zone.cnf FOREVER when a zone's zone.cnf is
+#: missing (state 3, 0x0059ff4c), and z255 ships nowhere: the player sits on
+#: a black screen with no error. The online story's OE zones 243..248 (and
+#: their ev2130..2180) are in no archive, so nothing the server sends may
+#: name a zone outside this set.
+CLIENT_ZONES = frozenset(
+    list(range(128, 132)) + list(range(133, 161)) + list(range(180, 200))
+    + list(range(201, 218)) + list(range(220, 225)) + list(range(230, 238))
+    + [240, 241, 242, 250])
+
+
+def zone_installed(zone):
+    """True when the client ships zone `zone`'s zone.cnf (CLIENT_ZONES)."""
+    return int(zone) in CLIENT_ZONES
+
+
 def parse_map_zones(spec):
     """--battle-map-zones: `IDX:ZONE[,IDX:ZONE...]`, or off/none for an empty
     table.  Returns {roster map index: arena zone}."""
@@ -210,6 +229,10 @@ def parse_map_zones(spec):
                              "(1..255): kind 2 carries the zone in ONE byte "
                              "(rec+26), and 0 is get_onlinezone's exit(-1) = "
                              "the title" % z)
+        if not zone_installed(z):
+            raise SystemExit("--battle-map-zones zone %d is not in the client's "
+                             "install (arenamaps.CLIENT_ZONES): the zone loader "
+                             "would wait for it forever on a black screen" % z)
         out[i] = z
     return out
 

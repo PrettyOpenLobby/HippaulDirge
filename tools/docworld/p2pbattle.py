@@ -315,6 +315,40 @@ def p2p_damage_entries(payload):
     return out
 
 
+def strip_team_damage(plain, same_side):
+    """2026-10-08: FRIENDLY FIRE OFF (the table record's flags bit 0x04 clear,
+    the config row 26:165 "FF" shows only when it is on). The victim's own
+    client applies a relayed 113 entry to its HP (doc_mp_heal_proof: each
+    target applies its own entries), so a teammate's hit is stopped at the
+    relay: entries whose attacker and victim are on one side and whose
+    damage is positive (a Cure is a NEGATIVE entry and stays) are cut out of
+    the datagram before it is forwarded. `same_side(attacker, victim)` ->
+    True when both are seated members of one team. Returns (datagram,
+    dropped entries); the datagram is None when nothing is left to relay."""
+    b = plain[framing.BODY_OFF:]
+    if len(b) < 4:
+        return plain, []
+    n = struct.unpack_from("<I", b, 0)[0]
+    kept, dropped = [], []
+    for i in range(min(n, (len(b) - 4) // P2P_DAMAGE_ENTRY)):
+        e = struct.unpack_from("<IiII", b, 4 + P2P_DAMAGE_ENTRY * i)
+        victim, damage, attacker = e[0], e[1], e[2]
+        if damage > 0 and same_side(attacker, victim):
+            dropped.append(e)
+        else:
+            kept.append(e)
+    if not dropped:
+        return plain, []
+    if not kept:
+        return None, dropped
+    body = bytearray(struct.pack("<I", len(kept)))
+    for e in kept:
+        body += struct.pack("<IiII", *e)
+    out = bytearray(plain[:framing.BODY_OFF]) + body
+    struct.pack_into("<H", out, 2, len(out))
+    return bytes(out), dropped
+
+
 def synth_peer_inner(data):
     """An `inner` for a position datagram whose header we cannot decrypt:
     the plaintext header the client's own peer 0x83 carries (type 0x83, flags
