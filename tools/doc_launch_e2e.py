@@ -21,6 +21,12 @@ the real docudp main() with --stats / --shop:
                                result)
 
     python doc_launch_e2e.py            # ~75 s
+
+Each step waits for what it needs (the answer on the socket, or the server's
+own log line for the state it reached) up to WAIT_S, instead of sleeping a
+fixed time: the first request on a fresh database runs its migrations, and a
+loaded machine can take seconds to answer. Only the silences the checks are
+about (B in the running room, both members after the end) are timed.
 """
 import io
 import os
@@ -41,6 +47,8 @@ from doc_battle_e2e import world_req, gs_req, check, FAILS   # noqa: E402
 
 PORT = int(os.environ.get("DOC_E2E_PORT", "41573"))
 TMP = os.environ.get("TEMP", HERE)
+#: how long a step waits for its answer or its log line before giving up
+WAIT_S = float(os.environ.get("DOC_E2E_WAIT_S", "15"))
 N_CID, L_CID = 0x0002A664, 0x00041018
 A_CID, B_CID, C_CID = 0x00051001, 0x00052002, 0x00053003
 
@@ -63,15 +71,45 @@ def drain(sock):
     return got
 
 
+def answer(sock, selector):
+    """The first datagram on `sock` with `selector`, waiting up to WAIT_S;
+    None when none came."""
+    deadline = time.time() + WAIT_S
+    while time.time() < deadline:
+        try:
+            p = sock.recv(65535)
+        except socket.timeout:
+            continue
+        if sel_of(p) == selector:
+            return p
+    return None
+
+
+def log_has(log_path, text, count=1):
+    with io.open(log_path, encoding="utf-8", errors="replace") as f:
+        return f.read().count(text) >= count
+
+
+def wait_log(log_path, text, count=1):
+    """Wait up to WAIT_S until the server log holds `text` at least `count`
+    times. A miss is printed and left to the checks that follow."""
+    deadline = time.time() + WAIT_S
+    while not log_has(log_path, text, count):
+        if time.time() >= deadline:
+            print("  ..  gave up waiting for the log line %r" % text)
+            return False
+        time.sleep(0.1)
+    return True
+
+
 def door(sock, cid):
     """A world door (1 -> 2) for `cid`: its answer body, or None."""
     tail = bytearray(80)
     struct.pack_into("<I", tail, 80 - 12, cid)        # body[80] = the selected char
     drain(sock)
     sock.sendto(world_req(cid, 1, bytes(tail)), ("127.0.0.1", PORT))
-    time.sleep(0.6)
-    d = [p for p in drain(sock) if sel_of(p) == 2]
-    return d[0][D.BODY_OFF:] if d else None
+    p = answer(sock, 2)
+    return p[D.BODY_OFF:] if p is not None else None
 
 
 def door_bag(b):
@@ -164,20 +202,21 @@ def run_door():
                                          flags=D.BT_FLAG_MISSION,
                                          mission=G.SOLDIER_MASK_EXAM)
         c.sendto(world_req(N_CID, D.BT_REQ_CREATE, bytes(rec)), dst)
-        time.sleep(0.6)
+        wait_log(lp, "CREATE -> table 1 ")
         c.sendto(world_req(N_CID, D.LOBBY_CMD_SELECTOR_REQ,
                            struct.pack("<II", D.LOBBY_CMD_START, 0)), dst)
-        time.sleep(0.6)
+        wait_log(lp, "leader 0x%08x START at table 1" % N_CID)
         c.sendto(gs_req(N_CID, 31, arg=0, session=1), dst)
-        time.sleep(4.0)
+        wait_log(lp, "[battle] ROOM OPENED for table 1")
         c.sendto(gs_req(N_CID, 47, session=1), dst)
-        time.sleep(2.0)
+        wait_log(lp, "[battle] table 1 shared GO: clock STARTED")
         drain(c)
         for i in range(10):
             c.sendto(gs_req(N_CID, 30, arg=N_CID, hdr_arg=0x7F000001 + i,
                             session=1), dst)
             time.sleep(0.15)
-        time.sleep(3.0)
+        # the server saves the wallet before it logs the clear
+        wait_log(lp, "cleared the Drone 2nd exam: Soldier Mask OWED")
         drain(c)
         w = docpg.read(shop)
         check("[door] the exam clear OWES N the mask (wallet smask_due)",
@@ -209,15 +248,14 @@ def run_rp():
             comment="rp", flags=D.BT_FLAG_MAX_RP))
         struct.pack_into("<I", rec, D.BT_OFF_MAX_RP, 500)
         ca.sendto(world_req(A_CID, D.BT_REQ_CREATE, bytes(rec)), dst)
-        time.sleep(0.6)
+        answer(ca, D.BT_REQ_CREATE + 1)
         drain(ca)
         res = {}
         for cid, cs in ((B_CID, cb), (C_CID, cc)):
             cs.sendto(world_req(cid, D.BT_REQ_JOIN, struct.pack("<H", 1)), dst)
-            time.sleep(0.6)
-            a21 = [p for p in drain(cs) if sel_of(p) == D.BT_REQ_JOIN + 1]
-            res[cid] = (struct.unpack_from("<i", a21[0], D.BODY_OFF + 12)[0]
-                        if a21 else None)
+            a21 = answer(cs, D.BT_REQ_JOIN + 1)
+            res[cid] = (struct.unpack_from("<i", a21, D.BODY_OFF + 12)[0]
+                        if a21 is not None else None)
     finally:
         text = stop(srv, log, lp)
     check("[rp] no traceback", "Traceback" not in text)
@@ -241,23 +279,30 @@ def run_drop():
                                                    maximum=6, map_idx=3,
                                                    mode=1, comment="drop"))
         ca.sendto(world_req(A_CID, D.BT_REQ_CREATE, bytes(rec)), dst)
-        time.sleep(0.6)
+        wait_log(lp, "CREATE -> table 1 ")
         cb.sendto(world_req(B_CID, D.BT_REQ_JOIN, struct.pack("<H", 1)), dst)
-        time.sleep(0.6)
+        wait_log(lp, "JOIN table 1 by 0x%08x -> 0 (seated)" % B_CID)
         ca.sendto(world_req(A_CID, D.LOBBY_CMD_SELECTOR_REQ,
                             struct.pack("<II", D.LOBBY_CMD_START, 0)), dst)
-        time.sleep(0.8)
+        wait_log(lp, "leader 0x%08x START at table 1" % A_CID)
         ca.sendto(gs_req(A_CID, 31, arg=0, session=1), dst)
         cb.sendto(gs_req(B_CID, 31, arg=1, session=1), dst)
-        time.sleep(3.0)
+        # both on a team and the distribution out: the room is open
+        wait_log(lp, "(PLAYER DISTRIBUTION)")
         ca.sendto(gs_req(A_CID, 47, session=1), dst)
         cb.sendto(gs_req(B_CID, 47, session=1), dst)
-        # A keeps talking (the in-battle stream); B falls silent
-        t_end = time.time() + 40.0
+        # both arrived (B's 47 is the last thing it sends) and the clock runs
+        wait_log(lp, "rides the room's shared GO", count=2)
+        wait_log(lp, "[battle] table 1 shared GO: clock STARTED")
+        # A keeps talking (the in-battle stream) until the room's clock ends
+        # it; B falls silent
+        t_end = time.time() + 34.0 + 3 * WAIT_S
         while time.time() < t_end:
             ca.sendto(gs_req(A_CID, 24, session=1), dst)   # the 1 Hz report
             time.sleep(1.0)
             drain(ca)
+            if log_has(lp, "[battle] END table 1"):
+                break
         drain(cb)
         time.sleep(7.0)                          # both silent AFTER the end
         drain(ca)
