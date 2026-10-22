@@ -23,7 +23,8 @@
     p2pbattle.py     The battle layer between consoles (P2P types): decoding shots, damage and pick-ups the server has to see.
     fielditems.py    Items on the battlefield: field item notices, capsules (pick-up, drop, hold, scoreboard) and dropped items.
     cli.py           The command line (--help): the tool's usage text and every flag.
-    worldserver.py   main(): the socket, the per-session state and the event loop that answers every datagram, and the --sweep table.
+    adminport.py     The OpenLobby admin port (POL_DOC_ADMIN_PORT): the panel's pages and gifts, run on the loop thread.
+    worldserver.py   main():the socket, the per-session state and the event loop that answers every datagram, and the --sweep table.
 
 docudp.py (one directory up) is the entry point and the compatibility
 facade over these modules.

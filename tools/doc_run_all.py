@@ -135,6 +135,8 @@ E2E = [
     ("doc_unit_charid_e2e",    [PY, "doc_unit_charid_e2e.py"]),
     # the weekly close
     ("doc_weekly_e2e",         [PY, "doc_weekly_e2e.py"]),
+    # the OpenLobby admin port: its pages over HTTP, the gifts, the online refusal
+    ("doc_adminport_e2e",      [PY, "doc_adminport_e2e.py"]),
     # two consoles behind one address
     ("doc_session_nat",        [PY, os.path.join("..", "tests",
                                                  "test_doc_session_nat.py")]),

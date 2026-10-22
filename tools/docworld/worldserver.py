@@ -27,7 +27,7 @@ import doc_gear
 import doc_magic
 import doc_items
 from .deps import _KELCRYPT, doc_kelcrypt
-from . import advertise, arenadata, arenamaps, battleroom, briefingroom, charrecords, cli, fielditems, framing, gamemsg, handshake, lobbycmd, p2pbattle, peerrecords, questlist, tablerecords, tableverbs, teamdist, userlist, worldchannel, worlddoor, worldpose
+from . import adminport, advertise, arenadata, arenamaps, battleroom, briefingroom, charrecords, cli, fielditems, framing, gamemsg, handshake, lobbycmd, p2pbattle, peerrecords, questlist, tablerecords, tableverbs, teamdist, userlist, worldchannel, worlddoor, worldpose
 
 
 
@@ -624,13 +624,14 @@ def main():
                      "relay_pushed", "relay_wu", "ip", "key", "account_key",
                      "token", "pos_id", "gs_battle_on",
                      "gs_battle_end", "gs_battle_reset", "gs_battle_go",
-                     "suit_item")
+                     "suit_item", "since")
 
         def __init__(self, ip=None, port=0):
             self.ip = ip                  # sec 4ft: the key's address
             self.key = (ip, port)         # sec 4gz: the registry key, (ip, port)
             self.account_key = None       # sec 4ft: resolved lazily by _skey
             self.token = None             # the credential blob off the entrance or world door
+            self.since = time.time()      # 2026-10-21: first heard (the admin port's Players)
             self.chara_burst_at = None
             self.chara_pending = None
             self.frag3_pending = None
@@ -1084,7 +1085,7 @@ def main():
         "gs_rearm_pending", "gs_battle_on", "gs_battle_end", "gs_battle_reset", "gs_battle_go",
         "gs_seq", "last_pose", "last_wu", "seen_uid", "seen_charid", "wire_cid",
         "last_stream", "save_count", "roster_uid", "pos_id", "account_key",
-        "token", "chara_pending", "chara_burst_at", "suit_item")
+        "token", "chara_pending", "chara_burst_at", "suit_item", "since")
     _INHERIT_DICT = (        # merged into the box we already hold
         "gs_teams", "chara_kw", "chara_ids", "relay_pushed", "relay_wu")
     _INHERIT_RETARGET = (    # an endpoint: kept as a FLAG, aimed at the new port
@@ -4938,6 +4939,20 @@ def main():
             due.append(_wd)
         return min(due) if due else None
 
+    # 2026-10-21: the OpenLobby admin port (adminport.py), off unless
+    # POL_DOC_ADMIN_PORT is set. Its pages read and change this loop's state
+    # ONLY through the bridge: the HTTP thread queues a function and pokes
+    # `_admin.wake`, and the loop runs it below between datagrams, so the
+    # single-threaded rule pace_sends relies on still holds.
+    import types as _types
+    _admin = adminport.start(_types.SimpleNamespace(
+        a=a, sessions=sessions, players=players, bt_store=bt_store,
+        battles=battles, gs_tables=gs_tables, store=_store, shop=_shop,
+        units=_units, rank=_rank, stats=_stats, gear=_gearstore,
+        playtime=_playtime, wallet_key=_wallet_key, chat_where=chat_where,
+        briefing_running=_briefing_running))
+    _rd_set = [s] if _admin is None else [s, _admin.wake]
+
     while True:
         # sec 4fq: HELD FRAG3 + timers for EVERY client session, on our clock.
         _now = datetime.datetime.now().timestamp()
@@ -5043,8 +5058,14 @@ def main():
                 print("  [stats] weekly close FAILED:\n%s"
                       % traceback.format_exc(), flush=True)
         _dl = next_deadline(_now)
-        if _dl is not None:
-            if not select.select([s], [], [], max(0.0, _dl - _now))[0]:
+        if _dl is not None or _admin is not None:
+            _ready = select.select(_rd_set, [], [], None if _dl is None
+                                   else max(0.0, _dl - _now))[0]
+            if _admin is not None and _admin.wake in _ready:
+                _admin.drain()                     # the admin port's reads / gifts
+                if s not in _ready:
+                    continue                       # the next pass recomputes the timers
+            if not _ready:
                 _t = datetime.datetime.now().timestamp()
                 for _sess in list(sessions.values()):
                     fire_keepalives(_sess, _t)
